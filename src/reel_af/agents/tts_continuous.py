@@ -1,54 +1,73 @@
 """Continuous TTS — one TTS call for the full script, split on silences.
 
-This solves TWO problems the per-segment approach had:
+Uses AgentField's OpenRouterProvider.generate_audio() for the actual call
+(NEVER bypasses the SDK — all provider calls go through AgentField).
 
-(1) DISCRETE WORDS — per-segment calls have no prosody continuity, so every
-    sentence dies flat at the period. Generating the whole script in one
-    call carries intonation across sentence boundaries.
+This solves DISCRETE WORDS — per-segment calls have no prosody continuity,
+so every sentence dies flat at the period. Generating the whole script in
+one call carries intonation across sentence boundaries.
 
-(2) MODEL RESPONDS INSTEAD OF READING — the SDK's generate_audio helper
-    sends ONLY a user message, so gpt-audio-mini treats it as a chat
-    prompt and may RESPOND ("Sure, I can help with that…") instead of
-    reading it. We bypass the SDK here and call OpenRouter directly with a
-    SYSTEM message that tells the model to read verbatim, plus EMOTION
-    direction (pace, emphasis, where to pause).
+Known SDK gap (worth filing upstream):
+  OpenRouterProvider.generate_audio() hardcodes
+  messages=[{"role":"user","content":text}] with no way to inject a
+  system message. Without a system role, chat-completions audio models
+  like gpt-audio-mini may RESPOND to the script ("Sure, I can help…")
+  instead of READING it verbatim as narrator. We work around this by
+  prepending compact narrator directives to the user text so the model
+  treats the whole payload as a "read this verbatim" task.
 
 Approach:
-  1. Direct chat-completions call with system + user messages, audio modality.
-  2. Stream the SSE response; accumulate base64 PCM16 chunks.
-  3. Wrap raw PCM as WAV with our SDK helper.
-  4. Use ffmpeg `silencedetect` to find sentence-boundary silences.
-  5. Split at silence midpoints; assign per-scene clips.
-  6. Fall back to proportional-by-word-count splits if silence count is off.
+  1. SDK generate_audio() with format='wav' (returns complete WAV bytes
+     base64-encoded — no PCM-wrapping needed).
+  2. Write the wav, run ffmpeg `silencedetect` to find sentence-boundary
+     silences.
+  3. Split at silence midpoints; assign per-scene clips.
+  4. Fall back to proportional-by-word-count splits if silence count is off.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
-import json
+import io
 import os
 import re
 import subprocess
+import wave
 from pathlib import Path
 from typing import Optional
 
-import aiohttp
-
-# SDK helper for wrapping raw PCM16 → WAV (the one we built in PR #579).
-from agentfield.media_providers import _wrap_pcm16_bytes_as_wav
+from agentfield.media_providers import OpenRouterProvider
 
 from reel_af.agents.scene_breaker import Scene
 from reel_af.models import BeatArtifact
 
-# Default model: gpt-audio-mini via chat-completions audio modality.
-DEFAULT_TTS_MODEL = "openrouter/openai/gpt-audio-mini"
-OPENROUTER_BASE = "https://openrouter.ai/api/v1"
-
-# OpenAI audio TTS sample rate (gpt-audio family streams PCM16 @ 24kHz).
+# gpt-audio family streams PCM16 @ 24kHz mono.
 TTS_SAMPLE_RATE = 24000
 
-# Voice map by tone — gpt-audio supports the OpenAI TTS voice set.
+
+def _wrap_pcm16_bytes_as_wav(
+    pcm: bytes, sample_rate: int = TTS_SAMPLE_RATE, channels: int = 1
+) -> bytes:
+    """Wrap raw little-endian 16-bit PCM samples in a WAV container.
+
+    Required because the SDK's generate_audio() hardcodes stream=true,
+    and OpenRouter only accepts format='pcm16' when streaming — so we get
+    raw PCM back and must add the WAV header ourselves (stdlib only).
+    """
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(channels)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm)
+    return buf.getvalue()
+
+# Default model: gpt-audio-mini via chat-completions audio modality.
+DEFAULT_TTS_MODEL = "openrouter/openai/gpt-audio-mini"
+
+# Voice map by tone — SDK clamps unknown voices to "alloy", so we ensure
+# every value here is in the supported set (alloy/echo/fable/onyx/nova/shimmer).
 _VOICE_BY_TONE: dict[str, str] = {
     "urgent":  "onyx",      # deep, serious — gravitas
     "wonder":  "nova",      # warm, curious
@@ -63,114 +82,61 @@ def voice_for_tone(tone: str) -> str:
     return _VOICE_BY_TONE.get(tone, "nova")
 
 
-# ───── Direct OpenRouter chat-audio call (with system prompt) ────────
+# ───── Narrator directive (compensates for SDK's no-system-message gap) ─
 
 
-def _build_narrator_system_prompt(tone: str) -> str:
-    """The system message that turns a chat model into a narrator.
+def _wrap_as_narration(script: str, tone: str) -> str:
+    """Wrap the script with an inline narrator directive.
 
-    CRITICAL: explicitly tells the model not to respond to the user text —
-    just READ it. Plus emotion direction the model uses to shape delivery.
+    The SDK's generate_audio() only takes a single user message, so we
+    can't pass a system role to coerce the model into 'read verbatim'
+    mode. We embed the directive inline. The DIVIDER block makes it
+    visually obvious to the model where the literal script begins.
     """
-    return f"""You are a professional voiceover artist reading a vertical
-short-form video narration aloud.
-
-ABSOLUTE RULE: Read the user message EXACTLY AS WRITTEN, word-for-word.
-DO NOT respond to it, greet, explain, apologize, comment, or add ANY
-words of your own. The user message IS the script. Read it.
-
-DELIVERY DIRECTION:
-  • Tone: {tone}. Match this emotional register throughout.
-  • Pace: vary deliberately. Open with energy. Slow on key revelations.
-    Bring the final sentence in WEIGHTY and SLOW — let it LAND.
-  • Em-dashes (—): a deliberate pause, then emphasise what follows.
-  • Single-word periods ("Wrong.", "Dead.", "Down."): punchy beats. Brief,
-    impactful, then pause.
-  • ALL CAPS WORDS: lean in — slightly higher pitch + volume + intent.
-  • Commas: small breath. Don't ignore them; they're pacing.
-  • Question marks: rising inflection that genuinely asks.
-
-You're not reading documentation. You're a narrator telling a story for a
-20-second vertical video that needs to STOP a thumb mid-scroll. Bring
-real performance. Vary your pitch and pace like a human would."""
+    return (
+        f"You are a professional vertical-video narrator. Read EVERY word "
+        f"between the dividers below EXACTLY as written, with a {tone} "
+        f"tone. Do not greet, comment, summarise, or add ANY words of "
+        f"your own. Vary pace deliberately. Em-dashes are a deliberate "
+        f"pause. Single-word periods are punchy beats. ALL CAPS WORDS "
+        f"are emphasised. The last sentence lands slow and weighty.\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{script}\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    )
 
 
-async def _direct_chat_audio(
+# ───── SDK-based TTS via OpenRouterProvider.generate_audio() ─────────
+
+
+async def _sdk_generate_wav(
     full_script: str,
     voice: str,
     tone: str,
     model: str,
-    api_key: str,
     timeout: float = 300.0,
 ) -> bytes:
-    """Direct call to OpenRouter /chat/completions with audio modality.
+    """Generate a complete WAV via AgentField's SDK.
 
-    Returns raw PCM16 bytes (24kHz mono) that the caller wraps in WAV.
-
-    Why direct instead of SDK: SDK's generate_audio sends only a user
-    message, so chat models RESPOND instead of READ. We need a system
-    message for both correctness (read verbatim) AND emotion.
+    Returns ready-to-write WAV bytes (header + PCM16). All transport,
+    streaming, and decoding happens inside OpenRouterProvider — we never
+    touch HTTP. We request format='pcm16' (the only one the SDK's hardcoded
+    stream=true allows) and slap a WAV header on the raw samples.
     """
-    payload = {
-        "model": model.removeprefix("openrouter/"),
-        "messages": [
-            {"role": "system", "content": _build_narrator_system_prompt(tone)},
-            {"role": "user", "content": full_script},
-        ],
-        "modalities": ["text", "audio"],
-        "audio": {"voice": voice, "format": "pcm16"},
-        "stream": True,
-    }
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-    client_timeout = aiohttp.ClientTimeout(total=timeout)
-
-    pcm_chunks: list[bytes] = []
-    async with aiohttp.ClientSession(timeout=client_timeout) as session:
-        async with session.post(
-            f"{OPENROUTER_BASE}/chat/completions", json=payload, headers=headers,
-        ) as resp:
-            if resp.status != 200:
-                body = await resp.text()
-                raise RuntimeError(
-                    f"tts_continuous: chat-audio call failed ({resp.status}): "
-                    f"{body[:500]}"
-                )
-            # Stream SSE; accumulate audio delta chunks.
-            buf = b""
-            done = False
-            async for raw in resp.content.iter_any():
-                if done:
-                    break
-                buf += raw
-                while b"\n" in buf:
-                    line, buf = buf.split(b"\n", 1)
-                    line_str = line.decode("utf-8", errors="replace").strip()
-                    if not line_str.startswith("data: "):
-                        continue
-                    data = line_str[6:]
-                    if data == "[DONE]":
-                        done = True
-                        break
-                    try:
-                        event = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    for choice in event.get("choices", []):
-                        delta = choice.get("delta", {})
-                        audio_delta = delta.get("audio") or {}
-                        b64 = audio_delta.get("data")
-                        if b64:
-                            try:
-                                pcm_chunks.append(base64.b64decode(b64))
-                            except Exception:
-                                continue
-
-    if not pcm_chunks:
-        raise RuntimeError("tts_continuous: no audio chunks returned by model")
-    return b"".join(pcm_chunks)
+    provider = OpenRouterProvider()
+    response = await provider.generate_audio(
+        text=_wrap_as_narration(full_script, tone),
+        model=model,
+        voice=voice,
+        format="pcm16",
+        timeout=timeout,
+    )
+    if response.audio is None or not response.audio.data:
+        raise RuntimeError(
+            f"tts_continuous: SDK generate_audio returned no audio for model {model}"
+        )
+    pcm = base64.b64decode(response.audio.data)
+    return _wrap_pcm16_bytes_as_wav(pcm)
 
 
 # ───── Silence-detection helpers ─────────────────────────────────────
@@ -302,22 +268,16 @@ async def generate_continuous_audio(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     tts_model = model or os.environ.get("REEL_AF_TTS_MODEL", DEFAULT_TTS_MODEL)
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY not set")
 
-    # Direct OpenRouter call WITH a system prompt — telling the model to
-    # READ verbatim (not respond to the user message) and giving it
-    # explicit emotion direction.
-    pcm = await _direct_chat_audio(
+    # All transport happens inside the AgentField SDK. Narrator direction
+    # is embedded in the user text (see SDK gap noted in module docstring).
+    wav_bytes = await _sdk_generate_wav(
         full_script=full_script,
         voice=voice,
         tone=tone,
         model=tts_model,
-        api_key=api_key,
     )
     full_audio_path = out_dir / "full.wav"
-    wav_bytes = _wrap_pcm16_bytes_as_wav(pcm, sample_rate=TTS_SAMPLE_RATE)
     full_audio_path.write_bytes(wav_bytes)
 
     # Find silences and split.

@@ -34,41 +34,61 @@ async def run_pipeline(app: Any, url: str, out_dir: Path, run_id: str) -> dict:
     timings: dict[str, float] = {}
     t_total = time.time()
 
-    # 1. Navigate
+    # ───────────────────────────────────────────────────────────────
+    # Pipeline parallelism (mirrors the app.py workflow DAG):
+    #   navigate → distill
+    #     ↓
+    #     ├── story_router (compose) ──┐
+    #     └── build_vocabulary       *─┤   (vocab only needs summary)
+    #                                  ↓
+    #                               break_scenes
+    #                                  ↓
+    #     ┌── direct_shots_v2 ─── continuous_tts *  (audio only needs script+scenes)
+    #     ↓
+    #     generate_videos        ← audio still streaming
+    #     ↓
+    #     await audio
+    #     ↓
+    #     stitch
+    # ───────────────────────────────────────────────────────────────
+    media_dir = out_dir / "media"
+
+    # 1. Navigate (serial root).
     t = time.time()
     source = await navigate(app, url)
     timings["navigate"] = time.time() - t
 
-    # 2. Distill
+    # 2. Distill (serial — needs source).
     t = time.time()
     summary = await distill(app, source)
     timings["distill"] = time.time() - t
 
-    # 3. Story router (picks I or F based on direction)
+    # 3. Story router ∥ vocabulary — both only need summary.
     t = time.time()
-    routed = await route_and_run(app, summary)
+    story_task = asyncio.create_task(route_and_run(app, summary))
+    vocab_task = asyncio.create_task(build_vocabulary(app, summary))
+    routed = await story_task
     timings["story"] = time.time() - t
     draft = routed.draft
+    voice = voice_for_tone(draft.voice_tone)
 
-    # 4. Scene breaker
+    # 4. Scene breaker (serial — needs script).
     t = time.time()
     scenes = await break_scenes(app, draft.script)
     timings["scenes"] = time.time() - t
 
-    # 5. Visual vocabulary (article-specific motifs)
-    t = time.time()
-    vocab = await build_vocabulary(app, summary)
-    timings["vocab"] = time.time() - t
+    # Vocabulary almost always done by now.
+    vocab = await vocab_task
+    timings["vocab_wait"] = round(time.time() - t, 2)
 
-    # 6. Shot director ∥ continuous TTS (both depend only on scenes)
-    media_dir = out_dir / "media"
-    voice = voice_for_tone(draft.voice_tone)
+    # 5. Shot director ∥ continuous TTS — independent past this point.
     t = time.time()
     plans_task = asyncio.create_task(
         direct_shots_v2(
             app, scenes,
             tone=draft.voice_tone, full_script=draft.script, vocab=vocab,
             topic_familiarity=summary.topic_familiarity,
+            content_mode=summary.content_mode,
         )
     )
     tts_task = asyncio.create_task(
@@ -80,13 +100,18 @@ async def run_pipeline(app: Any, url: str, out_dir: Path, run_id: str) -> dict:
             tone=draft.voice_tone,
         )
     )
-    plans, (audio_artifacts, full_audio) = await asyncio.gather(plans_task, tts_task)
-    timings["director_and_tts"] = time.time() - t
+    plans = await plans_task
+    timings["director"] = time.time() - t
 
-    # 7. Veo i2v per scene (parallel)
+    # 6. Veo i2v per scene (parallel). Audio still streaming.
     t = time.time()
     video_artifacts = await generate_videos(scenes, plans, media_dir)
     timings["video"] = time.time() - t
+
+    # Audio almost certainly done by now.
+    t = time.time()
+    audio_artifacts, full_audio = await tts_task
+    timings["audio_wait"] = round(time.time() - t, 2)
 
     # 8. Stitch (per-segment ffmpeg renders parallel + concat)
     t = time.time()
@@ -144,6 +169,9 @@ async def run_pipeline(app: Any, url: str, out_dir: Path, run_id: str) -> dict:
         "captions": [s.caption for s in scenes],
         "scene_sentences": [s.sentence for s in scenes],
         "motifs": [m.motif_id for m in vocab.motifs],
+        "content_mode": summary.content_mode,
+        "topic_familiarity": summary.topic_familiarity,
+        "audience_level": summary.audience_level,
         "run_id": run_id,
         "timings": {k: round(v, 1) for k, v in timings.items()},
         "wall_time_s": round(time.time() - t_total, 1),

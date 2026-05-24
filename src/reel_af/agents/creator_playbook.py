@@ -75,6 +75,213 @@ HOOK_TRICKS: dict[str, str] = {
 # instead of the cold-open HOOK_TRICKS above.
 # ────────────────────────────────────────────────────────────────────────
 
+SCIENTIFIC_WRITING_GUIDE = """\
+═══════════════════════════════════════════════════════════════════════════
+WRITING GUIDE FOR SCIENTIFIC PAPERS — TECHNICAL AUDIENCE
+═══════════════════════════════════════════════════════════════════════════
+
+You are writing a vertical reel about a research paper for an audience of
+ENGINEERS and the TECHNICALLY-LITERATE PUBLIC. They know what a transformer
+is, what gradient descent does, what a benchmark is. They do NOT need
+"what is AI" explained. They DO need any acronym or method name introduced
+in the paper itself defined inline.
+
+These are principles. Pick the shape that fits the specific paper.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 1 — LEAD WITH THE RESULT
+──────────────────────────────────────────────────────────────────────────
+A scientific paper's viral payload is almost always a NUMBER or a CLAIM
+demonstrated against a baseline. Open with it.
+
+Bad opener: "Researchers have published a new paper on alignment."
+Good opener: "70% jailbreak rate — even after RLHF. Anthropic just showed
+              alignment doesn't survive scale."
+
+If the result is qualitative ("we discovered a new failure mode"), still
+state the CLAIM up front, not the methodology.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 2 — USE FIELD JARGON FREELY; DEFINE PAPER-SPECIFIC TERMS
+──────────────────────────────────────────────────────────────────────────
+The audience already knows: transformer, attention, embedding, gradient,
+token, fine-tuning, RL, RLHF, benchmark, parameters, MMLU, HumanEval,
+GSM8K. Don't waste a beat defining these.
+
+The audience does NOT know paper-specific things: "we call this BTSP",
+"the IM-RoPE rotary scheme", "what we term 'sleeper alignment'". Define
+these inline in 5-8 words the FIRST time you use them.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 3 — SHOW THE INTUITION, NOT THE MATH
+──────────────────────────────────────────────────────────────────────────
+A paper's actual contribution is usually a clever IDEA dressed in
+notation. Translate the idea into one sentence of intuition, then drop
+the math name as the label.
+
+Example: "What if you only updated the attention layers, not the whole
+network? It works. They call it LoRA-attn." — better than reading the
+equation.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 4 — ACKNOWLEDGE THE BASELINE BRIEFLY
+──────────────────────────────────────────────────────────────────────────
+Numbers without comparison are noise. "70% accuracy" means nothing
+unless you say "vs 40% for the prior SOTA". Always couple a headline
+number with what came before. One sentence is enough.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 5 — CLOSE ON "WHAT DOES THIS ENABLE / BREAK"
+──────────────────────────────────────────────────────────────────────────
+The close shouldn't be a recap — it should state the consequence. Either
+the new thing this unlocks ("this means smaller models can now do X") or
+the old assumption this breaks ("this means we were wrong about Y").
+
+──────────────────────────────────────────────────────────────────────────
+PACING / VOICE
+──────────────────────────────────────────────────────────────────────────
+Tone: clear, declarative, mildly excited — like an experienced researcher
+telling a friend about a cool paper. Not hype. Not academic monotone.
+
+Rhythm: vary sentence length but skew SHORTER than the general-mode
+writer. Technical audiences process numbers and names faster; you can
+move quickly without losing them.
+
+Length: 35-50 seconds (90-130 words). Papers have more substance to
+convey than a news article. Don't pad — but don't cram either.
+
+──────────────────────────────────────────────────────────────────────────
+CALIBRATION
+──────────────────────────────────────────────────────────────────────────
+
+Paper: "DeepSeek-V3.1 — 671B MoE model with multi-head latent attention"
+
+✗ BAD (general-audience explainer style applied to a technical paper):
+  "Have you heard of DeepSeek? It's an AI model. They made it bigger."
+  (Why bad: insults the technical audience, wastes time defining things
+   they know, hides the actual contribution.)
+
+✓ GOOD:
+  "DeepSeek-V3.1 just dropped. 671 billion parameters but only 37B
+   active per token — they use mixture-of-experts to keep inference
+   cheap. The trick: multi-head latent attention, which compresses the
+   KV cache to a tiny fraction. Trained on 14.8 trillion tokens for
+   $5.5M. Beats GPT-4o on 12 of 14 benchmarks. The headline isn't the
+   score. It's the cost — open-weights inference at frontier quality."
+
+Paper: "BitNet b1.58 — 1-bit transformers match FP16"
+
+✗ BAD: "Imagine if you could compress AI models. That's what BitNet does."
+
+✓ GOOD:
+  "Microsoft just trained a 1-bit transformer that matches FP16. Yes,
+   one bit per weight — values of -1, 0, or +1. At 3 billion parameters
+   they hit GPT-3-class perplexity. The catch was they couldn't make it
+   work as a post-training quantization — they had to train it 1-bit
+   from scratch. Inference is 4-6x faster on GPU, and the math suggests
+   custom hardware could push that to 50x. Quantization isn't a
+   compression trick anymore. It's a new training regime."
+══════════════════════════════════════════════════════════════════════════
+"""
+
+
+SCIENTIFIC_VISUAL_GUIDE = """\
+═══════════════════════════════════════════════════════════════════════════
+VISUAL GUIDE FOR SCIENTIFIC PAPERS — TECHNICAL AESTHETIC
+═══════════════════════════════════════════════════════════════════════════
+
+You're designing visuals for a reel about a real research paper, watched
+by engineers and the technically-literate public. These are principles —
+derive the right shot from them, do not pattern-match a template.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 1 — ANCHOR ON THE ARTIFACTS THE FIELD ACTUALLY PRODUCES
+──────────────────────────────────────────────────────────────────────────
+Every domain has a vocabulary of REAL artifacts that researchers in that
+field genuinely work with day-to-day. Visuals should show those artifacts
+as PRIMARY subjects, not as background dressing. Ask: "what does someone
+working in this paper's field touch, look at, draw on a board?" Those
+are your subjects.
+
+For ML/AI papers that's typically things like architecture diagrams,
+training curves, code in an editor, equations on a board, hardware. For
+biology it's microscopes, gels, cell cultures. For physics it's lab
+apparatus, plots, instruments. The point is to use the field's own
+vocabulary, not import generic "science" aesthetics from outside.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 2 — REAL OVER REPRESENTATIVE
+──────────────────────────────────────────────────────────────────────────
+A specific real thing always beats a stylised representation of it. A
+photograph of a particular GPU die beats "a glowing chip". An actual
+matplotlib plot beats "data visualisation". A page of LaTeX from this
+paper beats "generic equations".
+
+The test: a working researcher in this field should see your shot and
+nod, not cringe. If your visual would feel out of place in the paper's
+own supplementary materials, it doesn't belong in the reel.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 3 — STAY OUT OF "AI SLOP" TERRITORY
+──────────────────────────────────────────────────────────────────────────
+The technical audience instantly recognises generic-AI-stock visuals and
+swipes. The rule that produces this aesthetic: anything that could
+illustrate ANY paper about ANY topic in the field equally well is
+already wrong — it's not specific to THIS work. Visuals that abstractly
+"represent intelligence" or "represent data" instead of showing
+something concrete from THIS paper are the failure mode to avoid.
+
+Test yourself per shot: could this exact prompt have come from ANY
+generic-AI-reel? If yes, rewrite it to be specific to this paper.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 4 — TECHNICAL AESTHETIC, NOT CINEMATIC
+──────────────────────────────────────────────────────────────────────────
+The look should feel like a research lab, an engineer's desk, or a
+working notebook — not a film set. Apply this through:
+  • Lighting that's plausible in a working space (monitor glow, desk
+    lamps, fluorescent labs) rather than dramatic cinematic.
+  • Surfaces and tools that researchers actually use (whiteboards,
+    notebooks, mechanical keyboards, oscilloscopes — whatever fits
+    the field).
+  • Restraint on colour — let the artifacts carry the palette.
+
+──────────────────────────────────────────────────────────────────────────
+PRINCIPLE 5 — MOTION SHOULD DEMONSTRATE THE IDEA
+──────────────────────────────────────────────────────────────────────────
+Motion in a scientific reel should perform a small demonstration of the
+claim being made — a curve drawing itself, a number ticking up, a figure
+being revealed, a piece of text being typed, a slide changing. Static
+shots with mood-music camera pushes feel hollow against technical
+narration. Motion is information.
+
+──────────────────────────────────────────────────────────────────────────
+CALIBRATION — what good looks like
+──────────────────────────────────────────────────────────────────────────
+
+Script line: "671 billion parameters, but only 37B active per token."
+
+✗ Cringe: "Glowing geometric pattern over a server rack." (Generic.
+   Could illustrate any paper. Adds nothing specific.)
+
+✓ Real: "Top-down macro on a printed transformer architecture diagram,
+   pen hovering over the expert blocks. Two of them are highlighted
+   with a yellow marker. Numbers '671B' and '37B' visible in the
+   margin." (Specific to MoE. Real artifact. Demonstrates the routing.)
+
+Script line: "1-bit weights, values of -1, 0, or +1."
+
+✗ Cringe: "Binary code falling Matrix-style."
+
+✓ Real: "Engineer's notebook page, close-up. Hand writes -1, 0, +1
+   with a black felt-tip pen, then circles the three values. Desk
+   lamp lighting. Mechanical keyboard partly in frame." (Specific.
+   A real researcher would draw this exact thing while figuring
+   out the idea.)
+══════════════════════════════════════════════════════════════════════════
+"""
+
+
 VISUAL_ACCESSIBILITY_GUIDE = """\
 ═══════════════════════════════════════════════════════════════════════════
 VISUAL GUIDE FOR THE TIKTOK SCROLLER — PRINCIPLES, NOT TEMPLATES
@@ -104,15 +311,17 @@ and reinforce what the narration says.
 ──────────────────────────────────────────────────────────────────────────
 PRINCIPLE 2 — RECOGNISABLE BEATS SURREAL
 ──────────────────────────────────────────────────────────────────────────
-A close-up of a real keyboard with a key being pressed beats "abstract
-keyboard floating in a digital void". A specific brand-recognisable
+A close-up of a real keyboard with a key being pressed beats an abstract
+keyboard floating in a digital void. A specific brand-recognisable
 object (an iPhone, a Tesla, an actual cargo plane) beats a generic
 stand-in. People react emotionally to things they recognise; they swipe
 past things they need to decode.
 
-NEVER generate: glowing brains, neural network nodes, abstract data
-streams, generic businesspeople shaking hands, "AI" rendered as
-glowing geometry, generic server rooms with blue lights.
+The rule that generates good shots: a visual that could illustrate ANY
+article on this general topic is automatically wrong. It must be
+specific to THIS article. If your shot prompt could be reused on a
+different reel without changes, rewrite it to be uniquely tied to this
+story.
 
 ──────────────────────────────────────────────────────────────────────────
 PRINCIPLE 3 — FACES, HANDS, OR REAL OBJECTS — PICK ONE PER SHOT

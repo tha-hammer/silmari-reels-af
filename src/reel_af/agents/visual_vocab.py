@@ -64,21 +64,41 @@ class VisualVocabulary(BaseModel):
     motifs: list[VisualMotif] = Field(..., min_length=MIN_MOTIFS, max_length=MAX_MOTIFS)
 
 
-def _build_system(topic_familiarity: str) -> str:
-    from reel_af.agents.creator_playbook import VISUAL_ACCESSIBILITY_GUIDE
-    accessibility_block = (
-        f"\n\nAUDIENCE NOTE — topic_familiarity = {topic_familiarity}\n\n"
-        f"{VISUAL_ACCESSIBILITY_GUIDE}\n"
-        f"This article is OBSCURE for the audience — every motif you "
-        f"design must HELP DEFINE the subject visually, not just evoke a "
-        f"mood. Prefer motifs that include the actual interface / object / "
-        f"phenomenon over atmospheric setting shots.\n"
-        if topic_familiarity == "obscure"
-        else f"\nThis article is HOT for the audience — they already have a "
-             f"referent. Cinematic mood shots are fine; you have more visual "
-             f"latitude.\n"
+def _build_system(topic_familiarity: str, content_mode: str = "general") -> str:
+    from reel_af.agents.creator_playbook import (
+        SCIENTIFIC_VISUAL_GUIDE,
+        VISUAL_ACCESSIBILITY_GUIDE,
     )
-    return _SYSTEM_BASE + accessibility_block
+    # Scientific mode takes precedence — different audience, different visual
+    # register. Engineers/technical-public want field artifacts, real systems,
+    # data over moodboards.
+    if content_mode == "scientific":
+        mode_block = (
+            f"\n\nMODE NOTE — content_mode = scientific\n\n"
+            f"{SCIENTIFIC_VISUAL_GUIDE}\n"
+            f"This is a scientific paper. Every motif you design must be "
+            f"FIELD-SPECIFIC and CONCRETE — the actual artifacts, instruments, "
+            f"interfaces, plots, or systems described in the paper. No mood "
+            f"shots, no generic-tech aesthetic. If a motif could illustrate "
+            f"ANY paper in this field, it's wrong. Design for someone who "
+            f"would recognise these objects.\n"
+        )
+    elif topic_familiarity == "obscure":
+        mode_block = (
+            f"\n\nAUDIENCE NOTE — topic_familiarity = {topic_familiarity}\n\n"
+            f"{VISUAL_ACCESSIBILITY_GUIDE}\n"
+            f"This article is OBSCURE for the audience — every motif you "
+            f"design must HELP DEFINE the subject visually, not just evoke a "
+            f"mood. Prefer motifs that include the actual interface / object / "
+            f"phenomenon over atmospheric setting shots.\n"
+        )
+    else:
+        mode_block = (
+            f"\nThis article is HOT for the audience — they already have a "
+            f"referent. Cinematic mood shots are fine; you have more visual "
+            f"latitude.\n"
+        )
+    return _SYSTEM_BASE + mode_block
 
 
 _SYSTEM_BASE = f"""You're building a VISUAL VOCABULARY for a vertical reel about
@@ -136,6 +156,7 @@ async def build_vocabulary(app: Any, summary: ArticleSummary) -> VisualVocabular
     user = (
         f"ARTICLE\n"
         f"  domain           : {summary.domain}\n"
+        f"  content_mode     : {summary.content_mode}\n"
         f"  topic_familiarity: {summary.topic_familiarity}\n"
         f"  thesis           : {summary.one_line_thesis}\n"
         f"  takeaway         : {summary.intended_takeaway}\n\n"
@@ -149,7 +170,10 @@ async def build_vocabulary(app: Any, summary: ArticleSummary) -> VisualVocabular
             else "    (none — design abstract-but-article-specific motifs)"
         )
     )
-    system = _build_system(topic_familiarity=summary.topic_familiarity)
+    system = _build_system(
+        topic_familiarity=summary.topic_familiarity,
+        content_mode=summary.content_mode,
+    )
     return await app.ai(system=system, user=user, schema=VisualVocabulary)
 
 

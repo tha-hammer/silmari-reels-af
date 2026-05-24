@@ -58,17 +58,36 @@ class VisualArc(BaseModel):
     plans: list[SceneVisualPlan] = Field(..., min_length=1)
 
 
-def _build_system(vocab_block: str, topic_familiarity: str = "hot") -> str:
-    from reel_af.agents.creator_playbook import VISUAL_ACCESSIBILITY_GUIDE
-    accessibility = (
-        f"\n\n{VISUAL_ACCESSIBILITY_GUIDE}\n\n"
-        f"AUDIENCE NOTE: this article is OBSCURE. Your visual arc should "
-        f"favour motifs that DEFINE the subject visually for a viewer with "
-        f"no prior knowledge. The first 1-2 scenes should anchor on the "
-        f"clearest possible visualisation of WHAT the topic is.\n"
-        if topic_familiarity == "obscure" else ""
+def _build_system(
+    vocab_block: str,
+    topic_familiarity: str = "hot",
+    content_mode: str = "general",
+) -> str:
+    from reel_af.agents.creator_playbook import (
+        SCIENTIFIC_VISUAL_GUIDE,
+        VISUAL_ACCESSIBILITY_GUIDE,
     )
-    return _build_system_inner(vocab_block) + accessibility
+    if content_mode == "scientific":
+        mode_block = (
+            f"\n\n{SCIENTIFIC_VISUAL_GUIDE}\n\n"
+            f"MODE NOTE: this is a SCIENTIFIC paper. The visual arc must "
+            f"stay in field-specific, technical-aesthetic territory across "
+            f"every beat. Open on the artifact that makes the result "
+            f"recognisable (the actual plot, the actual interface, the "
+            f"actual system). Use motion to DEMONSTRATE behaviour, not to "
+            f"add mood. No glowing brains. No abstract data-flow swirls.\n"
+        )
+    elif topic_familiarity == "obscure":
+        mode_block = (
+            f"\n\n{VISUAL_ACCESSIBILITY_GUIDE}\n\n"
+            f"AUDIENCE NOTE: this article is OBSCURE. Your visual arc should "
+            f"favour motifs that DEFINE the subject visually for a viewer with "
+            f"no prior knowledge. The first 1-2 scenes should anchor on the "
+            f"clearest possible visualisation of WHAT the topic is.\n"
+        )
+    else:
+        mode_block = ""
+    return _build_system_inner(vocab_block) + mode_block
 
 
 def _build_system_inner(vocab_block: str) -> str:
@@ -121,6 +140,7 @@ async def plan_visual_arc(
     full_script: str,
     vocab: VisualVocabulary,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> list[SceneVisualPlan]:
     listing = "\n".join(
         f"  [{s.idx}] role={s.role}  sentence={s.sentence!r}  caption={s.caption!r}"
@@ -128,13 +148,15 @@ async def plan_visual_arc(
     )
     user = (
         f"REEL TONE: {tone}\n"
-        f"TOPIC FAMILIARITY: {topic_familiarity}\n\n"
+        f"TOPIC FAMILIARITY: {topic_familiarity}\n"
+        f"CONTENT MODE: {content_mode}\n\n"
         f"FULL SCRIPT (for context):\n{full_script}\n\n"
         f"SCENES TO PLAN VISUALS FOR:\n{listing}"
     )
     system = _build_system(
         format_vocab_for_prompt(vocab),
         topic_familiarity=topic_familiarity,
+        content_mode=content_mode,
     )
     arc = await app.ai(system=system, user=user, schema=VisualArc)
 

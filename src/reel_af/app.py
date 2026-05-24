@@ -57,6 +57,10 @@ load_dotenv(_PROJECT_ROOT / ".env")
 
 from agentfield import Agent, AgentRouter, AIConfig  # noqa: E402
 
+# Apply SDK bug-fixes (see AGENTFIELD_SDK_ISSUES.md) at startup so every
+# call to OpenRouterProvider gets the fixed behaviour. Module is idempotent.
+import reel_af.sdk_patches  # noqa: E402, F401
+
 
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
@@ -151,6 +155,7 @@ async def build_vocab_step(summary: dict) -> dict:
 async def plan_visual_arc_step(
     scenes: list[dict], vocabulary: dict, tone: str, script: str,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> dict:
     """Sub-reasoner: assign anchor + visual_trick + motif per scene.
 
@@ -158,8 +163,9 @@ async def plan_visual_arc_step(
     above fan-outs those two in parallel, then calls this one with both
     outputs. That's the depth-3 DAG: entry → planner → these subs.
 
-    `topic_familiarity` switches the visual planner into the audience-
-    accessibility register (define-the-subject for obscure topics).
+    `topic_familiarity` and `content_mode` switch the visual planner into
+    the right register (accessibility for obscure topics; scientific-
+    technical for papers).
     """
     from reel_af.agents.scene_breaker import Scene
     from reel_af.agents.visual_arc import plan_visual_arc
@@ -169,6 +175,7 @@ async def plan_visual_arc_step(
     arc = await plan_visual_arc(
         app, scene_objs, tone=tone, full_script=script, vocab=vocab_obj,
         topic_familiarity=topic_familiarity,
+        content_mode=content_mode,
     )
     return {"visual_arc": [p.model_dump() for p in arc]}
 
@@ -177,6 +184,7 @@ async def plan_visual_arc_step(
 async def plan_scenes_visuals(
     summary: dict, script: str, tone: str = "wonder",
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> dict:
     """Phase 3 — composes 3 sub-reasoners via app.call() (depth-3 DAG).
 
@@ -196,6 +204,7 @@ async def plan_scenes_visuals(
         f"{node}.reel_plan_visual_arc_step",
         scenes=scenes_resp["scenes"], vocabulary=vocab_resp["vocabulary"],
         tone=tone, script=script, topic_familiarity=topic_familiarity,
+        content_mode=content_mode,
     )
     return {
         "scenes": scenes_resp["scenes"],
@@ -209,12 +218,13 @@ async def generate_shot_plans(
     scenes: list[dict], visual_arc: list[dict], vocabulary: dict,
     tone: str, full_script: str,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> dict:
     """Phase 4a — per-scene shot plans (image prompt + motion prompt).
 
     Runs in parallel with synthesize_audio (no dependency between them).
-    `topic_familiarity` switches the shot director into the audience-
-    accessibility register for obscure topics.
+    `topic_familiarity` and `content_mode` switch the shot director into
+    the right register (obscure-accessibility or scientific-technical).
     """
     from reel_af.agents.scene_breaker import Scene
     from reel_af.agents.shot_director_v2 import _direct_one
@@ -228,11 +238,23 @@ async def generate_shot_plans(
     async def _one(scene_dict: dict):
         scene = Scene(**scene_dict)
         plan = arc_by_idx.get(scene.idx)
+        if plan is None:
+            # Arc planner skipped this scene_idx — fall back to a sensible
+            # default anchored on the first vocabulary motif rather than
+            # crashing the whole pipeline.
+            plan = SceneVisualPlan(
+                scene_idx=scene.idx,
+                anchor_type="literal",
+                visual_trick="isolated_object",
+                motif_id=vocab.motifs[0].motif_id,
+                one_line_concept=scene.sentence,
+            )
         motif = motif_by_id.get(plan.motif_id, vocab.motifs[0])
         result = await _direct_one(
             app, scene, plan, tone, full_script,
             motif_description=motif.description,
             topic_familiarity=topic_familiarity,
+            content_mode=content_mode,
         )
         return result.model_dump()
 
@@ -419,52 +441,98 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
     timings: dict[str, float] = {}
     node = app.node_id
     app.note(f"reel-af: starting run {run_id} for {url}", tags=["reel", "start"])
+    t_pipeline = time.time()
 
-    # 1. Extract source
+    # ───────────────────────────────────────────────────────────────
+    # Dependency graph (* = parallel branches):
+    #   extract_source                                  (serial — root)
+    #     │
+    #     ├── compose_script ──┐
+    #     └── build_vocab    *─┤                        (vocab only needs summary)
+    #                          ↓
+    #                       break_scenes                 (needs script)
+    #                          ↓
+    #     ┌── plan_visual_arc ─┴── synthesize_audio *   (audio only needs script+scenes)
+    #     ↓
+    #     generate_shot_plans                            (needs arc + vocab)
+    #     ↓
+    #     generate_videos_phase   ←── (audio task still in flight if slow)
+    #     ↓
+    #     await audio_task                               (almost always already done)
+    #     ↓
+    #     assemble_final
+    # ───────────────────────────────────────────────────────────────
+
+    # 1. extract_source — serial root.
     t = time.time()
     extracted = await app.call(f"{node}.reel_extract_source", url=url)
     timings["extract_source"] = round(time.time() - t, 1)
     summary = extracted["summary"]
 
-    # 2. Compose script
+    # topic_familiarity drives obscure-vs-hot accessibility register;
+    # content_mode drives general-vs-scientific. Both propagate through
+    # vocabulary, arc, and shot director.
+    topic_familiarity = summary.get("topic_familiarity", "hot")
+    content_mode = summary.get("content_mode", "general")
+
+    # 2. compose_script ∥ build_vocab_step — vocab only needs summary, so
+    # fire it now to hide its 30-60s cost under compose_script's ~150s cost.
     t = time.time()
-    composed = await app.call(f"{node}.reel_compose_script", summary=summary)
+    compose_task = asyncio.create_task(
+        app.call(f"{node}.reel_compose_script", summary=summary)
+    )
+    vocab_task = asyncio.create_task(
+        app.call(f"{node}.reel_build_vocab_step", summary=summary)
+    )
+    composed = await compose_task
     timings["compose_script"] = round(time.time() - t, 1)
     draft = composed["draft"]
 
-    # Topic familiarity drives the audience-accessibility register across
-    # script, visual vocabulary, arc, and shot director.
-    topic_familiarity = summary.get("topic_familiarity", "hot")
-
-    # 3. Plan scenes + vocabulary + visual arc
+    # 3. break_scenes — needs script.
     t = time.time()
-    planned = await app.call(
-        f"{node}.reel_plan_scenes_visuals",
-        summary=summary, script=draft["script"],
-        tone=draft["voice_tone"], topic_familiarity=topic_familiarity,
+    scenes_resp = await app.call(
+        f"{node}.reel_break_scenes_step", script=draft["script"]
     )
-    timings["plan_scenes_visuals"] = round(time.time() - t, 1)
-    scenes = planned["scenes"]
+    scenes = scenes_resp["scenes"]
+    timings["break_scenes"] = round(time.time() - t, 1)
 
-    # 4a + 4b. Shot plans ∥ audio (run in parallel via asyncio.gather of app.call()s)
+    # Wait for vocab (almost always already done).
+    vocab_resp = await vocab_task
+
+    # 4. plan_visual_arc ∥ synthesize_audio — independent:
+    #    arc needs vocab + scenes; audio needs script + scenes. Audio is the
+    #    slow one (~30-60s TTS) — start it now so it's done by the time we
+    #    finish shot_plans + videos.
     t = time.time()
-    plans_task = asyncio.create_task(app.call(
-        f"{node}.reel_generate_shot_plans",
-        scenes=scenes, visual_arc=planned["visual_arc"],
-        vocabulary=planned["vocabulary"],
-        tone=draft["voice_tone"], full_script=draft["script"],
-        topic_familiarity=topic_familiarity,
+    arc_task = asyncio.create_task(app.call(
+        f"{node}.reel_plan_visual_arc_step",
+        scenes=scenes, vocabulary=vocab_resp["vocabulary"],
+        tone=draft["voice_tone"], script=draft["script"],
+        topic_familiarity=topic_familiarity, content_mode=content_mode,
     ))
     audio_task = asyncio.create_task(app.call(
         f"{node}.reel_synthesize_audio",
         full_script=draft["script"], scenes=scenes,
         voice_tone=draft["voice_tone"], out_dir=str(media_dir),
     ))
-    shot_plans_resp, audio_resp = await asyncio.gather(plans_task, audio_task)
-    timings["shots_and_audio"] = round(time.time() - t, 1)
+    arc_resp = await arc_task
+    timings["plan_visual_arc"] = round(time.time() - t, 1)
+
+    # 5. generate_shot_plans — needs arc + vocab. Audio still streaming in
+    # background.
+    t = time.time()
+    shot_plans_resp = await app.call(
+        f"{node}.reel_generate_shot_plans",
+        scenes=scenes, visual_arc=arc_resp["visual_arc"],
+        vocabulary=vocab_resp["vocabulary"],
+        tone=draft["voice_tone"], full_script=draft["script"],
+        topic_familiarity=topic_familiarity, content_mode=content_mode,
+    )
+    timings["generate_shot_plans"] = round(time.time() - t, 1)
     plans = shot_plans_resp["plans"]
 
-    # 5. Video generation (Veo i2v per scene, parallel)
+    # 6. Video generation (Veo i2v per scene, parallel internally).
+    # Audio task continues running in the background.
     t = time.time()
     videos_resp = await app.call(
         f"{node}.reel_generate_videos_phase",
@@ -472,7 +540,13 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
     )
     timings["videos"] = round(time.time() - t, 1)
 
-    # 6. Assemble final reel
+    # Now collect audio (almost certainly already done — it had ~5 minutes
+    # of cover while we ran arc + shots + videos).
+    t = time.time()
+    audio_resp = await audio_task
+    timings["audio_wait"] = round(time.time() - t, 1)
+
+    # 7. Assemble final reel.
     t = time.time()
     final = await app.call(
         f"{node}.reel_assemble_final",
@@ -487,6 +561,7 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
         out_dir=str(out_path), run_id=run_id,
     )
     timings["assemble"] = round(time.time() - t, 1)
+    timings["total"] = round(time.time() - t_pipeline, 1)
 
     app.note(
         f"reel-af: run {run_id} done → {final['video_path']}",
@@ -507,7 +582,10 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
         "self_score": composed["self_score"],
         "chosen_arch": composed["chosen_arch"],
         "captions": [s["caption"] for s in scenes],
-        "motifs": [m["motif_id"] for m in planned["vocabulary"]["motifs"]],
+        "motifs": [m["motif_id"] for m in vocab_resp["vocabulary"]["motifs"]],
+        "content_mode": content_mode,
+        "topic_familiarity": topic_familiarity,
+        "audience_level": summary.get("audience_level", "general"),
         "run_id": run_id,
         "timings_s": timings,
     }

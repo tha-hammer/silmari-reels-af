@@ -23,7 +23,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from reel_af.agents.creator_playbook import VISUAL_ACCESSIBILITY_GUIDE, VISUAL_TRICKS
+from reel_af.agents.creator_playbook import (
+    SCIENTIFIC_VISUAL_GUIDE,
+    VISUAL_ACCESSIBILITY_GUIDE,
+    VISUAL_TRICKS,
+)
 from reel_af.agents.scene_breaker import Scene
 from reel_af.agents.visual_arc import SceneVisualPlan, plan_visual_arc
 from reel_af.agents.visual_vocab import VisualVocabulary
@@ -80,16 +84,30 @@ def _build_system(
     concept: str,
     motif_description: str,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> str:
     trick_desc = VISUAL_TRICKS[trick]
-    accessibility_block = (
-        f"\n\n{VISUAL_ACCESSIBILITY_GUIDE}\n\n"
-        f"AUDIENCE NOTE: this article is OBSCURE. Apply the guide above — "
-        f"your image MUST help DEFINE the subject for a viewer with zero "
-        f"prior knowledge. Recognisable / specific / explanatory beats "
-        f"cinematic-but-vague.\n"
-        if topic_familiarity == "obscure" else ""
-    )
+    if content_mode == "scientific":
+        mode_block = (
+            f"\n\n{SCIENTIFIC_VISUAL_GUIDE}\n\n"
+            f"MODE NOTE: this is a SCIENTIFIC paper. The shot must stay in "
+            f"field-specific, technical-aesthetic territory. Real artifacts "
+            f"(actual interfaces, actual instruments, actual plots, actual "
+            f"systems) over mood. If the visual could illustrate ANY paper "
+            f"in this field, it's wrong — make it specific to THIS paper. "
+            f"Motion should DEMONSTRATE the mechanism or progress, not add "
+            f"cinematic flourish.\n"
+        )
+    elif topic_familiarity == "obscure":
+        mode_block = (
+            f"\n\n{VISUAL_ACCESSIBILITY_GUIDE}\n\n"
+            f"AUDIENCE NOTE: this article is OBSCURE. Apply the guide above — "
+            f"your image MUST help DEFINE the subject for a viewer with zero "
+            f"prior knowledge. Recognisable / specific / explanatory beats "
+            f"cinematic-but-vague.\n"
+        )
+    else:
+        mode_block = ""
     return f"""You design ONE shot of a vertical reel. The structural choices —
 anchor type, visual trick, AND which article-specific motif to anchor on —
 are LOCKED IN by the visual arc:
@@ -140,7 +158,7 @@ CREATIVE RULES (this is where reels die or pop):
     drawing is revealed" motion — that's a designed shot.
 
 REEL TONE: {tone}.
-{accessibility_block}
+{mode_block}
 FULL SCRIPT (cohesion only — pick visuals distinct from other beats):
 {full_script}
 
@@ -160,6 +178,7 @@ async def _direct_one(
     full_script: str,
     motif_description: str,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> ShotPlanV2:
     system = _build_system(
         tone=tone,
@@ -169,6 +188,7 @@ async def _direct_one(
         concept=plan.one_line_concept,
         motif_description=motif_description,
         topic_familiarity=topic_familiarity,
+        content_mode=content_mode,
     )
     user = (
         f"VO LINE FOR THIS SHOT:\n  {scene.sentence!r}\n\n"
@@ -192,12 +212,14 @@ async def direct_shots_v2(
     full_script: str,
     vocab: VisualVocabulary,
     topic_familiarity: str = "hot",
+    content_mode: str = "general",
 ) -> list[ShotPlanV2]:
     """Plan the visual arc once (vocabulary-grounded + familiarity-aware),
     then run per-scene directors in parallel with their assigned motif."""
     arc = await plan_visual_arc(
         app, scenes, tone, full_script, vocab,
         topic_familiarity=topic_familiarity,
+        content_mode=content_mode,
     )
     arc_by_idx = {p.scene_idx: p for p in arc}
     motif_by_id = {m.motif_id: m for m in vocab.motifs}
@@ -218,6 +240,7 @@ async def direct_shots_v2(
             app, scene, plan, tone, full_script,
             motif_description=motif.description,
             topic_familiarity=topic_familiarity,
+            content_mode=content_mode,
         )
 
     return list(await asyncio.gather(*(_one(s) for s in scenes)))

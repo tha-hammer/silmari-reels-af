@@ -29,6 +29,7 @@ from reel_af.agents.architectures import ArchOutput
 from reel_af.agents.creator_playbook import (
     HOOK_TRICKS,
     OBSCURE_WRITING_GUIDE,
+    SCIENTIFIC_WRITING_GUIDE,
     format_menu,
 )
 from reel_af.agents.distiller import ArticleSummary
@@ -63,16 +64,34 @@ class _HookBatch(BaseModel):
     hooks: list[_HookCandidate] = Field(..., min_length=NUM_HOOKS, max_length=NUM_HOOKS)
 
 
-def _hook_gen_system(topic_familiarity: str = "hot") -> str:
-    """Build the hook-generation prompt.
-
-    For HOT topics: cold-open with contrarian hook (existing HOOK_TRICKS menu).
-    For OBSCURE topics: must NAME the subject in the first 2-3 words AND
-    deliver a hook — use the OBSCURE_OPENER_TEMPLATES.
-
-    Rule from retention research: 'a confused viewer is a lost viewer'.
-    Cold-opens only work when the audience already has a referent.
+def _hook_gen_system(
+    topic_familiarity: str = "hot",
+    content_mode: str = "general",
+) -> str:
+    """Build the hook-generation prompt — branches on content_mode AND
+    topic_familiarity. Three regimes:
+      • scientific  → SCIENTIFIC_WRITING_GUIDE (lead with result, jargon ok)
+      • general+obscure → OBSCURE_WRITING_GUIDE (define before judge)
+      • general+hot → cold-open HOOK_TRICKS menu (Hormozi-style)
     """
+    if content_mode == "scientific":
+        return f"""You are generating {NUM_HOOKS} OPENING HOOKS for a vertical
+reel about a SCIENTIFIC PAPER. Audience is engineers / dev-Twitter /
+technically-literate public — they know transformer, RL, gradient, MMLU
+etc. Don't waste a beat defining things they know.
+
+Read the guide below and apply it. These are PRINCIPLES, not templates.
+Pick the shape that fits THIS paper.
+
+{SCIENTIFIC_WRITING_GUIDE}
+
+YOUR TASK: produce {NUM_HOOKS} distinct opening hooks (4-10 words each)
+that follow the guide. Lead with the result, the number, or the
+contribution. Vary the SHAPE across candidates — some can be
+number-shock, some claim-with-baseline, some named-method drop, some
+counter-intuitive-mechanism. For the `hook_trick` field, write a short
+snake_case label describing your move."""
+
     if topic_familiarity == "obscure":
         return f"""You are generating {NUM_HOOKS} OPENING HOOKS for a vertical reel
 about an OBSCURE topic — a niche product, specific researcher, inside-baseball
@@ -121,13 +140,18 @@ You must produce exactly {NUM_HOOKS} hooks, all distinct in trick choice."""
 async def _gen_hooks(app: Any, summary: ArticleSummary) -> list[_HookCandidate]:
     user = (
         f"ARTICLE\n"
-        f"  domain          : {summary.domain}\n"
+        f"  domain           : {summary.domain}\n"
+        f"  content_mode     : {summary.content_mode}\n"
+        f"  audience_level   : {summary.audience_level}\n"
         f"  topic_familiarity: {summary.topic_familiarity}\n"
-        f"  thesis          : {summary.one_line_thesis}\n"
-        f"  takeaway        : {summary.intended_takeaway}\n"
-        f"  examples        : {summary.concrete_examples}\n"
+        f"  thesis           : {summary.one_line_thesis}\n"
+        f"  takeaway         : {summary.intended_takeaway}\n"
+        f"  examples         : {summary.concrete_examples}\n"
     )
-    system = _hook_gen_system(topic_familiarity=summary.topic_familiarity)
+    system = _hook_gen_system(
+        topic_familiarity=summary.topic_familiarity,
+        content_mode=summary.content_mode,
+    )
     out = await app.ai(system=system, user=user, schema=_HookBatch)
     return out.hooks
 
@@ -196,18 +220,34 @@ async def _rank_hooks(
 # ───── Step 3 — body from hook ──────────────────────────────────────
 
 
-def _body_system(hook: _HookCandidate, topic_familiarity: str = "hot") -> str:
-    obscure_block = (
-        f"\n\n──── OBSCURE-TOPIC GUIDE (applies to BODY, not just hook) ────\n"
-        f"This topic is OBSCURE for the audience. The hook above established the "
-        f"subject; your BODY must continue in the SAME conversational explainer "
-        f"register and stay plain-language throughout. Don't switch to punchy "
-        f"creator voice in sentence 2 — that breaks the contract the hook made "
-        f"with the viewer.\n\n"
-        f"{OBSCURE_WRITING_GUIDE}\n"
-        if topic_familiarity == "obscure"
-        else ""
-    )
+def _body_system(
+    hook: _HookCandidate,
+    topic_familiarity: str = "hot",
+    content_mode: str = "general",
+) -> str:
+    # Scientific-mode body takes precedence over obscure-mode — the audience
+    # for scientific papers is technical, not general-scrolling.
+    if content_mode == "scientific":
+        mode_block = (
+            f"\n\n──── SCIENTIFIC-PAPER GUIDE (applies to entire script) ────\n"
+            f"This is a scientific paper for technical audiences. The hook "
+            f"above set up the result; the body should sustain the same "
+            f"technical-but-clear register. Numbers, named methods, baselines, "
+            f"comparisons — don't pad with conversational filler.\n\n"
+            f"{SCIENTIFIC_WRITING_GUIDE}\n"
+        )
+    elif topic_familiarity == "obscure":
+        mode_block = (
+            f"\n\n──── OBSCURE-TOPIC GUIDE (applies to BODY, not just hook) ────\n"
+            f"This topic is OBSCURE for the audience. The hook above established "
+            f"the subject; your BODY must continue in the SAME conversational "
+            f"explainer register and stay plain-language throughout. Don't "
+            f"switch to punchy creator voice in sentence 2 — that breaks the "
+            f"contract the hook made with the viewer.\n\n"
+            f"{OBSCURE_WRITING_GUIDE}\n"
+        )
+    else:
+        mode_block = ""
 
     return f"""You are completing a vertical-reel script that will be read by a
 TTS engine and shown over generated video. The HOOK is locked:
@@ -242,7 +282,7 @@ OPENING:
   • Then deliver the payoff the hook promised.
 
 TOTAL: 55-68 words (~21-26s spoken). Tight is better.
-{obscure_block}
+{mode_block}
 Return a ReelDraft. Set:
   direction      = {hook.direction}
   hook_trick     = "{hook.hook_trick}"   (use this exact string; it may
@@ -268,7 +308,11 @@ async def _body_from_hook(
         + "\n".join(f"    {i+1}. {p}" for i, p in enumerate(summary.key_points))
     )
     draft = await app.ai(
-        system=_body_system(hook, topic_familiarity=summary.topic_familiarity),
+        system=_body_system(
+            hook,
+            topic_familiarity=summary.topic_familiarity,
+            content_mode=summary.content_mode,
+        ),
         user=user, schema=ReelDraft,
     )
     # For obscure topics the hook generator returns free-form labels (e.g.

@@ -79,6 +79,34 @@ class ArticleSummary(BaseModel):
             "an appropriate reel direction."
         ),
     )
+    content_mode: Literal["general", "scientific"] = Field(
+        ...,
+        description=(
+            "What KIND of content is this? "
+            "'scientific' = a research paper / preprint / technical write-up "
+            "with a method, result, baseline comparison; the reel should be "
+            "for engineers and the technically-literate public, lead with the "
+            "headline result, can use field jargon freely. "
+            "'general' = any other article (news, blog, essay, opinion); the "
+            "reel should be for a TikTok-scroller audience with no specialist "
+            "knowledge. "
+            "The caller can also override this via the URL pattern (arxiv, "
+            "openreview, biorxiv) but you should ALSO classify based on the "
+            "content itself — a Medium post explaining a paper is still "
+            "'scientific' content."
+        ),
+    )
+    audience_level: Literal["general", "technical", "expert"] = Field(
+        ...,
+        description=(
+            "Best audience target for this material. "
+            "'general' = no specialist knowledge (TikTok scroller). "
+            "'technical' = engineers / dev-Twitter / scientifically-literate. "
+            "'expert' = working in this exact subfield. We never target 'expert' "
+            "(too narrow for a reel) — if you'd otherwise pick expert, downgrade "
+            "to technical and prepare the writer to translate."
+        ),
+    )
     topic_familiarity: Literal["hot", "obscure"] = Field(
         ...,
         description=(
@@ -130,9 +158,18 @@ Rules:
   • If the article is short or thin on examples, that's fine — empty lists
     are legitimate.
 
-Output a one-line thesis, 3-5 key points in source order, the concrete
-examples the author uses (verbatim ok), the intended takeaway, and the
-domain."""
+You ALSO classify two routing axes the downstream pipeline branches on:
+
+  • content_mode = "scientific" if this is a research paper / preprint /
+    technical writeup with a method-result-baseline shape, otherwise
+    "general". A Medium post explaining a paper is still "scientific".
+
+  • audience_level = "general" / "technical" / "expert" — best fit for
+    this material. Be honest. If audience would have to be in the specific
+    subfield, downgrade to "technical" and let the writer translate.
+
+Output the thesis, plain thesis, jargon glossary, key points, examples,
+intended takeaway, domain, content_mode, audience_level, and topic_familiarity."""
 
 
 async def distill(app: Any, source: SourceContent) -> ArticleSummary:

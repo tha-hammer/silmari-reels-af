@@ -27,7 +27,7 @@ from reel_af.agents.architectures.viral_exemplars import (
     format_for_prompt,
     select_exemplars,
 )
-from reel_af.agents.creator_playbook import OBSCURE_WRITING_GUIDE
+from reel_af.agents.creator_playbook import OBSCURE_WRITING_GUIDE, SCIENTIFIC_WRITING_GUIDE
 from reel_af.agents.distiller import ArticleSummary
 from reel_af.agents.reel_composer import Direction, ReelDraft
 
@@ -74,18 +74,30 @@ _CLONE_SYSTEM_TEMPLATE = """You are writing a vertical-reel script by
 IMITATING the structure of proven viral exemplars. Below are 3 exemplars
 chosen for your target article's direction.
 
-TOPIC FAMILIARITY RULE (read first):
+MODE RULES (read first — three regimes, scientific takes precedence):
 
-  • If `topic_familiarity == "hot"` (mainstream / audience already knows):
-    cold-open with a contrarian hook as the exemplars do. The exemplars
-    are written in the contrarian-creator voice — match it.
+  • If `content_mode == "scientific"` (research paper / preprint / technical
+    writeup): IGNORE the exemplars' creator-voice rhythm. Audience is
+    engineers / dev-Twitter / scientifically-literate — use the field's
+    jargon freely, lead with the result, name the method, cite the baseline.
+    The exemplars are useful only for STRUCTURAL cues (where a payoff lands,
+    how a close earns a save) — surface register comes from the scientific
+    guide below, not from the exemplars.
 
-  • If `topic_familiarity == "obscure"` (niche product / specific researcher
-    / inside-baseball / specialised research): IGNORE the exemplars' punchy
-    cold-open style. Instead, follow the obscure-topic writing guide
-    appended below. Plain language. Define before you judge. Conversational
-    explainer register — like a friend telling you about something
-    interesting they read, not a creator dunking on you.
+    {SCIENTIFIC_GUIDE_PLACEHOLDER}
+
+  • If `content_mode == "general"` and `topic_familiarity == "hot"`
+    (mainstream / audience already knows): cold-open with a contrarian hook
+    as the exemplars do. The exemplars are written in the contrarian-creator
+    voice — match it.
+
+  • If `content_mode == "general"` and `topic_familiarity == "obscure"`
+    (niche product / specific researcher / inside-baseball / specialised
+    research): IGNORE the exemplars' punchy cold-open style. Instead, follow
+    the obscure-topic writing guide appended below. Plain language. Define
+    before you judge. Conversational explainer register — like a friend
+    telling you about something interesting they read, not a creator
+    dunking on you.
 
     {OBSCURE_GUIDE_PLACEHOLDER}
 
@@ -132,16 +144,22 @@ async def _clone(
     app: Any, summary: ArticleSummary, direction: Direction
 ) -> tuple[ReelDraft, list[str]]:
     exemplars = select_exemplars(direction, n=3)
-    # Inject the obscure guide only when needed (keeps prompt lean otherwise).
-    obscure_block = OBSCURE_WRITING_GUIDE if summary.topic_familiarity == "obscure" else ""
+    # Inject only the guide the current mode needs (keeps prompt lean).
+    is_scientific = summary.content_mode == "scientific"
+    is_obscure = (not is_scientific) and summary.topic_familiarity == "obscure"
+    scientific_block = SCIENTIFIC_WRITING_GUIDE if is_scientific else ""
+    obscure_block = OBSCURE_WRITING_GUIDE if is_obscure else ""
     system = _CLONE_SYSTEM_TEMPLATE.format(
         exemplars=format_for_prompt(exemplars),
+        SCIENTIFIC_GUIDE_PLACEHOLDER=scientific_block,
         OBSCURE_GUIDE_PLACEHOLDER=obscure_block,
     )
     user = (
         f"TARGET ARTICLE SUMMARY (this is what your script is ABOUT — not the "
         f"exemplars):\n"
         f"  domain           : {summary.domain}\n"
+        f"  content_mode     : {summary.content_mode}\n"
+        f"  audience_level   : {summary.audience_level}\n"
         f"  topic_familiarity: {summary.topic_familiarity}\n"
         f"  thesis           : {summary.one_line_thesis}\n"
         f"  takeaway         : {summary.intended_takeaway}\n"
