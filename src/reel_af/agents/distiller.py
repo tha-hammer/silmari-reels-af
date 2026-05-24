@@ -29,6 +29,18 @@ MIN_POINTS = 3
 MAX_POINTS = 5
 
 
+class JargonEntry(BaseModel):
+    """One paired term + its plain-English translation.
+
+    Closed-shape so OpenAI's strict structured-output mode accepts it
+    (loose `dict[str, str]` fails on Bedrock + OpenAI strict).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    term: str = Field(..., description="The specialist term as it appears.")
+    plain: str = Field(..., description="4-word plain-English equivalent.")
+
+
 class ArticleSummary(BaseModel):
     """Faithful structured summary of one article. No creative reframing."""
 
@@ -131,16 +143,15 @@ class ArticleSummary(BaseModel):
             "it aloud — would your aunt understand it on first hearing?"
         ),
     )
-    jargon_glossary: list[dict[str, str]] = Field(
+    jargon_glossary: list[JargonEntry] = Field(
         ...,
         description=(
-            "Every specialist term in the article paired with a 4-word plain-"
-            "English translation that a TikTok scroller would grasp. The "
-            "downstream writer uses this to choose between (a) using the plain "
-            "translation outright, or (b) defining the jargon inline in 4 "
-            "words. Format: [{'term': 'entanglement', 'plain': 'two particles "
-            "linked as one'}, ...]. Aim for 4-10 entries. Empty list ONLY if "
-            "the article genuinely has no jargon."
+            "Every specialist term in the article paired with a 4-word "
+            "plain-English translation that a TikTok scroller would grasp. "
+            "The downstream writer uses this to choose between (a) using the "
+            "plain translation outright, or (b) defining the jargon inline. "
+            "Aim for 4-10 entries. Empty list ONLY if the article genuinely "
+            "has no jargon."
         ),
     )
 

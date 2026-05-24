@@ -206,6 +206,59 @@ download. Same SDK call path otherwise. Remove once upstream is fixed.
 
 ---
 
+## 7. `app.ai()` has no per-call timeout override
+
+**File**: `agentfield/agent_ai.py` ≈ line 257 (`async def ai`), 534-537
+
+The `ai()` signature accepts `temperature`, `max_tokens`, `stream`, `tools`,
+etc., but NOT a `timeout` parameter. The effective timeout is read from
+`agent.async_config.llm_call_timeout` (default 120 s) and used for both
+the inner `litellm.acompletion` call and a `2× safety net` wrap:
+
+```python
+# line 595
+return await asyncio.wait_for(
+    litellm_module.acompletion(**params),
+    timeout=timeout * 2,
+)
+```
+
+To bump it, you must bump the whole agent's config (via
+`AGENTFIELD_ASYNC_LLM_CALL_TIMEOUT` env var). That affects every
+LLM call the agent makes.
+
+This bites pipelines that mix fast and slow calls — e.g., reel-af's
+distiller and scene_breaker want ~60 s, but compose_script on a long
+arxiv preprint needs 10+ minutes. Today we have to set the agent-wide
+timeout to the slowest case.
+
+**Suggested fix**: accept `timeout: Optional[float] = None` in
+`ai()` (and friends) and prefer it over `async_config.llm_call_timeout`
+when set. One-line addition.
+
+**Consumer workaround used here**: bump
+`AGENTFIELD_ASYNC_LLM_CALL_TIMEOUT` to the slowest expected call.
+
+---
+
+## Confirmed correct: SDK's async patterns
+
+For completeness — the SDK gets video generation right:
+
+| Operation | OpenRouter shape | SDK pattern | Status |
+| --- | --- | --- | --- |
+| Video gen (Veo) | Async: POST `/videos` (202) → poll `/videos/{id}` → download | SDK polls until `status=completed`, then GETs `unsigned_urls[0]` | Correct shape (the download-auth bug in #6 is separate) |
+| Image gen (Gemini) | Sync: chat completions returns data URL inline | SDK uses single `chat/completions` call with `modalities=["image","text"]` | Correct |
+| Audio gen (TTS) | Sync streaming: chat completions SSE | SDK uses `stream=true` and accumulates audio deltas | Correct (the stream=true / format='wav' clash in #1 is separate) |
+| Chat completions | Sync only — no async submit-and-poll from OpenRouter | SDK uses `litellm.acompletion` | Correct — OpenRouter doesn't expose an async chat job queue, nothing to wire up |
+
+So the SDK's async-job-queue handling is in good shape where the provider
+supports it. The "timeouts on long chat calls" pain is a model-speed
+issue (and a missing per-call timeout override, #7 above) — not an
+async-pattern gap.
+
+---
+
 ## What we are NOT bypassing
 
 All model calls go through the SDK:

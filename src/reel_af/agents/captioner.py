@@ -107,8 +107,8 @@ async def rewrite_captions(
 ) -> list[Scene]:
     """Return new Scene list with rewritten contrapuntal captions."""
     glossary_lines = "\n".join(
-        f"  - {term['term']} → {term['plain']}"
-        for term in summary.jargon_glossary[:12]
+        f"  - {entry.term} → {entry.plain}"
+        for entry in summary.jargon_glossary[:12]
     ) or "  (no specialist terms)"
     scene_lines = "\n".join(
         f"  [{s.idx}] role={s.role:10s} sentence={s.sentence!r}"

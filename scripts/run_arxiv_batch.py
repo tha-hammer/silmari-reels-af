@@ -18,7 +18,6 @@ TIMEOUT_S = 1800
 
 PAPERS = [
     ("biology_protein",  "https://arxiv.org/abs/2502.05512"),  # protein design recent
-    ("physics_jwst",     "https://arxiv.org/abs/2306.10101"),  # JWST early universe finding
     ("cs_diffusion",     "https://arxiv.org/abs/2407.01392"),  # Diffusion Forcing — CS/ML
 ]
 
