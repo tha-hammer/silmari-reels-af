@@ -143,6 +143,20 @@ async def break_scenes_step(script: str) -> dict:
 
 
 @reel.reasoner()
+async def tag_inject_step(script: str) -> dict:
+    """Sub-reasoner: insert Gemini Flash TTS inline audio tags.
+
+    Returns the same script with [excited]/[pause]/[emphasis]/...
+    bracketed cues woven in. Gemini reads the words and treats the tags
+    as stage directions — never spoken. Used as the input to TTS so
+    delivery direction stays out of the spoken text.
+    """
+    from reel_af.agents.tag_injector import inject_tags
+    tagged = await inject_tags(app, script)
+    return {"script_with_tags": tagged}
+
+
+@reel.reasoner()
 async def rewrite_captions_step(
     scenes: list[dict], summary: dict, full_script: str,
 ) -> dict:
@@ -580,11 +594,18 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
     timings["compose_script"] = round(time.time() - t, 1)
     draft = composed["draft"]
 
-    # 3. break_scenes — needs script.
+    # 3. break_scenes ∥ tag_inject — both only need draft.script and are
+    # independent. tag_inject produces the script with Gemini Flash TTS
+    # inline tags ([curious]/[pause]/[emphasis]/...) so delivery direction
+    # never leaks into the spoken audio.
     t = time.time()
-    scenes_resp = await app.call(
+    scenes_task = asyncio.create_task(app.call(
         f"{node}.reel_break_scenes_step", script=draft["script"]
-    )
+    ))
+    tag_task = asyncio.create_task(app.call(
+        f"{node}.reel_tag_inject_step", script=draft["script"]
+    ))
+    scenes_resp = await scenes_task
     scenes = scenes_resp["scenes"]
     timings["break_scenes"] = round(time.time() - t, 1)
 
@@ -610,9 +631,13 @@ async def generate(url: str, out_dir: str | None = None) -> dict:
         tone=draft["voice_tone"], script=draft["script"],
         topic_familiarity=topic_familiarity, content_mode=content_mode,
     ))
+    # Pull the tagged script (almost always already done — it was kicked
+    # off back in step 3 parallel with break_scenes).
+    tagged_resp = await tag_task
+    tagged_script = tagged_resp["script_with_tags"]
     audio_task = asyncio.create_task(app.call(
         f"{node}.reel_synthesize_audio",
-        full_script=draft["script"], scenes=scenes,
+        full_script=tagged_script, scenes=scenes,
         voice_tone=draft["voice_tone"], out_dir=str(media_dir),
     ))
     arc_resp = await arc_task

@@ -254,10 +254,96 @@ def _patch_openrouter_video_download() -> None:
     _mp.OpenRouterProvider.generate_video = patched_generate_video  # type: ignore[assignment]
 
 
+def _patch_openrouter_speech() -> None:
+    """SDK gap — OpenRouterProvider has no `generate_speech()`.
+
+    The existing OpenRouterProvider.generate_audio() routes through
+    /chat/completions with modalities=["text","audio"]. That works for
+    chat-style audio models (openai/gpt-audio) but conflates the
+    "tone instruction" with the "text to speak" — the model often reads
+    the directive aloud.
+
+    OpenRouter ALSO exposes /audio/speech (OpenAI-compatible TTS endpoint)
+    which routes to dedicated TTS models — Google Gemini 3.1 Flash TTS,
+    xAI Grok Voice, Kokoro, Orpheus, etc. These accept text + (optional)
+    instructions as separate parameters, so the directive never gets
+    spoken. We attach this as a new method on OpenRouterProvider.
+
+    File this upstream as: "OpenRouterProvider missing /audio/speech
+    support for dedicated TTS models".
+    """
+    from agentfield import media_providers as _mp
+
+    if hasattr(_mp.OpenRouterProvider, "generate_speech"):
+        return
+
+    async def generate_speech(
+        self,
+        text: str,
+        model: str = "google/gemini-3.1-flash-tts-preview",
+        voice: str = "Kore",
+        response_format: str = "pcm",
+        instructions: Optional[str] = None,
+        timeout: float = 120.0,
+        **kwargs: Any,
+    ) -> bytes:
+        """Call OpenRouter /audio/speech with a dedicated TTS model.
+
+        Returns raw audio bytes in the requested response_format. For
+        Gemini TTS only "pcm" is accepted (24 kHz mono 16-bit). Most
+        other models accept "mp3" as well.
+        """
+        import aiohttp
+
+        api_key = self._api_key or os.environ.get("OPENROUTER_API_KEY", "")
+        if not api_key:
+            raise ValueError(
+                "OpenRouter API key required. Set OPENROUTER_API_KEY env var "
+                "or pass api_key to OpenRouterProvider."
+            )
+        send_model = model
+        if send_model.startswith("openrouter/"):
+            send_model = send_model[len("openrouter/") :]
+        payload: Dict[str, Any] = {
+            "model": send_model,
+            "input": text,
+            "voice": voice,
+            "response_format": response_format,
+        }
+        if instructions:
+            payload["instructions"] = instructions
+        # Allow caller to pass-through any vendor-specific param
+        # (e.g. speed, sample_rate).
+        for k, v in kwargs.items():
+            payload.setdefault(k, v)
+
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        client_timeout = aiohttp.ClientTimeout(total=timeout)
+        async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            async with session.post(
+                "https://openrouter.ai/api/v1/audio/speech",
+                json=payload,
+                headers=headers,
+            ) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    raise RuntimeError(
+                        f"OpenRouter /audio/speech failed ({resp.status}): "
+                        f"{body[:500]}"
+                    )
+                return await resp.read()
+
+    _mp.OpenRouterProvider.generate_speech = generate_speech  # type: ignore[attr-defined]
+
+
 def apply_all() -> None:
     """Apply every patch. Idempotent — safe to call multiple times."""
     _patch_image_output_save()
     _patch_openrouter_video_download()
+    _patch_openrouter_speech()
 
 
 # Apply on import so any code that imports this module gets the fixes.

@@ -17,8 +17,9 @@ CONTROL_PLANE = "http://localhost:8080"
 TIMEOUT_S = 1800
 
 PAPERS = [
-    ("biology_protein",  "https://arxiv.org/abs/2502.05512"),  # protein design recent
-    ("cs_diffusion",     "https://arxiv.org/abs/2407.01392"),  # Diffusion Forcing — CS/ML
+    ("math_primes",   "https://arxiv.org/abs/2502.20825"),  # math
+    ("physics_dm",    "https://arxiv.org/abs/2502.17575"),  # physics dark matter / cosmology
+    ("chem_catalyst", "https://arxiv.org/abs/2502.09950"),  # chemistry catalyst
 ]
 
 

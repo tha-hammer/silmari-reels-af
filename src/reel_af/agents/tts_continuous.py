@@ -1,34 +1,29 @@
 """Continuous TTS — one TTS call for the full script, split on silences.
 
-Uses AgentField's OpenRouterProvider.generate_audio() for the actual call
-(NEVER bypasses the SDK — all provider calls go through AgentField).
+Calls AgentField's OpenRouterProvider through the `/audio/speech` endpoint
+(via the runtime SDK patch in sdk_patches.py) to reach dedicated TTS
+models like Google Gemini 3.1 Flash TTS. Those models interpret inline
+`[tag]` directives as stage directions and never speak them aloud — so
+tone instructions stay out of the spoken text, unlike the chat-audio
+gpt-audio models we used before.
 
 This solves DISCRETE WORDS — per-segment calls have no prosody continuity,
 so every sentence dies flat at the period. Generating the whole script in
 one call carries intonation across sentence boundaries.
 
-Known SDK gap (worth filing upstream):
-  OpenRouterProvider.generate_audio() hardcodes
-  messages=[{"role":"user","content":text}] with no way to inject a
-  system message. Without a system role, chat-completions audio models
-  like gpt-audio-mini may RESPOND to the script ("Sure, I can help…")
-  instead of READING it verbatim as narrator. We work around this by
-  prepending compact narrator directives to the user text so the model
-  treats the whole payload as a "read this verbatim" task.
-
 Approach:
-  1. SDK generate_audio() with format='wav' (returns complete WAV bytes
-     base64-encoded — no PCM-wrapping needed).
-  2. Write the wav, run ffmpeg `silencedetect` to find sentence-boundary
-     silences.
-  3. Split at silence midpoints; assign per-scene clips.
-  4. Fall back to proportional-by-word-count splits if silence count is off.
+  1. The script_writer + tag_injector produce a script with inline Gemini
+     audio tags (e.g. "[curious] GPT-4o on MATH? [excited] Beaten by RL.")
+  2. SDK generate_speech() returns raw PCM (Gemini's only format).
+  3. Wrap raw PCM as WAV (stdlib `wave`).
+  4. Use ffmpeg `silencedetect` to find sentence-boundary silences.
+  5. Split at silence midpoints; assign per-scene clips.
+  6. Fall back to proportional-by-word-count splits if silence count is off.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import io
 import os
 import re
@@ -39,22 +34,21 @@ from typing import Optional
 
 from agentfield.media_providers import OpenRouterProvider
 
+# Ensure the runtime patch that adds OpenRouterProvider.generate_speech()
+# is applied before we try to call it. See AGENTFIELD_SDK_ISSUES.md.
+import reel_af.sdk_patches  # noqa: F401
+
 from reel_af.agents.scene_breaker import Scene
 from reel_af.models import BeatArtifact
 
-# gpt-audio family streams PCM16 @ 24kHz mono.
+# Gemini 3.1 Flash TTS streams PCM @ 24kHz mono 16-bit.
 TTS_SAMPLE_RATE = 24000
 
 
 def _wrap_pcm16_bytes_as_wav(
     pcm: bytes, sample_rate: int = TTS_SAMPLE_RATE, channels: int = 1
 ) -> bytes:
-    """Wrap raw little-endian 16-bit PCM samples in a WAV container.
-
-    Required because the SDK's generate_audio() hardcodes stream=true,
-    and OpenRouter only accepts format='pcm16' when streaming — so we get
-    raw PCM back and must add the WAV header ourselves (stdlib only).
-    """
+    """Wrap raw little-endian 16-bit PCM samples in a WAV container."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(channels)
@@ -63,106 +57,62 @@ def _wrap_pcm16_bytes_as_wav(
         wf.writeframes(pcm)
     return buf.getvalue()
 
-# Default model: gpt-audio-mini via chat-completions audio modality.
-DEFAULT_TTS_MODEL = "openrouter/openai/gpt-audio-mini"
+# Default TTS model — Gemini 3.1 Flash TTS via OpenRouter /audio/speech.
+# Picked because it supports 200+ inline audio tags ([excited], [pause],
+# [whispers], …) that steer delivery without polluting the spoken text.
+DEFAULT_TTS_MODEL = "google/gemini-3.1-flash-tts-preview"
 
-# Voice map by tone — SDK clamps unknown voices to "alloy", so we ensure
-# every value here is in the supported set (alloy/echo/fable/onyx/nova/shimmer).
+# Gemini voice map by script tone. Gemini's voice set includes Achernar,
+# Achird, Algenib, Algieba, Alnilam, Aoede, Autonoe, Callirrhoe, Charon,
+# Despina, Enceladus, Erinome, Fenrir, Gacrux, Iapetus, Kore, Laomedeia,
+# Leda, Orus, Pulcherrima, Puck, Rasalgethi, Sadachbia, Sadaltager,
+# Schedar, Sulafat, Umbriel, Vindemiatrix, Zephyr, Zubenelgenubi.
+# Picks below are the most reliable for English narration in each tone.
 _VOICE_BY_TONE: dict[str, str] = {
-    "urgent":  "onyx",      # deep, serious — gravitas
-    "wonder":  "nova",      # warm, curious
-    "deadpan": "echo",      # neutral, dry
-    "earnest": "alloy",     # friendly, warm
-    "playful": "shimmer",   # bright, conversational
+    "urgent":  "Charon",      # deep, serious — gravitas
+    "wonder":  "Kore",        # warm, curious — default scientific narrator
+    "deadpan": "Schedar",     # neutral, measured
+    "earnest": "Aoede",       # friendly, warm
+    "playful": "Puck",        # bright, conversational
 }
 
 
 def voice_for_tone(tone: str) -> str:
-    """Pick a gpt-audio voice that matches the script's tone."""
-    return _VOICE_BY_TONE.get(tone, "nova")
+    """Pick a Gemini voice that matches the script's tone."""
+    return _VOICE_BY_TONE.get(tone, "Kore")
 
 
-# ───── Narrator directive (compensates for SDK's no-system-message gap) ─
-
-
-def _wrap_as_narration(script: str, tone: str) -> str:
-    """Wrap the script with an inline narrator directive.
-
-    The SDK's generate_audio() only takes a single user message, so we
-    can't pass a system role to coerce the model into 'read verbatim'
-    mode. We embed the directive inline.
-
-    The DELIVERY PRINCIPLES below are distilled from the rhythm of
-    high-retention science explainer reels — earnest curiosity, not
-    "creator hype". The divider block makes it visually obvious to the
-    model where the literal script begins.
-    """
-    return (
-        f"You are a vertical-video science narrator. Read EVERY word "
-        f"between the dividers below EXACTLY as written, with a {tone} "
-        f"tone. Do not greet, comment, summarise, or add ANY words of "
-        f"your own.\n\n"
-        f"DELIVERY PRINCIPLES — these are HOW the script should sound, "
-        f"not what to say:\n"
-        f"  • Sound like you're discovering this alongside the viewer, "
-        f"not lecturing them. Earnest curiosity, not creator hype.\n"
-        f"  • Treat the listener as a smart friend who hasn't read the "
-        f"paper. Conversational, not corporate.\n"
-        f"  • When a NUMBER, percentage, or NAMED METHOD lands "
-        f"(e.g. \"84%\", \"AlphaGeometry\", \"surface code\"), give it "
-        f"a half-beat of breath before AND after. Let it register.\n"
-        f"  • Pitch slightly UP on the surprising or counter-intuitive "
-        f"clause — the place where 'wait, really?' would happen in the "
-        f"listener's head. Match their reaction.\n"
-        f"  • Em-dashes (—) are a deliberate THINK pause. Single-word "
-        f"periods (\"Wrong.\" \"Solved.\") are emphatic beats — short, "
-        f"impactful, then breathe.\n"
-        f"  • The FIRST sentence is the scroll-stopper. Open with "
-        f"energy and CLARITY — don't waste the hook on a low-volume "
-        f"warm-up syllable.\n"
-        f"  • The LAST sentence is the close. Slow down. Drop volume "
-        f"slightly. Let it land like a period instead of trailing off.\n"
-        f"  • ALL CAPS WORDS get a small lean-in — fractionally louder "
-        f"and slower, not shouted.\n"
-        f"  • Casual transitions (\"and here's the wild thing\", \"turns "
-        f"out\") are spoken in the same warm register as the surrounding "
-        f"narration — no sudden creator-voice gear-shift.\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"{script}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    )
-
-
-# ───── SDK-based TTS via OpenRouterProvider.generate_audio() ─────────
+# ───── SDK-based TTS via OpenRouterProvider.generate_speech() ────────
 
 
 async def _sdk_generate_wav(
-    full_script: str,
+    tagged_script: str,
     voice: str,
-    tone: str,
     model: str,
     timeout: float = 300.0,
 ) -> bytes:
-    """Generate a complete WAV via AgentField's SDK.
+    """Generate a complete WAV via AgentField's SDK + Gemini TTS.
 
-    Returns ready-to-write WAV bytes (header + PCM16). All transport,
-    streaming, and decoding happens inside OpenRouterProvider — we never
-    touch HTTP. We request format='pcm16' (the only one the SDK's hardcoded
-    stream=true allows) and slap a WAV header on the raw samples.
+    Returns ready-to-write WAV bytes (header + PCM). Gemini outputs raw
+    PCM at 24 kHz mono 16-bit; we add the WAV header (stdlib `wave`).
+
+    The script passed in must already have Gemini audio tags inserted
+    by tag_injector — Gemini treats the bracketed cues as stage
+    directions and never speaks them aloud, which is what gives us
+    expressive delivery without instruction-leak.
     """
     provider = OpenRouterProvider()
-    response = await provider.generate_audio(
-        text=_wrap_as_narration(full_script, tone),
+    pcm = await provider.generate_speech(  # type: ignore[attr-defined]
+        text=tagged_script,
         model=model,
         voice=voice,
-        format="pcm16",
+        response_format="pcm",
         timeout=timeout,
     )
-    if response.audio is None or not response.audio.data:
+    if not pcm:
         raise RuntimeError(
-            f"tts_continuous: SDK generate_audio returned no audio for model {model}"
+            f"tts_continuous: generate_speech returned no audio for model {model}"
         )
-    pcm = base64.b64decode(response.audio.data)
     return _wrap_pcm16_bytes_as_wav(pcm)
 
 
@@ -296,12 +246,13 @@ async def generate_continuous_audio(
     out_dir.mkdir(parents=True, exist_ok=True)
     tts_model = model or os.environ.get("REEL_AF_TTS_MODEL", DEFAULT_TTS_MODEL)
 
-    # All transport happens inside the AgentField SDK. Narrator direction
-    # is embedded in the user text (see SDK gap noted in module docstring).
+    # full_script here MUST already contain Gemini inline audio tags
+    # (the entry reasoner runs tag_injector right after compose_script
+    # and feeds the tagged script in). Gemini reads the words and
+    # interprets the tags as stage directions.
     wav_bytes = await _sdk_generate_wav(
-        full_script=full_script,
+        tagged_script=full_script,
         voice=voice,
-        tone=tone,
         model=tts_model,
     )
     full_audio_path = out_dir / "full.wav"

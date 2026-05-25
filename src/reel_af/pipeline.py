@@ -21,6 +21,7 @@ from reel_af.agents.navigator import navigate
 from reel_af.agents.scene_breaker import break_scenes
 from reel_af.agents.shot_director_v2 import direct_shots_v2
 from reel_af.agents.story_router import route_and_run
+from reel_af.agents.tag_injector import inject_tags
 from reel_af.agents.tts_continuous import generate_continuous_audio, voice_for_tone
 from reel_af.agents.video_gen import generate_videos
 from reel_af.agents.visual_vocab import build_vocabulary
@@ -73,15 +74,20 @@ async def run_pipeline(app: Any, url: str, out_dir: Path, run_id: str) -> dict:
     draft = routed.draft
     voice = voice_for_tone(draft.voice_tone)
 
-    # 4. Scene breaker (serial — needs script).
+    # 4. Scene breaker ∥ tag injection (both need only script).
     t = time.time()
-    scenes = await break_scenes(app, draft.script)
+    scenes_task = asyncio.create_task(break_scenes(app, draft.script))
+    tag_task = asyncio.create_task(inject_tags(app, draft.script))
+    scenes = await scenes_task
     timings["scenes"] = time.time() - t
 
     # 4b. Rewrite captions contrapuntally with article context.
     t = time.time()
     scenes = await rewrite_captions(app, scenes, summary, draft.script)
     timings["captions"] = round(time.time() - t, 2)
+
+    # Tagged script for Gemini TTS — tags are stage directions, never spoken.
+    tagged_script = await tag_task
 
     # Vocabulary almost always done by now.
     vocab = await vocab_task
@@ -102,7 +108,7 @@ async def run_pipeline(app: Any, url: str, out_dir: Path, run_id: str) -> dict:
     )
     tts_task = asyncio.create_task(
         generate_continuous_audio(
-            full_script=draft.script,
+            full_script=tagged_script,
             scenes=scenes,
             voice=voice,
             out_dir=media_dir,
