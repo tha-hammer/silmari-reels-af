@@ -31,12 +31,12 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from agentfield import Agent, AIConfig
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
-from agentfield import Agent, AIConfig
 from reel_af.agents.distiller import distill
 from reel_af.agents.navigator import navigate
 from reel_af.agents.scene_breaker import break_scenes
@@ -288,7 +288,7 @@ def script_cmd(
         wc = len(routed.draft.script.split())
         console.print(f"  words: {wc} (~{wc/2.6:.1f}s spoken)")
         console.print()
-        console.print(f"[bold]SCRIPT:[/bold]")
+        console.print("[bold]SCRIPT:[/bold]")
         console.print(f"  {routed.draft.script}")
 
     asyncio.run(_script())
@@ -316,7 +316,7 @@ def stories_cmd(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     af = _build_agent()
-    console.print(f"[bold cyan]stories[/bold cyan] running 4 architectures in parallel on:")
+    console.print("[bold cyan]stories[/bold cyan] running 4 architectures in parallel on:")
     console.print(f"  {url}")
     summary, outputs = asyncio.run(run_all(af, url))
 
@@ -347,6 +347,30 @@ def stories_cmd(
     _sys.__stdout__.flush()
 
 
+async def _run_v2(url: str, out_dir: Path, run_id: str) -> None:
+    """v2 pipeline driver — thin wrapper around run_pipeline_v2."""
+    if "OPENROUTER_API_KEY" not in os.environ:
+        raise SystemExit("OPENROUTER_API_KEY not set (put it in .env)")
+    from reel_af.v2.pipeline import run_pipeline_v2
+
+    af = _build_agent()
+    console.print(Panel.fit(f"[bold]reel-af v2[/bold]  URL: {url}", border_style="cyan"))
+    result = await run_pipeline_v2(af, url, out_dir, run_id)
+    console.print(
+        f"[green]✓[/green] reel ready: [bold]{result['video_path']}[/bold] "
+        f"({result['duration_s']:.1f}s, {result['shot_count']} shots, "
+        f"{result['card_count']} cards, {result['accent_count']} accents, "
+        f"hook={result['hook_variant']}, mode={result['content_mode']})"
+    )
+    tbl = Table(title="phase timings (v2)")
+    tbl.add_column("phase")
+    tbl.add_column("seconds", justify="right")
+    for k, v in result["timings"].items():
+        tbl.add_row(k, f"{v}")
+    tbl.add_row("[bold]wall[/bold]", f"[bold]{result['wall_time_s']}[/bold]")
+    console.print(tbl)
+
+
 @app.command(name="generate")
 def generate_cmd(
     url: Annotated[str, typer.Argument(help="Article / page URL to turn into a reel.")],
@@ -354,12 +378,21 @@ def generate_cmd(
         Optional[Path],
         typer.Option("--out", "-o", help="Output directory. Default: output/<run_id>/"),
     ] = None,
+    algo: Annotated[
+        str,
+        typer.Option("--algo", help="Pipeline version: v1 (current default) or v2 (new — see docs/ARCHITECTURE_V2.md)."),
+    ] = "v1",
 ) -> None:
     """Generate a vertical reel from a single URL."""
     run_id = uuid.uuid4().hex[:8]
     out_dir = out or (Path.cwd() / "output" / run_id)
     out_dir.mkdir(parents=True, exist_ok=True)
-    asyncio.run(_run(url, out_dir, run_id))
+    if algo == "v2":
+        asyncio.run(_run_v2(url, out_dir, run_id))
+    elif algo == "v1":
+        asyncio.run(_run(url, out_dir, run_id))
+    else:
+        raise SystemExit(f"unknown --algo {algo!r}; use 'v1' or 'v2'")
 
 
 if __name__ == "__main__":
