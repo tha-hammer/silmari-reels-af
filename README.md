@@ -29,6 +29,18 @@ Article URL or topic phrase → 1080×1920 vertical reel with word-burst karaoke
 
 ## One-Call DX
 
+Trigger it with the `af` CLI (requires af ≥ 0.1.86) — it streams live progress and prints the result:
+
+```bash
+# URL → reel
+af call reel-af.reel_article_to_reel --in '{"url": "https://arxiv.org/abs/2509.25541"}'
+
+# Topic → reel (runs the 4-hunter → critic → 3-narrator → judge cascade)
+af call reel-af.reel_topic_to_reel --in '{"topic": "the placebo effect"}'
+```
+
+Prefer raw HTTP? Hit the API directly with curl:
+
 ```bash
 # URL → reel
 curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_article_to_reel \
