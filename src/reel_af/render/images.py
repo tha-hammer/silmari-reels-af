@@ -10,6 +10,7 @@ like a perfume ad.
 
 from __future__ import annotations
 
+import base64
 import os
 from pathlib import Path
 
@@ -102,15 +103,39 @@ async def generate_first_frame(
     final_path = out_dir / f"frame-{idx:02d}.jpg"
 
     augmented = _augment(image_prompt, content_mode)
-    images = await provider.generate_image(
+    resp = await provider.generate_image(
         prompt=augmented,
         model=IMAGE_MODEL,
         n=1,
     )
+    # generate_image returns a MultimodalResponse; its .images are
+    # ImageOutput(url, b64_json, ...) rather than PIL images. Persist the
+    # first one's bytes to raw_path.
+    images = getattr(resp, "images", None) or []
     if not images:
         raise RuntimeError(
             f"generate_first_frame: image gen returned no images for beat {idx}"
         )
-    img = images[0]
-    img.save(str(raw_path))
+    await _save_image_output(images[0], raw_path)
     return _crop_to_9x16(raw_path, final_path)
+
+
+async def _save_image_output(image, dest: Path) -> None:
+    """Persist an SDK ImageOutput (b64_json or url) to `dest` as raw bytes."""
+    b64 = getattr(image, "b64_json", None)
+    url = getattr(image, "url", None)
+    if b64:
+        dest.write_bytes(base64.b64decode(b64))
+        return
+    if url and url.startswith("data:"):
+        dest.write_bytes(base64.b64decode(url.split(",", 1)[1]))
+        return
+    if url:
+        import aiohttp
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as r:
+                r.raise_for_status()
+                dest.write_bytes(await r.read())
+        return
+    raise RuntimeError("image output had neither b64_json nor url")

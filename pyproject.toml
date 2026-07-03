@@ -21,6 +21,7 @@ dependencies = [
     "rich>=13.0",
     "Pillow>=10.0",
     "pysubs2>=1.7",
+    "youtube-transcript-api>=0.6",
 ]
 
 [project.optional-dependencies]
