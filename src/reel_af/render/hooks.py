@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 CRISP_YTDLP_FORMAT = "137+140/137+bestaudio[ext=m4a]"
 YTDLP_MERGE_OUTPUT_FORMAT = "mp4"
@@ -29,17 +29,20 @@ _TIME_EPSILON_S = 0.001
 
 
 class HookDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     hook: str
 
 
 class ImageMomentDraft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     t_start: float
     t_end: float
     image_prompt: str
 
 
 class ImageMomentResponse(BaseModel):
-    moments: list[ImageMomentDraft] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
+    moments: list[ImageMomentDraft]
 
 
 class ImageMoment(NamedTuple):
