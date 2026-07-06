@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import os
 from pathlib import Path
+from typing import Any, Sequence
 
 from agentfield.media_providers import OpenRouterProvider
 from PIL import Image
@@ -111,7 +112,7 @@ async def generate_first_frame(
     # generate_image returns a MultimodalResponse; its .images are
     # ImageOutput(url, b64_json, ...) rather than PIL images. Persist the
     # first one's bytes to raw_path.
-    images = getattr(resp, "images", None) or []
+    images = _response_images(resp)
     if not images:
         raise RuntimeError(
             f"generate_first_frame: image gen returned no images for beat {idx}"
@@ -138,4 +139,18 @@ async def _save_image_output(image, dest: Path) -> None:
                 r.raise_for_status()
                 dest.write_bytes(await r.read())
         return
+    save = getattr(image, "save", None)
+    if callable(save):
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        save(dest)
+        return
     raise RuntimeError("image output had neither b64_json nor url")
+
+
+def _response_images(resp: Any) -> Sequence[Any]:
+    images = getattr(resp, "images", None)
+    if images is not None:
+        return images
+    if isinstance(resp, Sequence) and not isinstance(resp, (str, bytes, bytearray)):
+        return resp
+    return []

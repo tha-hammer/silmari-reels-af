@@ -299,6 +299,51 @@ def topic(
     _summarize(result, run_id, out_path)
 
 
+def _composite_provider() -> Any:
+    """Build the OpenRouter provider used for hook / moments / image gen."""
+    from agentfield.media_providers import OpenRouterProvider
+
+    return OpenRouterProvider()
+
+
+@app.command("composite")
+def composite(
+    url: Annotated[str, typer.Argument(help="The source video URL (e.g. a YouTube link).")],
+    out_dir: Annotated[
+        Optional[Path],
+        typer.Option("--out", help="Output directory for the reel.", show_default=False),
+    ] = None,
+    fast: Annotated[
+        bool,
+        typer.Option(
+            "--fast/--rich",
+            help="Fast = plain stitched reel (no banner/captions/cut-ins). "
+            "Rich (default) burns the full finish.",
+        ),
+    ] = False,
+) -> None:
+    """URL → crisp reel with banner + captions + image cut-ins (the default finish).
+
+    ``--fast`` opts out and yields the plain stitched reel.
+    """
+    from reel_af.render.composite_pipeline import composite_to_reel
+
+    _require_key()
+    work = out_dir or (_PROJECT_ROOT / "out" / "composite")
+
+    console.rule("[bold]composite_to_reel")
+    console.print(f"  url:  [cyan]{url}[/cyan]")
+    console.print(f"  mode: [dim]{'fast (raw stitched)' if fast else 'rich (banner+captions+cut-ins)'}[/dim]")
+    console.print(f"  out:  [dim]{work}[/dim]")
+    console.print()
+
+    provider = None if fast else _composite_provider()
+    final = asyncio.run(
+        composite_to_reel(url, work, provider=provider, raw=fast)
+    )
+    console.print(f"[green]done:[/green] {final}")
+
+
 @app.command("serve")
 def serve() -> None:
     """Run the AgentField node so the reasoners register with the control plane."""
