@@ -25,7 +25,11 @@ from reel_af.dsl.models import (
     UnmatchedSpan,
     WordsSidecar,
     validate_renderable,
+    _rebuild_forward_refs,
 )
+
+_rebuild_forward_refs()
+del _rebuild_forward_refs
 
 __all__ = [
     "AlignedSpan",
