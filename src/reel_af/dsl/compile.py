@@ -17,6 +17,7 @@ Ordering:
 from __future__ import annotations
 
 import uuid
+from pathlib import Path
 from typing import Any
 
 from reel_af.dsl.aligner import (
@@ -25,9 +26,10 @@ from reel_af.dsl.aligner import (
     snap_edge,
     word_boundaries,
 )
-from reel_af.dsl.ast import Extend, Hole, Insert, Join, Trans
+from reel_af.dsl.ast import Extend, Find, Hole, Insert, Join, Trans
 from reel_af.dsl.composite import CompositeDoc, CompositeSegment, MarkerAttachment
 from reel_af.dsl.models import (
+    FADE_TO_COLOR_EFFECTS,
     FFPROBE_DURATION_EPSILON_S,
     JOIN_GAP_LIMIT_S,
     SNAP_TOLERANCE_S,
@@ -44,12 +46,15 @@ from reel_af.dsl.models import (
     WordsSidecar,
     validate_renderable,
 )
+from reel_af.dsl.relevant import load_candidate, search_relevant
 
 
 def compile_composite(
     doc: CompositeDoc,
     words: WordsSidecar,
     source: SourceRef,
+    *,
+    relevant_dir: Path | None = None,
 ) -> CompileResult:
     diagnostics: list[Diagnostic] = []
 
@@ -70,7 +75,9 @@ def compile_composite(
 
     _apply_extends(doc, aligned, words, diagnostics)
 
-    segments_and_markers = _build_segment_list(doc, aligned, source, diagnostics)
+    segments_and_markers = _build_segment_list(
+        doc, aligned, source, diagnostics, words, relevant_dir,
+    )
     if segments_and_markers is None:
         return _error_result_from(diagnostics)
 
@@ -125,28 +132,7 @@ def _error_result_from(diagnostics: list[Diagnostic]) -> CompileResult:
 
 
 def _check_unsupported(doc: CompositeDoc, diagnostics: list[Diagnostic]) -> bool:
-    found = False
-    for att in doc.markers:
-        marker = att.marker
-        if isinstance(marker, Insert):
-            sel = marker.selector
-            if isinstance(sel, str) and sel in ("relevant", "file"):
-                diagnostics.append(Diagnostic(
-                    code="UNSUPPORTED_INSERT",
-                    message=f"insert {sel} is not supported in v1",
-                    severity="error",
-                    source=att.source,
-                ))
-                found = True
-        if hasattr(marker, "kind") and marker.kind == "find":
-            diagnostics.append(Diagnostic(
-                code="UNSUPPORTED_FIND",
-                message="find is not supported in v1",
-                severity="error",
-                source=att.source,
-            ))
-            found = True
-    return found
+    return False
 
 
 def _check_unresolved(doc: CompositeDoc, diagnostics: list[Diagnostic]) -> bool:
@@ -267,6 +253,8 @@ def _build_segment_list(
     aligned: list[_AlignedSegment],
     source: SourceRef,
     diagnostics: list[Diagnostic],
+    words: WordsSidecar,
+    relevant_dir: Path | None,
 ) -> tuple[list[SourceSegment | BlackSegment], dict[int, Trans]] | None:
     segments: list[SourceSegment | BlackSegment] = []
     trans_markers: dict[int, Trans] = {}
@@ -286,7 +274,7 @@ def _build_segment_list(
         if before_idx is None:
             continue
 
-        if isinstance(marker, Insert) and _is_black_insert(marker):
+        if isinstance(marker, Insert):
             insert_points.setdefault(before_idx, []).append(marker)
         elif isinstance(marker, Trans):
             if marker.all:
@@ -301,6 +289,8 @@ def _build_segment_list(
                     global_trans = att.marker
                 else:
                     trans_points[att.segment_index] = att.marker
+
+    exclude_ranges = [(a.start_s, a.end_s) for a in aligned]
 
     seg_map: dict[int, int] = {}
     out_idx = 0
@@ -318,13 +308,15 @@ def _build_segment_list(
 
         if a.seg.index in insert_points:
             for ins in insert_points[a.seg.index]:
-                dur = ins.duration_s
-                if isinstance(dur, Hole):
-                    dur = float(dur.resolution) if dur.resolution else 1.0
-                if dur is None:
-                    dur = 1.0
-                segments.append(BlackSegment(duration_s=dur))
-                out_idx += 1
+                result = _compile_insert(
+                    ins, i, aligned, words, source, relevant_dir, doc,
+                    exclude_ranges, diagnostics,
+                )
+                if result is None:
+                    return None
+                for seg in result:
+                    segments.append(seg)
+                    out_idx += 1
 
     boundary_idx = 0
     for i in range(len(segments) - 1):
@@ -343,11 +335,114 @@ def _build_segment_list(
     return segments, trans_markers
 
 
-def _is_black_insert(marker: Insert) -> bool:
-    sel = marker.selector
-    if isinstance(sel, str):
-        return sel == "black"
-    return False
+def _compile_insert(
+    ins: Insert,
+    after_aligned_idx: int,
+    aligned: list[_AlignedSegment],
+    words: WordsSidecar,
+    source: SourceRef,
+    relevant_dir: Path | None,
+    doc: CompositeDoc,
+    exclude_ranges: list[tuple[float, float]],
+    diagnostics: list[Diagnostic],
+) -> list[SourceSegment | BlackSegment] | None:
+    sel = ins.selector
+    if isinstance(sel, Hole):
+        sel = str(sel.resolution) if sel.resolution else "black"
+
+    if sel == "black":
+        dur = ins.duration_s
+        if isinstance(dur, Hole):
+            dur = float(dur.resolution) if dur.resolution else 1.0
+        if dur is None:
+            dur = 1.0
+        return [BlackSegment(duration_s=dur)]
+
+    if sel == "relevant":
+        dur = ins.duration_s
+        if isinstance(dur, Hole):
+            dur = float(dur.resolution) if dur.resolution else 10.0
+        if dur is None:
+            dur = 10.0
+        context = _gather_context(aligned, after_aligned_idx)
+        ranges = search_relevant(words, context, dur, exclude_ranges)
+        if not ranges:
+            diagnostics.append(Diagnostic(
+                code="RELEVANT_NO_MATCH",
+                message=f"insert relevant: no matching content for ~{dur}s",
+                severity="error",
+                source=ins.source,
+            ))
+            return None
+        result: list[SourceSegment | BlackSegment] = []
+        for r in ranges:
+            result.append(SourceSegment(
+                segment_id=f"rel-{uuid.uuid4().hex[:8]}",
+                source_url=source.source_url,
+                start_s=r.start_s,
+                end_s=r.end_s,
+                text=r.text,
+            ))
+            exclude_ranges.append((r.start_s, r.end_s))
+        return result
+
+    if sel == "file":
+        stem = ins.file_stem
+        if isinstance(stem, Hole):
+            stem = str(stem.resolution) if stem.resolution else None
+        if stem is None:
+            diagnostics.append(Diagnostic(
+                code="CANDIDATE_NOT_FOUND",
+                message="insert file: no file stem specified",
+                severity="error",
+                source=ins.source,
+            ))
+            return None
+        rdir = relevant_dir or _derive_relevant_dir(doc)
+        if rdir is None:
+            diagnostics.append(Diagnostic(
+                code="CANDIDATE_NOT_FOUND",
+                message="insert file: no relevant directory available",
+                severity="error",
+                source=ins.source,
+            ))
+            return None
+        candidate = load_candidate(rdir, stem)
+        if candidate is None:
+            diagnostics.append(Diagnostic(
+                code="CANDIDATE_NOT_FOUND",
+                message=f"insert file: candidate '{stem}' not found in {rdir}",
+                severity="error",
+                source=ins.source,
+            ))
+            return None
+        result = []
+        for r in candidate.ranges:
+            result.append(SourceSegment(
+                segment_id=f"cand-{uuid.uuid4().hex[:8]}",
+                source_url=source.source_url,
+                start_s=r.start_s,
+                end_s=r.end_s,
+                text=r.text,
+            ))
+        return result
+
+    return []
+
+
+def _gather_context(aligned: list[_AlignedSegment], after_idx: int) -> str:
+    parts = []
+    if 0 <= after_idx < len(aligned):
+        parts.append(aligned[after_idx].text)
+    if after_idx + 1 < len(aligned):
+        parts.append(aligned[after_idx + 1].text)
+    return " ".join(parts)
+
+
+def _derive_relevant_dir(doc: CompositeDoc) -> Path | None:
+    if doc.source_path is not None:
+        return doc.source_path.parent / "relevant"
+    return None
 
 
 def _apply_joins(
@@ -450,7 +545,6 @@ def _build_transitions(
             right_dur = _seg_duration(segments[i + 1])
 
             if effect != "none" and dur > 0:
-                from reel_af.dsl.models import FADE_TO_COLOR_EFFECTS
                 if effect not in FADE_TO_COLOR_EFFECTS:
                     min_adj = min(left_dur, right_dur)
                     if dur >= min_adj:
@@ -512,7 +606,6 @@ def _derive_duration(
     segments: list[SourceSegment | BlackSegment],
     transitions: list[Transition],
 ) -> float:
-    from reel_af.dsl.models import FADE_TO_COLOR_EFFECTS
     total = sum(_seg_duration(s) for s in segments)
     for t in transitions:
         if t.effect != "none" and t.effect not in FADE_TO_COLOR_EFFECTS:
@@ -521,7 +614,6 @@ def _derive_duration(
 
 
 def load_words(path: Any) -> WordsSidecar:
-    from pathlib import Path
     import json
     p = Path(path)
     data = json.loads(p.read_text(encoding="utf-8"))

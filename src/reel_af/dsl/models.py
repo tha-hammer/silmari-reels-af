@@ -153,6 +153,8 @@ DiagnosticCode = Literal[
     "INVALID_TRANSITION",
     "MISSING_SEGMENT_ASSET",
     "CUTIN_INVALID",
+    "RELEVANT_NO_MATCH",
+    "CANDIDATE_NOT_FOUND",
 ]
 
 
