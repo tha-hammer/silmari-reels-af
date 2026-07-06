@@ -1,0 +1,285 @@
+{
+  "schema_version": "1",
+  "words": [
+    {
+      "w": "They",
+      "start": 4.12,
+      "end": 4.3,
+      "conf": 0.99
+    },
+    {
+      "w": "don't",
+      "start": 4.3,
+      "end": 4.55,
+      "conf": 0.99
+    },
+    {
+      "w": "reason.",
+      "start": 4.55,
+      "end": 5.01,
+      "conf": 0.99
+    },
+    {
+      "w": "They",
+      "start": 5.16,
+      "end": 5.34,
+      "conf": 0.99
+    },
+    {
+      "w": "pattern-match",
+      "start": 5.34,
+      "end": 5.88,
+      "conf": 0.98
+    },
+    {
+      "w": "at",
+      "start": 5.88,
+      "end": 6.02,
+      "conf": 0.99
+    },
+    {
+      "w": "a",
+      "start": 6.02,
+      "end": 6.1,
+      "conf": 0.99
+    },
+    {
+      "w": "scale",
+      "start": 6.1,
+      "end": 6.48,
+      "conf": 0.99
+    },
+    {
+      "w": "that",
+      "start": 6.48,
+      "end": 6.7,
+      "conf": 0.99
+    },
+    {
+      "w": "feels",
+      "start": 6.7,
+      "end": 7.04,
+      "conf": 0.99
+    },
+    {
+      "w": "like",
+      "start": 7.04,
+      "end": 7.26,
+      "conf": 0.99
+    },
+    {
+      "w": "reasoning.",
+      "start": 7.26,
+      "end": 7.9,
+      "conf": 0.99
+    },
+    {
+      "w": "Right.",
+      "start": 8.24,
+      "end": 8.62,
+      "conf": 0.95
+    },
+    {
+      "w": "And",
+      "start": 21.74,
+      "end": 21.95,
+      "conf": 0.99
+    },
+    {
+      "w": "the",
+      "start": 21.95,
+      "end": 22.08,
+      "conf": 0.99
+    },
+    {
+      "w": "moment",
+      "start": 22.08,
+      "end": 22.47,
+      "conf": 0.99
+    },
+    {
+      "w": "you",
+      "start": 22.47,
+      "end": 22.65,
+      "conf": 0.99
+    },
+    {
+      "w": "trust",
+      "start": 22.65,
+      "end": 23.02,
+      "conf": 0.99
+    },
+    {
+      "w": "the",
+      "start": 23.02,
+      "end": 23.14,
+      "conf": 0.99
+    },
+    {
+      "w": "feeling,",
+      "start": 23.14,
+      "end": 23.68,
+      "conf": 0.99
+    },
+    {
+      "w": "you",
+      "start": 23.92,
+      "end": 24.1,
+      "conf": 0.99
+    },
+    {
+      "w": "ship",
+      "start": 24.1,
+      "end": 24.4,
+      "conf": 0.99
+    },
+    {
+      "w": "the",
+      "start": 24.4,
+      "end": 24.53,
+      "conf": 0.99
+    },
+    {
+      "w": "bug.",
+      "start": 24.53,
+      "end": 25.0,
+      "conf": 0.99
+    },
+    {
+      "w": "Anyway,",
+      "start": 71.78,
+      "end": 72.1,
+      "conf": 0.94
+    },
+    {
+      "w": "So",
+      "start": 72.3,
+      "end": 72.48,
+      "conf": 0.99
+    },
+    {
+      "w": "the",
+      "start": 72.48,
+      "end": 72.62,
+      "conf": 0.99
+    },
+    {
+      "w": "fix",
+      "start": 72.62,
+      "end": 72.9,
+      "conf": 0.99
+    },
+    {
+      "w": "isn't",
+      "start": 72.9,
+      "end": 73.18,
+      "conf": 0.99
+    },
+    {
+      "w": "a",
+      "start": 73.18,
+      "end": 73.26,
+      "conf": 0.99
+    },
+    {
+      "w": "smarter",
+      "start": 73.26,
+      "end": 73.72,
+      "conf": 0.99
+    },
+    {
+      "w": "model.",
+      "start": 73.72,
+      "end": 74.14,
+      "conf": 0.99
+    },
+    {
+      "w": "It's",
+      "start": 74.36,
+      "end": 74.58,
+      "conf": 0.99
+    },
+    {
+      "w": "a",
+      "start": 74.58,
+      "end": 74.66,
+      "conf": 0.99
+    },
+    {
+      "w": "tighter",
+      "start": 74.66,
+      "end": 75.06,
+      "conf": 0.99
+    },
+    {
+      "w": "loop.",
+      "start": 75.06,
+      "end": 75.42,
+      "conf": 0.99
+    },
+    {
+      "w": "A",
+      "start": 79.05,
+      "end": 79.14,
+      "conf": 0.99
+    },
+    {
+      "w": "loop",
+      "start": 79.14,
+      "end": 79.48,
+      "conf": 0.99
+    },
+    {
+      "w": "you",
+      "start": 79.48,
+      "end": 79.68,
+      "conf": 0.99
+    },
+    {
+      "w": "can",
+      "start": 79.68,
+      "end": 79.92,
+      "conf": 0.99
+    },
+    {
+      "w": "actually",
+      "start": 79.92,
+      "end": 80.38,
+      "conf": 0.99
+    },
+    {
+      "w": "see",
+      "start": 80.38,
+      "end": 80.6,
+      "conf": 0.99
+    },
+    {
+      "w": "closing.",
+      "start": 80.6,
+      "end": 81.16,
+      "conf": 0.99
+    }
+  ],
+  "segments": [
+    {
+      "text": "They don't reason. They pattern-match at a scale that feels like reasoning.",
+      "start_s": 4.12,
+      "end_s": 7.9
+    },
+    {
+      "text": "And the moment you trust the feeling, you ship the bug.",
+      "start_s": 21.74,
+      "end_s": 25.0
+    },
+    {
+      "text": "So the fix isn't a smarter model. It's a tighter loop.",
+      "start_s": 72.3,
+      "end_s": 75.42
+    },
+    {
+      "text": "A loop you can actually see closing.",
+      "start_s": 79.05,
+      "end_s": 81.16
+    }
+  ]
+}
