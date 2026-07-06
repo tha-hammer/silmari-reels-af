@@ -299,8 +299,15 @@ def topic(
     _summarize(result, run_id, out_path)
 
 
-def _composite_provider() -> Any:
-    """Build the OpenRouter provider used for hook / moments / image gen."""
+def _composite_text_provider() -> Any:
+    """The AgentField ``Agent`` (exposes ``.ai``) — drives hook + image moments."""
+    from reel_af.app import app
+
+    return app
+
+
+def _composite_image_provider() -> Any:
+    """The media ``OpenRouterProvider`` — drives image generation."""
     from agentfield.media_providers import OpenRouterProvider
 
     return OpenRouterProvider()
@@ -337,9 +344,16 @@ def composite(
     console.print(f"  out:  [dim]{work}[/dim]")
     console.print()
 
-    provider = None if fast else _composite_provider()
+    text_provider = None if fast else _composite_text_provider()
+    image_provider = None if fast else _composite_image_provider()
     final = asyncio.run(
-        composite_to_reel(url, work, provider=provider, raw=fast)
+        composite_to_reel(
+            url,
+            work,
+            text_provider=text_provider,
+            image_provider=image_provider,
+            raw=fast,
+        )
     )
     console.print(f"[green]done:[/green] {final}")
 

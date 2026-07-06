@@ -53,10 +53,19 @@ FFMPEG_FINISH_TIMEOUT_S: float = 300.0
 
 @dataclass
 class FinishContext:
-    """Per-reel inputs the finish stage needs beyond the base mp4."""
+    """Per-reel inputs the finish stage needs beyond the base mp4.
+
+    reels-af has TWO distinct providers and they are not interchangeable:
+      - ``text_provider`` — the AgentField ``Agent`` (exposes ``.ai(system, user,
+        schema)``). Drives the hook (B5) and image-moment (B6) LLM calls.
+      - ``image_provider`` — the media ``OpenRouterProvider`` (image/TTS/video).
+        Drives image generation (B7). It has NO ``.ai`` method, so feeding it to
+        the hook/moment calls raises ``provider must expose ai(...)``.
+    """
 
     transcript: str
-    provider: Any
+    text_provider: Any = None
+    image_provider: Any = None
     source_url: Optional[str] = None
     run_id: str = "finish"
 
@@ -208,9 +217,9 @@ async def finish_reel(
 
     dur = float(deps.probe_duration(base))
 
-    # 1. Hook (LLM) + caption timings (whisper) — independent, run concurrently.
+    # 1. Hook (text LLM) + caption timings (whisper) — independent, concurrent.
     hook, words = await asyncio.gather(
-        deps.generate_hook(ctx.transcript, ctx.provider),
+        deps.generate_hook(ctx.transcript, ctx.text_provider),
         asyncio.to_thread(deps.caption_words, base, cfg),
     )
 
@@ -221,8 +230,9 @@ async def finish_reel(
     # 3. Image cut-ins (optional, config-gated) — pick moments, generate images.
     cut_ins: list[Any] = []
     if cfg.image_count > 0:
+        # Moments come from the TEXT provider (.ai); images from the media provider.
         moments = await deps.pick_image_moments(
-            ctx.transcript, ctx.provider, cfg, dur
+            ctx.transcript, ctx.text_provider, cfg, dur
         )
         raw_cutins = [
             {"t_start": m[0], "t_end": m[1], "image_prompt": m[2]} for m in moments
@@ -230,7 +240,7 @@ async def finish_reel(
         if raw_cutins:
             cut_ins = list(
                 await deps.generate_image_cutins(
-                    ctx.provider, raw_cutins, out_dir / f"{ctx.run_id}-images"
+                    ctx.image_provider, raw_cutins, out_dir / f"{ctx.run_id}-images"
                 )
             )
 

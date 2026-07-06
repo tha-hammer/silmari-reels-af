@@ -157,7 +157,7 @@ async def test_finish_reel_closure_burns_all_layers(tmp_path) -> None:
 
     cfg = ReelFinishConfig()
     ctx = FinishContext(
-        source_url="http://example/x", transcript="a talk about a trick", provider=object()
+        source_url="http://example/x", transcript="a talk about a trick", text_provider=object(), image_provider=object()
     )
     out = await finish_reel(base, ctx, cfg, deps=_closure_deps(tmp_path), out_dir=tmp_path)
 
@@ -187,6 +187,6 @@ async def test_finish_reel_closure_burns_all_layers(tmp_path) -> None:
 async def test_finish_reel_closure_raw_is_untouched(tmp_path) -> None:
     _require_ffmpeg()
     base = _make_fixture_reel(tmp_path / "base.mp4")
-    ctx = FinishContext(source_url=None, transcript="t", provider=object())
+    ctx = FinishContext(source_url=None, transcript="t", text_provider=object(), image_provider=object())
     out = await finish_reel(base, ctx, ReelFinishConfig(), deps=_closure_deps(tmp_path), raw=True, out_dir=tmp_path)
     assert out == base  # fast path yields the plain stitched reel

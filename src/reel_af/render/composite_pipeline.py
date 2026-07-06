@@ -46,7 +46,8 @@ async def composite_to_reel(
     source_url: str,
     out_dir: Path,
     *,
-    provider: Any = None,
+    text_provider: Any = None,
+    image_provider: Any = None,
     cfg: Optional[ReelFinishConfig] = None,
     raw: bool = False,
     stages: Optional[CompositeStages] = None,
@@ -54,7 +55,10 @@ async def composite_to_reel(
 ) -> Path:
     """Ingest a crisp source, stitch the base reel, then finish it (default).
 
-    ``raw=True`` (``--fast``) returns the plain stitched reel and skips finish.
+    ``text_provider`` (AgentField ``Agent`` with ``.ai``) drives the hook/moment
+    LLM calls; ``image_provider`` (media ``OpenRouterProvider``) drives image
+    generation. ``raw=True`` (``--fast``) returns the plain stitched reel and
+    skips finish (so neither provider is needed on the fast path).
     """
     stages = stages or default_stages()
     out_dir = Path(out_dir)
@@ -68,7 +72,8 @@ async def composite_to_reel(
 
     ctx = FinishContext(
         transcript=base.transcript,
-        provider=provider,
+        text_provider=text_provider,
+        image_provider=image_provider,
         source_url=source_url,
         run_id=run_id,
     )

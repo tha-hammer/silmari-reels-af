@@ -12,6 +12,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from reel_af.render.finish import (
     FinishContext,
     FinishDeps,
@@ -112,7 +114,7 @@ def _fake_deps(calls: list[str]) -> FinishDeps:
 
     def build_finish_ass(words, hook, dur, cfg):
         calls.append("finish_ass")
-        assert hook == "the hook line"
+        assert isinstance(hook, str) and hook  # a real, non-empty hook string
         return "[Script Info]\n..."
 
     def write_ass(text, path):
@@ -163,7 +165,7 @@ async def test_finish_reel_runs_full_pipeline_in_order(tmp_path) -> None:
     base = tmp_path / "base.mp4"
     base.write_bytes(b"\x00")
     calls: list[str] = []
-    ctx = FinishContext(source_url="http://x", transcript="t", provider=object())
+    ctx = FinishContext(source_url="http://x", transcript="t", text_provider=object(), image_provider=object())
     out = await finish_reel(
         base, ctx, ReelFinishConfig(), deps=_fake_deps(calls), out_dir=tmp_path
     )
@@ -180,7 +182,7 @@ async def test_finish_reel_raw_opt_out_returns_base_untouched(tmp_path) -> None:
     base = tmp_path / "base.mp4"
     base.write_bytes(b"\x00")
     calls: list[str] = []
-    ctx = FinishContext(source_url=None, transcript="t", provider=object())
+    ctx = FinishContext(source_url=None, transcript="t", text_provider=object(), image_provider=object())
     out = await finish_reel(
         base, ctx, ReelFinishConfig(), deps=_fake_deps(calls), raw=True, out_dir=tmp_path
     )
@@ -192,7 +194,7 @@ async def test_finish_reel_image_count_zero_skips_images_but_still_burns(tmp_pat
     base = tmp_path / "base.mp4"
     base.write_bytes(b"\x00")
     calls: list[str] = []
-    ctx = FinishContext(source_url=None, transcript="t", provider=object())
+    ctx = FinishContext(source_url=None, transcript="t", text_provider=object(), image_provider=object())
     cfg = ReelFinishConfig(image_count=0)
     await finish_reel(base, ctx, cfg, deps=_fake_deps(calls), out_dir=tmp_path)
     assert not any(c.startswith("moments") for c in calls)
@@ -200,3 +202,61 @@ async def test_finish_reel_image_count_zero_skips_images_but_still_burns(tmp_pat
     # captions/banner still burned even with no cut-ins.
     assert "finish_ass" in calls
     assert calls.count("burn") == 1
+
+
+# ── Provider routing (NON-mocked generate_hook) ────────────────────
+# Regression: hooks.generate_hook needs the TEXT provider (.ai); the image-only
+# media provider has no .ai and crashes. The earlier fakes hid this — these use
+# the REAL generate_hook so a mis-routed provider fails loudly.
+
+
+class _AiTextProvider:
+    """Stand-in for the AgentField Agent — exposes ``.ai(system, user, schema)``."""
+
+    def __init__(self) -> None:
+        self.saw_ai = False
+
+    async def ai(self, *, system, user, schema=None):
+        self.saw_ai = True
+        return {"hook": "a punchy real hook"}
+
+
+async def test_finish_routes_ai_capable_text_provider_to_real_generate_hook(tmp_path) -> None:
+    from reel_af.render import hooks
+
+    calls: list[str] = []
+    deps = _fake_deps(calls)
+    deps.generate_hook = hooks.generate_hook  # REAL B5 — requires provider.ai()
+
+    text = _AiTextProvider()
+    base = tmp_path / "base.mp4"
+    base.write_bytes(b"\x00")
+    ctx = FinishContext(
+        transcript="a real transcript about a clever trick",
+        text_provider=text,
+        image_provider=object(),  # NO .ai — must NOT be used for the hook
+    )
+    out = await finish_reel(
+        base, ctx, ReelFinishConfig(image_count=0), deps=deps, out_dir=tmp_path
+    )
+    assert text.saw_ai is True                # the text provider's .ai() was used
+    assert out == tmp_path / "final.mp4"
+
+
+async def test_finish_with_non_ai_text_provider_fails_loudly(tmp_path) -> None:
+    from reel_af.render import hooks
+
+    calls: list[str] = []
+    deps = _fake_deps(calls)
+    deps.generate_hook = hooks.generate_hook
+
+    base = tmp_path / "base.mp4"
+    base.write_bytes(b"\x00")
+    # Wrongly hand the hook a provider with no .ai() (the original bug shape).
+    ctx = FinishContext(
+        transcript="text", text_provider=object(), image_provider=object()
+    )
+    with pytest.raises(TypeError, match="ai"):
+        await finish_reel(
+            base, ctx, ReelFinishConfig(image_count=0), deps=deps, out_dir=tmp_path
+        )
