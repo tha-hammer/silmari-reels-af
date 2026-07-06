@@ -479,3 +479,97 @@ def test_words_sidecar_schema_version():
     from reel_af.dsl.models import DslWord, WordsSidecar
     ws = WordsSidecar(words=[DslWord(w="a", start=0.0, end=0.1)])
     assert ws.schema_version == "1"
+
+
+# ── Type-narrowed fields ─────────────────────────────────────────
+
+
+def test_downloaded_segment_path_accepts_path():
+    from pathlib import Path
+    from reel_af.dsl.models import DownloadedSegment
+    ds = DownloadedSegment(
+        segment_id="seg-001",
+        path=Path("/tmp/clip.mp4"),
+        source_start_s=0.0,
+        source_end_s=10.0,
+    )
+    assert isinstance(ds.path, Path)
+
+
+def test_downloaded_segment_path_coerces_str_to_path():
+    from pathlib import Path
+    from reel_af.dsl.models import DownloadedSegment
+    ds = DownloadedSegment(
+        segment_id="seg-001",
+        path="/tmp/clip.mp4",
+        source_start_s=0.0,
+        source_end_s=10.0,
+    )
+    assert isinstance(ds.path, Path)
+
+
+def test_segment_fetch_request_target_path_accepts_path():
+    from pathlib import Path
+    from reel_af.dsl.models import SegmentFetchRequest
+    req = SegmentFetchRequest(
+        segment_id="seg-001",
+        source_url="https://example.com/video.mp4",
+        start_s=0.0,
+        end_s=10.0,
+        target_path=Path("/tmp/out.mp4"),
+    )
+    assert isinstance(req.target_path, Path)
+
+
+def test_unmatched_span_source_accepts_source_locus():
+    from reel_af.dsl.ast import SourceLocus
+    from reel_af.dsl.models import UnmatchedSpan
+    locus = SourceLocus(line=1, col=1, raw="[find ?]")
+    span = UnmatchedSpan(
+        normalized_text="hello",
+        best_quality=0.5,
+        reason="below_floor",
+        source=locus,
+    )
+    assert isinstance(span.source, SourceLocus)
+
+
+def test_diagnostic_source_accepts_source_locus():
+    from reel_af.dsl.ast import SourceLocus
+    from reel_af.dsl.models import Diagnostic
+    locus = SourceLocus(line=5, col=1, raw="[insert relevant]")
+    diag = Diagnostic(
+        code="UNSUPPORTED_INSERT",
+        message="test",
+        severity="error",
+        source=locus,
+    )
+    assert isinstance(diag.source, SourceLocus)
+
+
+def test_hole_context_marker_accepts_marker():
+    from reel_af.dsl.ast import Insert, SourceLocus
+    from reel_af.dsl.models import HoleContext, HoleDomain
+    marker = Insert(selector="relevant", duration_s=5.0)
+    domain = HoleDomain(name="duration_s")
+    ctx = HoleContext(
+        marker=marker,
+        field_name="duration_s",
+        domain=domain,
+    )
+    assert isinstance(ctx.marker, Insert)
+
+
+def test_hole_context_source_accepts_source_locus():
+    from reel_af.dsl.ast import Insert, SourceLocus
+    from reel_af.dsl.models import HoleContext, HoleDomain
+    locus = SourceLocus(line=3, col=1, raw="[insert relevant ?]")
+    marker = Insert(selector="relevant", duration_s=5.0)
+    domain = HoleDomain(name="duration_s")
+    ctx = HoleContext(
+        marker=marker,
+        field_name="duration_s",
+        domain=domain,
+        source=locus,
+    )
+    assert isinstance(ctx.source, SourceLocus)

@@ -4,6 +4,9 @@ This module owns the reusable part of the old A1 ``footage_polish.py`` path:
 zoom punch-ins and full-frame visual cut-ins over source footage. It is a
 library API, so callers provide any downloaded/generated assets and this module
 only builds/runs the local ffmpeg composition.
+
+Note: Implemented and tested but currently dormant — awaiting the cut-in
+consumer (footage_stitch overlay integration) to land before being wired in.
 """
 
 from __future__ import annotations

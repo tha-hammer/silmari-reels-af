@@ -6,9 +6,13 @@ carry ``schema_version="1"`` and ``dsl_version="2"``.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal, Mapping
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+if TYPE_CHECKING:
+    from reel_af.dsl.ast import Marker, SourceLocus
 
 # ── Constants ──────────────────────────────────────────────────────
 
@@ -128,7 +132,7 @@ class UnmatchedSpan(BaseModel):
     normalized_text: str
     best_quality: float = Field(ge=0, le=1)
     reason: Literal["below_floor", "empty_source", "empty_query"]
-    source: Any = None
+    source: SourceLocus | None = None
 
 
 AlignResult = Annotated[AlignedSpan | UnmatchedSpan, Field(discriminator="kind")]
@@ -158,7 +162,7 @@ class Diagnostic(BaseModel):
     code: DiagnosticCode
     message: str
     severity: Literal["warning", "error"]
-    source: Any = None
+    source: SourceLocus | None = None
     context: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -303,7 +307,7 @@ class DownloadedSegment(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     segment_id: str
-    path: Any  # Path
+    path: Path
     source_start_s: float
     source_end_s: float
 
@@ -318,7 +322,7 @@ class SegmentFetchRequest(BaseModel):
     source_url: str
     start_s: float
     end_s: float
-    target_path: Any  # Path
+    target_path: Path
 
 
 # ── Resolver types ─────────────────────────────────────────────────
@@ -337,10 +341,10 @@ class HoleDomain(BaseModel):
 class HoleContext(BaseModel):
     model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
 
-    marker: Any
+    marker: Marker
     field_name: str
     domain: HoleDomain
-    source: Any = None
+    source: SourceLocus | None = None
     before_text: str | None = None
     after_text: str | None = None
 
@@ -397,6 +401,16 @@ def validate_renderable(reel: FootageReel | Any) -> None:
         raise RenderabilityError(
             f"reel duration {duration_s} exceeds maximum {MAX_REEL_DURATION_S}"
         )
+
+
+def _rebuild_forward_refs() -> None:
+    from reel_af.dsl.ast import Marker as _Marker
+    from reel_af.dsl.ast import SourceLocus as _SourceLocus
+
+    _ns = {"Marker": _Marker, "SourceLocus": _SourceLocus, "Path": Path}
+    UnmatchedSpan.model_rebuild(_types_namespace=_ns)
+    Diagnostic.model_rebuild(_types_namespace=_ns)
+    HoleContext.model_rebuild(_types_namespace=_ns)
 
 
 __all__ = [
