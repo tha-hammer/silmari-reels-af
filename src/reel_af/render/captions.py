@@ -21,6 +21,7 @@ a partial override, or ``None``.
 
 from __future__ import annotations
 
+import functools
 import json
 import subprocess
 import tempfile
@@ -86,6 +87,17 @@ WHISPER_MODEL = _D["whisper_model"]
 # absent). ``cfg.<x>_style`` overrides any field via getattr.
 _CAPTION_STYLE_DEFAULTS: dict[str, Any] = _D["caption_ass_defaults"]
 _BANNER_STYLE_DEFAULTS: dict[str, Any] = _D["banner_ass_defaults"]
+
+# All-caps sample used to measure cap-ink height at the reference size.
+_CAP_HEIGHT_SAMPLE = "ABCDEFGHIJKMNPQRSTUVWXYZ"
+
+# Degraded font-metric approximations — used ONLY when Pillow/the font file is
+# unavailable (a bare unit env), as fractions of the font size. Named here so the
+# cap ratio has a single source of truth across the two callers.
+_NO_FONT_CAP_RATIO = 0.72       # ink cap height ÷ fs
+_NO_FONT_LINE_BOX_RATIO = 1.16  # (ascent + descent) ÷ fs
+_NO_FONT_ASCENT_RATIO = 0.90    # ascent ÷ fs
+_NO_FONT_DESCENT_RATIO = 0.25   # descent ÷ fs
 
 
 # ───── config access (duck-typed) ───────────────────────────────────
@@ -413,8 +425,6 @@ def _dialogue(
 
 # ───── Banner text-fit: MEASURE the real font, don't guess ───────────
 
-import functools
-
 
 @functools.lru_cache(maxsize=16)
 def _resolve_font_file(fontname: str, bold: bool) -> Optional[str]:
@@ -497,12 +507,12 @@ def _line_metrics_ref(cfg: Any, font_file: Optional[str], ref_fs: int) -> tuple[
     if font_file is not None:
         asc, desc = _font_ascent_descent(font_file, ref_fs)
         # cap ink height of an all-caps sample (fill the box with ink, not leading)
-        x0, y0, x1, y1 = _ink_bbox("ABCDEFGHIJKMNPQRSTUVWXYZ", font_file, ref_fs)
+        _x0, y0, _x1, y1 = _ink_bbox(_CAP_HEIGHT_SAMPLE, font_file, ref_fs)
         cap_h = y1 - y0
         line_box = asc + desc
     else:
-        cap_h = ref_fs * 0.72
-        line_box = ref_fs * 1.16
+        cap_h = ref_fs * _NO_FONT_CAP_RATIO
+        line_box = ref_fs * _NO_FONT_LINE_BOX_RATIO
     return cap_h, line_box * spacing
 
 
@@ -599,12 +609,12 @@ def _banner_geometry(
         ink_h_one = max(b[3] - b[1] for b in boxes)
         asc, desc = _font_ascent_descent(font_file, fs)
     else:
-        ink_h_one = int(fs * 0.72)
-        asc, desc = int(fs * 0.90), int(fs * 0.25)
+        ink_h_one = int(fs * _NO_FONT_CAP_RATIO)
+        asc, desc = int(fs * _NO_FONT_ASCENT_RATIO), int(fs * _NO_FONT_DESCENT_RATIO)
         y0 = asc - ink_h_one
     line_adv = int((asc + desc) * spacing)
     block_h = (n - 1) * line_adv + ink_h_one
-    # Fixed box; the text (auto-fit) fills it. Centre the ink block on cy.
+    # Full-width box of the given (hugging) height; centre the ink block on cy.
     bx0, by0 = cx - box_w // 2, cy - box_h // 2
     total_line_box = (n - 1) * line_adv + (asc + desc)
     ink_center_from_block_top = y0 + block_h / 2
