@@ -119,18 +119,24 @@ class ReelFinishConfig(BaseModel):
     # The hook is balanced-wrapped to ≤ banner_max_lines lines and the font is
     # MEASURED against the real resolved font (freetype/PIL) and scaled to fill
     # a box that hugs the ink on both axes. No char-ratio guessing.
+    # The box is FIXED (full width × banner_box_h). The text fills it: for each
+    # candidate line count (1..banner_max_lines) the largest font that fits both
+    # box width and box height is computed, and the line count giving the biggest
+    # text wins. Maximising font size = maximising fill = the line count whose
+    # text shape matches the box. So a long hook lands on more lines + smaller
+    # font, a short hook on fewer lines + huge font — both fill the same box.
     banner_font_ref_fs: int = 100            # reference size for measurement
-    banner_max_fs: int = 110                 # cap for short hooks
-    banner_max_lines: int = 2                # balanced-wrap target
-    banner_side_margin_px: int = 40          # box never within this of frame edge
-    banner_pad_x: int = 34                   # box horizontal padding around ink
-    banner_pad_y: int = 16                   # box vertical padding around ink block
-    banner_line_spacing: float = 0.94        # line advance ÷ (ascent+descent)
-    banner_max_block_h: int = 250            # ink-block height cap (all lines)
+    banner_max_fs: int = 200                 # sane ceiling only (a 1-word hook)
+    banner_max_lines: int = 3                # most lines to consider
+    banner_box_h: int = 210                  # FIXED box height (the invariant)
+    banner_side_margin_px: int = 40          # legacy (hugging mode only)
+    banner_pad_x: int = 40                   # inner horizontal padding (text↔box)
+    banner_pad_y: int = 22                   # inner vertical padding (text↔box)
+    banner_line_spacing: float = 0.98        # line advance ÷ (ascent+descent)
+    banner_max_block_h: int = 250            # legacy (unused by fixed-box fit)
     banner_text_outline: int = 0             # text outline px (0 = clean on box)
-    banner_full_width: bool = True           # box spans the full frame width (no
-    #                                          footage bleed beside a hugging box)
-    banner_box_margin_x: int = 0             # inset from each frame edge when full-width
+    banner_full_width: bool = True           # box spans the full frame width
+    banner_box_margin_x: int = 0             # inset from each frame edge
 
     # Legacy single-line char-ratio fit fields (deprecated, unused by the fit
     # path; kept so older configs/tests don't break on unknown attributes).

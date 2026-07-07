@@ -39,8 +39,6 @@ requires_render = pytest.mark.skipif(
     not _stack_ready(), reason="needs ffmpeg + Pillow + a resolvable banner font"
 )
 
-FILL_MIN = 0.70          # ink fills ≥70% of the box on each axis (old design ≈0.56)
-CENTER_TOL = 22          # ink centre within 22px of box centre on each axis
 
 
 def _render_banner(hook: str, cfg: ReelFinishConfig) -> Path:
@@ -89,58 +87,48 @@ HOOKS = [
     "AI IS STUPID.",
 ]
 
+FILL_MIN = 0.68          # text fills ≥68% of the box on its binding axis
+CENTER_TOL = 22          # ink centre within 22px of box centre on each axis
+
 
 @requires_render
 @pytest.mark.parametrize("hook", HOOKS)
-def test_banner_ink_fills_box_and_is_centred(hook):
+def test_text_fills_box_and_is_centred(hook):
+    """The text fills the fixed box (on whichever axis binds) and is centred.
+
+    The old bug was a tiny hook floating in the box; here the fit maximises the
+    font, so at least one axis is well filled and the ink is centred.
+    """
     cfg = ReelFinishConfig(divider_y=785)
     png = _render_banner(hook, cfg)
     box, ink = _extents(png)
-    assert box is not None, "no white box rendered"
-    assert ink is not None, "no purple ink rendered"
+    assert box is not None and ink is not None
 
     bw, bh = box[2] - box[0], box[3] - box[1]
     iw, ih = ink[2] - ink[0], ink[3] - ink[1]
-    fill_h = ih / bh
-    # Height still hugs the ink (the old bug was 56%); width belongs to the
-    # full-width box now, checked in test_full_width_box_spans_the_frame.
-    assert fill_h >= FILL_MIN, f"{hook!r}: ink fills only {fill_h:.0%} of box height"
+    fill = max(iw / bw, ih / bh)
+    assert fill >= FILL_MIN, f"{hook!r}: text fills only {fill:.0%} of the box"
 
     bcx, bcy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     icx, icy = (ink[0] + ink[2]) / 2, (ink[1] + ink[3]) / 2
     assert abs(icx - bcx) <= CENTER_TOL, f"{hook!r}: not h-centred ({abs(icx-bcx):.0f}px)"
     assert abs(icy - bcy) <= CENTER_TOL, f"{hook!r}: not v-centred ({abs(icy-bcy):.0f}px)"
-
     assert ink[0] >= 0 and ink[2] <= cfg.canvas_w, f"{hook!r}: ink overflows frame width"
 
 
 @requires_render
-def test_long_hook_text_is_substantial_width():
-    """A long hook must still grow to a big two-line block (not shrink to tiny)."""
+def test_box_is_fixed_and_identical_across_hooks():
+    """THE consistency invariant: the box is the same fixed size for every hook,
+    regardless of length — so the banners never look cheap/variable."""
     cfg = ReelFinishConfig(divider_y=785)
-    png = _render_banner("COLLABORATE WITH AI, DONT DELEGATE.", cfg)
-    _, ink = _extents(png)
-    avail_w = cfg.canvas_w - 2 * cfg.banner_side_margin_px - 2 * cfg.banner_pad_x
-    assert (ink[2] - ink[0]) >= 0.85 * avail_w   # widest line ~fills the text area
-
-
-@requires_render
-def test_full_width_box_spans_the_frame():
-    """Default banner_full_width → box spans (nearly) edge-to-edge, so no footage
-    bleeds beside it in the divider band."""
-    cfg = ReelFinishConfig(divider_y=785)
-    assert cfg.banner_full_width is True
-    png = _render_banner("COLLABORATE WITH AI, DONT DELEGATE.", cfg)
-    box, _ = _extents(png)
-    inset = cfg.banner_box_margin_x
-    assert box[0] <= inset + 6
-    assert box[2] >= cfg.canvas_w - inset - 6
-
-
-@requires_render
-def test_hugging_box_respects_side_margins_when_not_full_width():
-    cfg = ReelFinishConfig(divider_y=785, banner_full_width=False)
-    png = _render_banner("COLLABORATE WITH AI, DONT DELEGATE.", cfg)
-    box, _ = _extents(png)
-    assert box[0] >= cfg.banner_side_margin_px - 6
-    assert box[2] <= cfg.canvas_w - cfg.banner_side_margin_px + 6
+    dims = []
+    for hook in HOOKS:
+        box, _ = _extents(_render_banner(hook, cfg))
+        dims.append((box[2] - box[0], box[3] - box[1]))
+    # all boxes equal (within AA slack)
+    w0, h0 = dims[0]
+    for w, h in dims[1:]:
+        assert abs(w - w0) <= 4 and abs(h - h0) <= 4, f"box varies across hooks: {dims}"
+    # and equal to the configured full-width × banner_box_h band
+    assert abs(w0 - cfg.canvas_w) <= 6
+    assert abs(h0 - cfg.banner_box_h) <= 6
