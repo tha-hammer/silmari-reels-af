@@ -53,8 +53,20 @@ class StubFinishConfig:
     caption_gap_s: float = 0.35
     caption_uppercase: bool = True
     banner_uppercase: bool = True
-    caption_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=58, primary="&H00FFFFFF"))
-    banner_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=44, primary="&H0000FFEA"))
+    caption_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=62, primary="&H00FFFFFF"))
+    banner_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=58, primary="&H00CE227E"))
+    # Banner font-fit (TASK 2)
+    banner_fit_min_fs: int = 30
+    banner_fit_max_fs: int = 58
+    banner_fit_edge_margin_px: int = 90
+    banner_fit_char_width_ratio: float = 0.52
+    # Divider detection (TASK 2)
+    divider_probe_t_s: float = 3.0
+    divider_band_lo_pct: float = 0.28
+    divider_band_hi_pct: float = 0.58
+    divider_sample_step_px: int = 8
+    divider_dark_rows: int = 24
+    divider_min_contrast: float = 12.0
 
 
 # ───── ffmpeg / whisper fixtures ─────────────────────────────────────
