@@ -38,10 +38,22 @@ DEFAULT_MAX_WORDS = 4
 DEFAULT_MAX_DUR_S = 1.8
 DEFAULT_GAP_S = 0.35                   # silence gap that forces a new phrase
 
-# Banner font-fit defaults (used when cfg lacks the fields / cfg is None).
-DEFAULT_BANNER_FIT_MIN_FS = 30
-DEFAULT_BANNER_FIT_MAX_FS = 58
-DEFAULT_BANNER_FIT_EDGE_MARGIN_PX = 90
+# Banner two-line box-fit defaults (used when cfg lacks the fields / cfg is None).
+DEFAULT_BANNER_REF_FS = 100
+DEFAULT_BANNER_MAX_FS = 110
+DEFAULT_BANNER_MAX_LINES = 2
+DEFAULT_BANNER_SIDE_MARGIN = 40
+DEFAULT_BANNER_PAD_X = 34
+DEFAULT_BANNER_PAD_Y = 16
+DEFAULT_BANNER_LINE_SPACING = 0.94
+DEFAULT_BANNER_MAX_BLOCK_H = 250
+DEFAULT_BANNER_TEXT_OUTLINE = 0
+DEFAULT_BANNER_FULL_WIDTH = True
+DEFAULT_BANNER_BOX_MARGIN_X = 0
+
+# Legacy char-ratio fit defaults (fallback ONLY when the real font can't be
+# measured — e.g. Pillow or the font file is missing in a bare unit env).
+DEFAULT_BANNER_FIT_MAX_FS = 110
 DEFAULT_BANNER_FIT_CHAR_RATIO = 0.52
 
 # Divider-detection defaults.
@@ -54,6 +66,7 @@ DEFAULT_DIVIDER_MIN_CONTRAST = 12.0
 
 CAPTION_STYLE_NAME = "Cap"
 BANNER_STYLE_NAME = "Banner"
+BANNER_BOX_STYLE_NAME = "BannerBox"
 
 WHISPER_MODEL = "base.en"
 
@@ -371,8 +384,35 @@ def _caption_style_line(cfg: Any) -> str:
     return _style_line(CAPTION_STYLE_NAME, getattr(cfg, "caption_style", None), _CAPTION_STYLE_DEFAULTS)
 
 
-def _banner_style_line(cfg: Any) -> str:
-    return _style_line(BANNER_STYLE_NAME, getattr(cfg, "banner_style", None), _BANNER_STYLE_DEFAULTS)
+def _banner_style_field(cfg: Any, name: str, default: Any) -> Any:
+    return _style_field(getattr(cfg, "banner_style", None), name, default)
+
+
+def _banner_style_lines(cfg: Any) -> list[str]:
+    r"""Two styles for the two-line boxed banner: the white BannerBox rectangle
+    and the purple Banner text.
+
+    The box fill reuses ``banner_style.back`` (white); the text colour reuses
+    ``banner_style.primary`` (purple). The box is a filled ``\p`` drawing
+    (BorderStyle=1, no outline) anchored top-left (Alignment 7); the text is
+    BorderStyle=1 with a configurable (default 0) outline, centred (Alignment 5).
+    """
+    fontname = _banner_style_field(cfg, "fontname", _BANNER_STYLE_DEFAULTS["fontname"])
+    box_fill = _banner_style_field(cfg, "back", _BANNER_STYLE_DEFAULTS["back"])
+    text_fill = _banner_style_field(cfg, "primary", _BANNER_STYLE_DEFAULTS["primary"])
+    bold = int(bool(_banner_style_field(cfg, "bold", _BANNER_STYLE_DEFAULTS["bold"])))
+    text_outline = int(_cfg(cfg, "banner_text_outline", DEFAULT_BANNER_TEXT_OUTLINE))
+    outline_col = _banner_style_field(cfg, "outline_color", "&H00FFFFFF")
+    fs = int(_banner_style_field(cfg, "fontsize", _BANNER_STYLE_DEFAULTS["fontsize"]))
+    box = (
+        f"Style: {BANNER_BOX_STYLE_NAME},{fontname},{fs},{box_fill},&H000000FF,"
+        f"{box_fill},&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1"
+    )
+    text = (
+        f"Style: {BANNER_STYLE_NAME},{fontname},{fs},{text_fill},&H000000FF,"
+        f"{outline_col},&H00000000,{bold},0,0,0,100,100,0,0,1,{text_outline},0,5,0,0,0,1"
+    )
+    return [box, text]
 
 
 def _dialogue(
@@ -384,21 +424,121 @@ def _dialogue(
     )
 
 
-def compute_banner_fontsize(hook_text: str, cfg: Any = None) -> int:
-    """Fit the banner font to the frame width so long hooks don't overflow.
+# ───── Banner text-fit: MEASURE the real font, don't guess ───────────
 
-    ``fs = max(min_fs, min(max_fs, int((canvas_w - edge_margin) /
-    (len(text) * char_ratio))))`` — the proven ``banner_fix_proto.py`` formula,
-    every constant a config tunable.
+import functools
+
+
+@functools.lru_cache(maxsize=16)
+def _resolve_font_file(fontname: str, bold: bool) -> Optional[str]:
+    """fc-match the banner font name to the actual TTF libass will render.
+
+    Measuring the SAME file freetype/libass uses is what makes the fit exact
+    (e.g. "Arial" → LiberationSans-Bold.ttf on Linux). Returns None if fc-match
+    or the file is unavailable, so callers fall back to a char-ratio estimate.
     """
+    query = f"{fontname}:bold" if bold else fontname
+    try:
+        out = subprocess.run(
+            ["fc-match", "-f", "%{file}", query], capture_output=True, text=True
+        )
+        p = out.stdout.strip()
+        return p if p and Path(p).exists() else None
+    except Exception:
+        return None
+
+
+def _banner_font_file(cfg: Any) -> Optional[str]:
+    fontname = _banner_style_field(cfg, "fontname", _BANNER_STYLE_DEFAULTS["fontname"])
+    bold = bool(_banner_style_field(cfg, "bold", _BANNER_STYLE_DEFAULTS["bold"]))
+    return _resolve_font_file(str(fontname), bold)
+
+
+def _ink_bbox(text: str, font_file: str, fs: int) -> tuple[int, int, int, int]:
+    """Freetype ink bounding box (x0,y0,x1,y1) for ``text`` at size ``fs``."""
+    from PIL import ImageFont
+
+    return ImageFont.truetype(font_file, fs).getbbox(text)
+
+
+def _font_ascent_descent(font_file: str, fs: int) -> tuple[int, int]:
+    from PIL import ImageFont
+
+    return ImageFont.truetype(font_file, fs).getmetrics()
+
+
+def _ref_text_width(text: str, font_file: Optional[str], ref_fs: int) -> float:
+    """Text advance width at the reference size — measured if possible, else estimated."""
+    if font_file is not None:
+        x0, _, x1, _ = _ink_bbox(text, font_file, ref_fs)
+        return float(x1 - x0)
+    ratio = DEFAULT_BANNER_FIT_CHAR_RATIO
+    return max(1.0, len(text) * ratio * ref_fs)
+
+
+def balanced_wrap(hook: str, cfg: Any = None, font_file: Optional[str] = None) -> list[str]:
+    """Split ``hook`` into ≤ ``banner_max_lines`` lines minimising the widest line.
+
+    A balanced wrap lets the font grow as large as possible (the font is capped
+    by the widest line). One word or a single-line target returns ``[hook]``.
+    """
+    max_lines = int(_cfg(cfg, "banner_max_lines", DEFAULT_BANNER_MAX_LINES))
+    words = hook.split()
+    if max_lines <= 1 or len(words) < 2:
+        return [hook]
+    ref_fs = int(_cfg(cfg, "banner_font_ref_fs", DEFAULT_BANNER_REF_FS))
+    best: Optional[tuple[float, list[str]]] = None
+    for i in range(1, len(words)):
+        l1, l2 = " ".join(words[:i]), " ".join(words[i:])
+        widest = max(
+            _ref_text_width(l1, font_file, ref_fs),
+            _ref_text_width(l2, font_file, ref_fs),
+        )
+        if best is None or widest < best[0]:
+            best = (widest, [l1, l2])
+    return best[1] if best else [hook]
+
+
+def fit_banner_fontsize(lines: list[str], cfg: Any = None, font_file: Optional[str] = None) -> int:
+    """Font size that fills the box on BOTH axes for the given wrapped ``lines``.
+
+    ``fs_width`` fills the usable width from the widest line; ``fs_height`` keeps
+    the whole ink block within ``banner_max_block_h``. The size is the smaller of
+    the two (so neither axis overflows), capped by ``banner_max_fs``.
+    """
+    ref_fs = int(_cfg(cfg, "banner_font_ref_fs", DEFAULT_BANNER_REF_FS))
+    max_fs = int(_cfg(cfg, "banner_max_fs", DEFAULT_BANNER_MAX_FS))
     canvas_w = int(_cfg(cfg, "canvas_w", DEFAULT_CANVAS_W))
-    min_fs = int(_cfg(cfg, "banner_fit_min_fs", DEFAULT_BANNER_FIT_MIN_FS))
-    max_fs = int(_cfg(cfg, "banner_fit_max_fs", DEFAULT_BANNER_FIT_MAX_FS))
-    margin = int(_cfg(cfg, "banner_fit_edge_margin_px", DEFAULT_BANNER_FIT_EDGE_MARGIN_PX))
-    ratio = float(_cfg(cfg, "banner_fit_char_width_ratio", DEFAULT_BANNER_FIT_CHAR_RATIO))
-    usable = canvas_w - margin
-    n = max(1, len(hook_text))
-    return max(min_fs, min(max_fs, int(usable / (n * ratio))))
+    side = int(_cfg(cfg, "banner_side_margin_px", DEFAULT_BANNER_SIDE_MARGIN))
+    pad_x = int(_cfg(cfg, "banner_pad_x", DEFAULT_BANNER_PAD_X))
+    spacing = float(_cfg(cfg, "banner_line_spacing", DEFAULT_BANNER_LINE_SPACING))
+    max_block_h = int(_cfg(cfg, "banner_max_block_h", DEFAULT_BANNER_MAX_BLOCK_H))
+
+    avail_w = max(1, canvas_w - 2 * side - 2 * pad_x)
+    widest = max(_ref_text_width(ln, font_file, ref_fs) for ln in lines)
+    fs_w = ref_fs * avail_w / widest
+
+    n = len(lines)
+    if font_file is not None:
+        asc, desc = _font_ascent_descent(font_file, ref_fs)
+        line_box_ref = asc + desc
+    else:
+        line_box_ref = ref_fs * 1.15
+    total_ref = ((n - 1) * spacing + 1.0) * line_box_ref
+    fs_h = ref_fs * max_block_h / max(1.0, total_ref)
+
+    return max(8, int(min(max_fs, fs_w, fs_h)))
+
+
+def compute_banner_fontsize(hook_text: str, cfg: Any = None) -> int:
+    """Measured banner font size for ``hook_text`` (wrapped then fit to the box).
+
+    Replaces the old ``len(text)·0.52`` char-ratio guess with a real freetype
+    measurement of the resolved font.
+    """
+    font_file = _banner_font_file(cfg)
+    lines = balanced_wrap(hook_text, cfg, font_file)
+    return fit_banner_fontsize(lines, cfg, font_file)
 
 
 def _caption_events(words: list[tuple[float, float, str]], cfg: Any) -> list[str]:
@@ -411,13 +551,68 @@ def _caption_events(words: list[tuple[float, float, str]], cfg: Any) -> list[str
     return events
 
 
-def _banner_event(hook: str, dur: float, cfg: Any) -> str:
-    x = _center_x(cfg)
-    y = int(_cfg(cfg, "divider_y", DEFAULT_DIVIDER_Y))
+def _banner_geometry(
+    lines: list[str], fs: int, cfg: Any, font_file: Optional[str],
+    cx: int, cy: int, pad_x: int, pad_y: int, spacing: float,
+) -> dict[str, int]:
+    """Box rectangle (bw,bh,bx0,by0) hugging the ink block, and the text y that
+    centres the INK block (not the line-box leading) on ``cy``."""
+    n = len(lines)
+    ref_fs = int(_cfg(cfg, "banner_font_ref_fs", DEFAULT_BANNER_REF_FS))
+    widest = max(lines, key=lambda t: _ref_text_width(t, font_file, ref_fs))
+    if font_file is not None:
+        x0, y0, x1, y1 = _ink_bbox(widest, font_file, fs)
+        iw, ink_h_one = x1 - x0, y1 - y0
+        asc, desc = _font_ascent_descent(font_file, fs)
+    else:
+        iw = int(_ref_text_width(widest, None, ref_fs) * fs / ref_fs)
+        ink_h_one = int(fs * 0.72)
+        asc, desc = int(fs * 0.90), int(fs * 0.25)
+        y0 = asc - ink_h_one
+    line_adv = int((asc + desc) * spacing)
+    block_h = (n - 1) * line_adv + ink_h_one
+    bh = block_h + 2 * pad_y
+    # Full-width box spans the frame (minus an optional inset) so no footage
+    # bleeds beside the banner in the divider band; else it hugs the ink width.
+    if bool(_cfg(cfg, "banner_full_width", DEFAULT_BANNER_FULL_WIDTH)):
+        margin_x = int(_cfg(cfg, "banner_box_margin_x", DEFAULT_BANNER_BOX_MARGIN_X))
+        canvas_w = int(_cfg(cfg, "canvas_w", DEFAULT_CANVAS_W))
+        bw = canvas_w - 2 * margin_x
+        bx0 = margin_x
+    else:
+        bw = iw + 2 * pad_x
+        bx0 = cx - bw // 2
+    total_line_box = (n - 1) * line_adv + (asc + desc)
+    ink_center_from_block_top = y0 + block_h / 2
+    ty = cy + int(total_line_box / 2 - ink_center_from_block_top)
+    return {"bw": bw, "bh": bh, "bx0": bx0, "by0": cy - bh // 2, "ty": ty}
+
+
+def _banner_events(hook: str, dur: float, cfg: Any) -> list[str]:
+    """A white box rectangle + the purple two-line hook, ink centred on the divider."""
+    cx = _center_x(cfg)
+    cy = int(_cfg(cfg, "divider_y", DEFAULT_DIVIDER_Y))
     upper = bool(_cfg(cfg, "banner_uppercase", True))
     text = hook.upper() if upper else hook
-    fs = compute_banner_fontsize(text, cfg)
-    return _dialogue(0.0, dur, BANNER_STYLE_NAME, x, y, text, extra_tags=f"\\fs{fs}")
+    pad_x = int(_cfg(cfg, "banner_pad_x", DEFAULT_BANNER_PAD_X))
+    pad_y = int(_cfg(cfg, "banner_pad_y", DEFAULT_BANNER_PAD_Y))
+    spacing = float(_cfg(cfg, "banner_line_spacing", DEFAULT_BANNER_LINE_SPACING))
+
+    font_file = _banner_font_file(cfg)
+    lines = balanced_wrap(text, cfg, font_file)
+    fs = fit_banner_fontsize(lines, cfg, font_file)
+    g = _banner_geometry(lines, fs, cfg, font_file, cx, cy, pad_x, pad_y, spacing)
+    body = "\\N".join(_ass_escape(ln) for ln in lines)
+    box_ev = (
+        f"Dialogue: 0,{_ass_time(0.0)},{_ass_time(dur)},{BANNER_BOX_STYLE_NAME},,0,0,0,,"
+        f"{{\\pos({g['bx0']},{g['by0']})\\p1}}m 0 0 l {g['bw']} 0 "
+        f"{g['bw']} {g['bh']} 0 {g['bh']}{{\\p0}}"
+    )
+    text_ev = (
+        f"Dialogue: 1,{_ass_time(0.0)},{_ass_time(dur)},{BANNER_STYLE_NAME},,0,0,0,,"
+        f"{{\\pos({cx},{g['ty']})\\fs{fs}}}{body}"
+    )
+    return [box_ev, text_ev]
 
 
 def _assemble(cfg: Any, styles: list[str], events: list[str]) -> str:
@@ -433,16 +628,16 @@ def build_caption_ass(words: list[tuple[float, float, str]], cfg: Any = None) ->
 
 
 def build_banner_ass(hook: str, dur: float, cfg: Any = None) -> str:
-    """B4 — one full-duration boxed banner ASS at the divider."""
-    return _assemble(cfg, [_banner_style_line(cfg)], [_banner_event(hook, dur, cfg)])
+    """B4 — full-duration two-line boxed banner ASS at the divider."""
+    return _assemble(cfg, _banner_style_lines(cfg), _banner_events(hook, dur, cfg))
 
 
 def build_finish_ass(
     words: list[tuple[float, float, str]], hook: str, dur: float, cfg: Any = None
 ) -> str:
     """Combined ASS burned by ``finish_reel`` (B9): banner + grouped captions."""
-    styles = [_caption_style_line(cfg), _banner_style_line(cfg)]
-    events = [_banner_event(hook, dur, cfg), *_caption_events(words, cfg)]
+    styles = [_caption_style_line(cfg), *_banner_style_lines(cfg)]
+    events = [*_banner_events(hook, dur, cfg), *_caption_events(words, cfg)]
     return _assemble(cfg, styles, events)
 
 
@@ -458,6 +653,8 @@ __all__ = [
     "caption_words",
     "compute_divider_y",
     "compute_banner_fontsize",
+    "balanced_wrap",
+    "fit_banner_fontsize",
     "group_captions",
     "build_caption_ass",
     "build_banner_ass",
@@ -465,4 +662,5 @@ __all__ = [
     "write_ass",
     "CAPTION_STYLE_NAME",
     "BANNER_STYLE_NAME",
+    "BANNER_BOX_STYLE_NAME",
 ]

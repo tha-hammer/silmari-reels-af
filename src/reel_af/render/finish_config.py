@@ -115,11 +115,29 @@ class ReelFinishConfig(BaseModel):
     caption_style: AssStyle = Field(default_factory=_caption_style)
     banner_style: AssStyle = Field(default_factory=_banner_style)
 
-    # ── Banner font-fit (B4) — shrink long hooks to fit the frame width ─
+    # ── Banner two-line box fit (V3, user-chosen) ─────────────────────
+    # The hook is balanced-wrapped to ≤ banner_max_lines lines and the font is
+    # MEASURED against the real resolved font (freetype/PIL) and scaled to fill
+    # a box that hugs the ink on both axes. No char-ratio guessing.
+    banner_font_ref_fs: int = 100            # reference size for measurement
+    banner_max_fs: int = 110                 # cap for short hooks
+    banner_max_lines: int = 2                # balanced-wrap target
+    banner_side_margin_px: int = 40          # box never within this of frame edge
+    banner_pad_x: int = 34                   # box horizontal padding around ink
+    banner_pad_y: int = 16                   # box vertical padding around ink block
+    banner_line_spacing: float = 0.94        # line advance ÷ (ascent+descent)
+    banner_max_block_h: int = 250            # ink-block height cap (all lines)
+    banner_text_outline: int = 0             # text outline px (0 = clean on box)
+    banner_full_width: bool = True           # box spans the full frame width (no
+    #                                          footage bleed beside a hugging box)
+    banner_box_margin_x: int = 0             # inset from each frame edge when full-width
+
+    # Legacy single-line char-ratio fit fields (deprecated, unused by the fit
+    # path; kept so older configs/tests don't break on unknown attributes).
     banner_fit_min_fs: int = 30
     banner_fit_max_fs: int = 58
-    banner_fit_edge_margin_px: int = 90      # usable width = canvas_w - this
-    banner_fit_char_width_ratio: float = 0.52  # avg glyph width ÷ fontsize
+    banner_fit_edge_margin_px: int = 90
+    banner_fit_char_width_ratio: float = 0.52
 
     # ── Divider detection (finish.py computes divider_y per reel) ──────
     divider_probe_t_s: float = 3.0           # frame timestamp to sample
