@@ -28,6 +28,10 @@
   "banner_text_outline": 0,
   "banner_full_width": true,
   "banner_box_margin_x": 0,
+  "banner_fixed_text": "",
+  "banner_duration_s": 0.0,
+  "banner_fade_in_ms": 300,
+  "banner_fade_out_ms": 500,
 
   "banner_fit_min_fs": 30,
   "banner_fit_max_fs": 58,
@@ -42,6 +46,7 @@
   "divider_min_contrast": 12.0,
 
   "image_count": 3,
+  "image_placement": "full",
   "image_min_dur_s": 2.0,
   "image_max_dur_s": 3.0,
   "image_edge_guard_s": 2.0,

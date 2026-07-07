@@ -64,6 +64,10 @@ DEFAULT_BANNER_MAX_BLOCK_H = _D["banner_max_block_h"]
 DEFAULT_BANNER_TEXT_OUTLINE = _D["banner_text_outline"]
 DEFAULT_BANNER_FULL_WIDTH = _D["banner_full_width"]
 DEFAULT_BANNER_BOX_MARGIN_X = _D["banner_box_margin_x"]
+DEFAULT_BANNER_FIXED_TEXT = _D["banner_fixed_text"]
+DEFAULT_BANNER_DURATION_S = _D["banner_duration_s"]
+DEFAULT_BANNER_FADE_IN_MS = _D["banner_fade_in_ms"]
+DEFAULT_BANNER_FADE_OUT_MS = _D["banner_fade_out_ms"]
 
 # Legacy char-ratio fallback (only when the real font can't be measured).
 DEFAULT_BANNER_FIT_MAX_FS = _D["banner_fit_max_fs"]
@@ -622,25 +626,43 @@ def _banner_geometry(
     return {"bw": box_w, "bh": box_h, "bx0": bx0, "by0": by0, "ty": ty}
 
 
+def _banner_fade_tag(cfg: Any) -> str:
+    r"""``\fad(in,out)`` override, or empty when both fades are zero."""
+    fin = int(_cfg(cfg, "banner_fade_in_ms", DEFAULT_BANNER_FADE_IN_MS))
+    fout = int(_cfg(cfg, "banner_fade_out_ms", DEFAULT_BANNER_FADE_OUT_MS))
+    return f"\\fad({fin},{fout})" if (fin or fout) else ""
+
+
 def _banner_events(hook: str, dur: float, cfg: Any) -> list[str]:
-    """A white full-width box hugging the purple hook with padding, ink centred on the divider."""
+    """A white full-width box hugging the hook, ink centred on the divider.
+
+    ``banner_fixed_text`` (when set) overrides ``hook`` — used for a title banner.
+    ``banner_duration_s`` > 0 shows the banner for that long then fades it out
+    (``banner_fade_*_ms``); 0 keeps it for the whole reel.
+    """
     cx = _center_x(cfg)
     cy = int(_cfg(cfg, "divider_y", DEFAULT_DIVIDER_Y))
     upper = bool(_cfg(cfg, "banner_uppercase", True))
-    text = hook.upper() if upper else hook
+    fixed = str(_cfg(cfg, "banner_fixed_text", DEFAULT_BANNER_FIXED_TEXT))
+    source = fixed if fixed else hook
+    text = source.upper() if upper else source
+
+    hold = float(_cfg(cfg, "banner_duration_s", DEFAULT_BANNER_DURATION_S))
+    end = min(dur, hold) if hold > 0 else dur
+    fade = _banner_fade_tag(cfg)
 
     font_file = _banner_font_file(cfg)
     lines, fs, box_h = banner_layout(text, cfg, font_file)
     g = _banner_geometry(lines, fs, box_h, cfg, font_file, cx, cy)
     body = "\\N".join(_ass_escape(ln) for ln in lines)
     box_ev = (
-        f"Dialogue: 0,{_ass_time(0.0)},{_ass_time(dur)},{BANNER_BOX_STYLE_NAME},,0,0,0,,"
-        f"{{\\pos({g['bx0']},{g['by0']})\\p1}}m 0 0 l {g['bw']} 0 "
+        f"Dialogue: 0,{_ass_time(0.0)},{_ass_time(end)},{BANNER_BOX_STYLE_NAME},,0,0,0,,"
+        f"{{\\pos({g['bx0']},{g['by0']}){fade}\\p1}}m 0 0 l {g['bw']} 0 "
         f"{g['bw']} {g['bh']} 0 {g['bh']}{{\\p0}}"
     )
     text_ev = (
-        f"Dialogue: 1,{_ass_time(0.0)},{_ass_time(dur)},{BANNER_STYLE_NAME},,0,0,0,,"
-        f"{{\\pos({cx},{g['ty']})\\fs{fs}}}{body}"
+        f"Dialogue: 1,{_ass_time(0.0)},{_ass_time(end)},{BANNER_STYLE_NAME},,0,0,0,,"
+        f"{{\\pos({cx},{g['ty']}){fade}\\fs{fs}}}{body}"
     )
     return [box_ev, text_ev]
 

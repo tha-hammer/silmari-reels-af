@@ -121,6 +121,12 @@ class ReelFinishConfig(BaseModel):
     banner_text_outline: int = _v("banner_text_outline")
     banner_full_width: bool = _v("banner_full_width")
     banner_box_margin_x: int = _v("banner_box_margin_x")
+    # Fixed banner text (e.g. a title) overrides the LLM hook when non-empty;
+    # banner_duration_s > 0 shows the banner for that long then fades it out.
+    banner_fixed_text: str = _v("banner_fixed_text")
+    banner_duration_s: float = _v("banner_duration_s")
+    banner_fade_in_ms: int = _v("banner_fade_in_ms")
+    banner_fade_out_ms: int = _v("banner_fade_out_ms")
 
     # Legacy single-line char-ratio fit fields (deprecated; kept for back-compat).
     banner_fit_min_fs: int = _v("banner_fit_min_fs")
@@ -138,6 +144,9 @@ class ReelFinishConfig(BaseModel):
 
     # ── Image cut-ins (B6/B7/B8) ──────────────────────────────────────
     image_count: int = _v("image_count")
+    # Image cut-in placement on the frame: "full" (default, B-roll cutaway),
+    # "pip", "upper_third", "lower_third", "upper_half", "lower_half".
+    image_placement: str = _v("image_placement")
     image_region: ImageRegion = _obj(ImageRegion, "image_region")
     image_min_dur_s: float = _v("image_min_dur_s")
     image_max_dur_s: float = _v("image_max_dur_s")
