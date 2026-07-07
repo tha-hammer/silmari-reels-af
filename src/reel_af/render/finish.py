@@ -84,6 +84,10 @@ class FinishDeps:
     image_paths_for_cutins: Callable[[Sequence[Any]], list[Path]]
     run_ffmpeg: Callable[[Sequence[str], float], Awaitable[None]]
     probe_duration: Callable[[Path], float]
+    # Optional: detect the banner's divider Y from the base reel (TASK 2). When
+    # None, the banner sits at ``cfg.divider_y`` unchanged — so tests that don't
+    # inject it keep their fixed geometry.
+    resolve_divider_y: Optional[Callable[[Path, ReelFinishConfig], int]] = None
 
 
 def default_deps() -> FinishDeps:
@@ -103,6 +107,9 @@ def default_deps() -> FinishDeps:
     def overlay_graph(cut_ins: Sequence[Any], cfg: ReelFinishConfig):
         return image_cutins.build_image_overlay_filtergraph(cut_ins, config=cfg)
 
+    def resolve_divider_y(base: Path, cfg: ReelFinishConfig) -> int:
+        return captions.compute_divider_y(base, cfg)
+
     return FinishDeps(
         caption_words=captions.caption_words,
         build_finish_ass=captions.build_finish_ass,
@@ -114,6 +121,7 @@ def default_deps() -> FinishDeps:
         image_paths_for_cutins=image_cutins.image_paths_for_cutins,
         run_ffmpeg=_run_ffmpeg,
         probe_duration=probe_duration,
+        resolve_divider_y=resolve_divider_y,
     )
 
 
@@ -216,6 +224,14 @@ async def finish_reel(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     dur = float(deps.probe_duration(base))
+
+    # 0. Detect the banner's divider Y from the base reel (TASK 2). Resolving it
+    #    into a cfg copy keeps ``build_finish_ass``'s signature untouched — the
+    #    banner reads ``cfg.divider_y`` as always, now a computed value.
+    if deps.resolve_divider_y is not None:
+        divider_y = int(deps.resolve_divider_y(base, cfg))
+        if divider_y != cfg.divider_y:
+            cfg = cfg.model_copy(update={"divider_y": divider_y})
 
     # 1. Hook (text LLM) + caption timings (whisper) — independent, concurrent.
     hook, words = await asyncio.gather(

@@ -41,31 +41,39 @@ class AssStyle(BaseModel):
 
 
 def _caption_style() -> AssStyle:
-    """Caption "Cap" style — white, thick outline, bottom-of-safe-zone."""
+    """Caption "Cap" style — high contrast: white text in a semi-opaque dark box.
+
+    Validated visually as the default: white fill on a translucent dark card
+    (``BorderStyle=3`` + ``BackColour=&HB0000000``) reads on any footage.
+    """
     return AssStyle(
         fontname="Arial",
-        fontsize=58,
-        primary="&H00FFFFFF",
+        fontsize=62,
+        primary="&H00FFFFFF",     # white fill
         outline_colour="&H00000000",
-        back="&H00000000",
+        back="&HB0000000",        # semi-opaque dark box (alpha B0)
         bold=True,
-        border_style=1,
-        outline=5,
-        shadow=2,
+        border_style=3,           # opaque box behind text
+        outline=4,
+        shadow=0,
     )
 
 
 def _banner_style() -> AssStyle:
-    """Banner style — lime text in an opaque box, sits on the divider bar."""
+    """Banner style — high contrast: PURPLE text on an OPAQUE WHITE box.
+
+    Chosen by the user over the earlier lime-on-dark look. Sits on the divider
+    bar; the per-hook font size is computed at render time (``banner_fit_*``).
+    """
     return AssStyle(
         fontname="Arial",
-        fontsize=44,
-        primary="&H0000FFEA",    # lime
-        outline_colour="&H00000000",
-        back="&HAA1A1A1A",       # semi-opaque dark box
+        fontsize=58,
+        primary="&H00CE227E",     # purple #7E22CE (ASS is &HAABBGGRR)
+        outline_colour="&H00FFFFFF",  # white — blends into the box edge
+        back="&H00FFFFFF",        # opaque white box
         bold=True,
-        border_style=3,          # opaque box
-        outline=0,
+        border_style=3,           # opaque box
+        outline=6,
         shadow=0,
     )
 
@@ -93,8 +101,8 @@ class ReelFinishConfig(BaseModel):
     canvas_w: int = 1080
     canvas_h: int = 1920
     center_x: int = 540
-    caption_safe_y: int = 1330   # ≈70% height — clears IG/Meta + YT UI
-    divider_y: int = 772         # talking-head / screenshare divider bar
+    caption_safe_y: int = 1344   # int(0.70·canvas_h) — clears IG/Meta + YT UI
+    divider_y: int = 772         # fallback when compute_divider_y can't detect the bar
 
     # ── Caption grouping (B3) ─────────────────────────────────────────
     caption_max_words: int = 4
@@ -106,6 +114,20 @@ class ReelFinishConfig(BaseModel):
     # ── Styles (B3/B4) ────────────────────────────────────────────────
     caption_style: AssStyle = Field(default_factory=_caption_style)
     banner_style: AssStyle = Field(default_factory=_banner_style)
+
+    # ── Banner font-fit (B4) — shrink long hooks to fit the frame width ─
+    banner_fit_min_fs: int = 30
+    banner_fit_max_fs: int = 58
+    banner_fit_edge_margin_px: int = 90      # usable width = canvas_w - this
+    banner_fit_char_width_ratio: float = 0.52  # avg glyph width ÷ fontsize
+
+    # ── Divider detection (finish.py computes divider_y per reel) ──────
+    divider_probe_t_s: float = 3.0           # frame timestamp to sample
+    divider_band_lo_pct: float = 0.28        # search y ∈ [lo·H, hi·H]
+    divider_band_hi_pct: float = 0.58
+    divider_sample_step_px: int = 8          # x-sampling stride per row
+    divider_dark_rows: int = 24              # darkest N rows → band center
+    divider_min_contrast: float = 12.0       # median−dark luminance to trust it
 
     # ── Image cut-ins (B6/B7/B8) ──────────────────────────────────────
     image_count: int = 3               # 2-3 per reel over the screenshare pane

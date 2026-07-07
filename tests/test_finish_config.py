@@ -26,8 +26,8 @@ def test_geometry_defaults_present() -> None:
     assert cfg.canvas_w == 1080
     assert cfg.canvas_h == 1920
     assert cfg.center_x == 540
-    # ≈70% height — clears IG/Meta + YT UI; banner sits on the divider bar.
-    assert cfg.caption_safe_y == 1330
+    # int(0.70·H) — clears IG/Meta + YT UI; divider_y is the banner fallback.
+    assert cfg.caption_safe_y == 1344
     assert cfg.divider_y == 772
 
 
@@ -42,20 +42,22 @@ def test_caption_grouping_defaults_present() -> None:
 
 def test_style_defaults_match_proven_values() -> None:
     cfg = ReelFinishConfig()
-    # Caption "Cap" style from enhance_reel.py.
+    # Caption "Cap" style — high contrast: white text in a semi-opaque dark box.
     assert cfg.caption_style.fontname == "Arial"
-    assert cfg.caption_style.fontsize == 58
+    assert cfg.caption_style.fontsize == 62
     assert cfg.caption_style.primary == "&H00FFFFFF"
-    assert cfg.caption_style.outline == 5
-    assert cfg.caption_style.shadow == 2
+    assert cfg.caption_style.back == "&HB0000000"
+    assert cfg.caption_style.border_style == 3
+    assert cfg.caption_style.outline == 4
+    assert cfg.caption_style.shadow == 0
     assert cfg.caption_style.bold is True
-    # Banner "Banner" style — lime text in an opaque box on the divider.
+    # Banner "Banner" style — PURPLE text on an opaque WHITE box (TASK 2).
     assert cfg.banner_style.fontname == "Arial"
-    assert cfg.banner_style.fontsize == 44
-    assert cfg.banner_style.primary == "&H0000FFEA"
-    assert cfg.banner_style.back == "&HAA1A1A1A"
+    assert cfg.banner_style.fontsize == 58
+    assert cfg.banner_style.primary == "&H00CE227E"
+    assert cfg.banner_style.back == "&H00FFFFFF"
     assert cfg.banner_style.border_style == 3
-    assert cfg.banner_style.outline == 0
+    assert cfg.banner_style.outline == 6
     assert cfg.banner_style.shadow == 0
     assert cfg.banner_style.bold is True
 
@@ -77,7 +79,7 @@ def test_image_cutin_defaults_present() -> None:
 
 def test_caption_pos_tag_uses_config() -> None:
     cfg = ReelFinishConfig()
-    assert caption_pos_tag(cfg) == r"{\pos(540,1330)}"
+    assert caption_pos_tag(cfg) == r"{\pos(540,1344)}"
 
 
 def test_overriding_caption_safe_y_moves_the_pos() -> None:
@@ -97,7 +99,7 @@ def test_overriding_divider_y_moves_the_banner_pos() -> None:
 
 def test_overriding_center_x_moves_both_tags() -> None:
     cfg = ReelFinishConfig(center_x=600)
-    assert caption_pos_tag(cfg) == r"{\pos(600,1330)}"
+    assert caption_pos_tag(cfg) == r"{\pos(600,1344)}"
     assert banner_pos_tag(cfg) == r"{\pos(600,772)}"
 
 
@@ -110,7 +112,7 @@ def test_nested_models_are_independent_instances() -> None:
     a = ReelFinishConfig()
     b = ReelFinishConfig()
     a.caption_style.fontsize = 99
-    assert b.caption_style.fontsize == 58  # no shared-default aliasing
+    assert b.caption_style.fontsize == 62  # no shared-default aliasing
 
 
 def test_can_override_nested_style_and_region() -> None:

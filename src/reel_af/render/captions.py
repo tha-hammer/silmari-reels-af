@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -31,11 +32,25 @@ from typing import Any, Callable, Optional
 DEFAULT_CANVAS_W = 1080
 DEFAULT_CANVAS_H = 1920
 DEFAULT_CENTER_X = 540
-DEFAULT_CAPTION_SAFE_Y = 1330          # ≈70% height — clears IG/Meta + YT UI
-DEFAULT_DIVIDER_Y = 772                # talking-head / screenshare divider
+DEFAULT_CAPTION_SAFE_Y = 1344          # int(0.70·canvas_h) — clears IG/Meta + YT UI
+DEFAULT_DIVIDER_Y = 772                # fallback when the divider bar isn't detected
 DEFAULT_MAX_WORDS = 4
 DEFAULT_MAX_DUR_S = 1.8
 DEFAULT_GAP_S = 0.35                   # silence gap that forces a new phrase
+
+# Banner font-fit defaults (used when cfg lacks the fields / cfg is None).
+DEFAULT_BANNER_FIT_MIN_FS = 30
+DEFAULT_BANNER_FIT_MAX_FS = 58
+DEFAULT_BANNER_FIT_EDGE_MARGIN_PX = 90
+DEFAULT_BANNER_FIT_CHAR_RATIO = 0.52
+
+# Divider-detection defaults.
+DEFAULT_DIVIDER_PROBE_T_S = 3.0
+DEFAULT_DIVIDER_BAND_LO_PCT = 0.28
+DEFAULT_DIVIDER_BAND_HI_PCT = 0.58
+DEFAULT_DIVIDER_SAMPLE_STEP_PX = 8
+DEFAULT_DIVIDER_DARK_ROWS = 24
+DEFAULT_DIVIDER_MIN_CONTRAST = 12.0
 
 CAPTION_STYLE_NAME = "Cap"
 BANNER_STYLE_NAME = "Banner"
@@ -44,29 +59,30 @@ WHISPER_MODEL = "base.en"
 
 # Style field defaults — one dict per named ASS style. A ``cfg.<x>_style``
 # object overrides any of these via getattr; missing attrs fall through.
+# High-contrast defaults, validated visually as the reel finish default.
 _CAPTION_STYLE_DEFAULTS: dict[str, Any] = {
     "fontname": "Arial",
-    "fontsize": 58,
+    "fontsize": 62,
     "primary": "&H00FFFFFF",           # white fill
     "secondary": "&H000000FF",
     "outline_color": "&H00000000",
-    "back": "&H00000000",
+    "back": "&HB0000000",              # semi-opaque dark box (alpha B0)
     "bold": 1,
-    "border_style": 1,                 # outline + drop shadow
-    "outline": 5,
-    "shadow": 2,
+    "border_style": 3,                 # opaque box behind text
+    "outline": 4,
+    "shadow": 0,
     "alignment": 5,                    # middle-center anchor (pos overrides)
 }
 _BANNER_STYLE_DEFAULTS: dict[str, Any] = {
     "fontname": "Arial",
-    "fontsize": 44,
-    "primary": "&H0000FFEA",           # lime
+    "fontsize": 58,
+    "primary": "&H00CE227E",           # purple #7E22CE
     "secondary": "&H000000FF",
-    "outline_color": "&H00000000",
-    "back": "&HAA1A1A1A",              # semi-opaque box fill
+    "outline_color": "&H00FFFFFF",     # white — blends into the box edge
+    "back": "&H00FFFFFF",              # opaque white box
     "bold": 1,
     "border_style": 3,                 # opaque box behind text
-    "outline": 0,
+    "outline": 6,
     "shadow": 0,
     "alignment": 5,
 }
@@ -192,6 +208,76 @@ def caption_words(
     return _parse_whisper_words(data, duration)
 
 
+# ───── Divider detection — where the banner sits ─────────────────────
+
+
+def _extract_divider_frame(base_reel_path: Path, cfg: Any) -> Any:
+    """Grab one frame at ``divider_probe_t_s`` and return it as a grayscale PIL image."""
+    from PIL import Image  # lazy — only the divider path needs Pillow
+
+    probe_t = float(_cfg(cfg, "divider_probe_t_s", DEFAULT_DIVIDER_PROBE_T_S))
+    tmp_dir = Path(tempfile.mkdtemp(prefix="divider_"))
+    frame = tmp_dir / "frame.png"
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-ss", f"{probe_t:.3f}",
+         "-i", str(base_reel_path), "-frames:v", "1", str(frame)],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0 or not frame.exists():
+        raise RuntimeError(f"divider frame extract failed: {proc.stderr[-300:]}")
+    return Image.open(frame).convert("L")
+
+
+def _divider_from_gray(gray: Any, cfg: Any, fallback: int) -> int:
+    """Find the darkest full-width horizontal band = the divider bar.
+
+    Returns ``fallback`` when the darkest band isn't meaningfully darker than
+    the median row (i.e. there's no distinct dark bar — detection failed).
+    """
+    lo_pct = float(_cfg(cfg, "divider_band_lo_pct", DEFAULT_DIVIDER_BAND_LO_PCT))
+    hi_pct = float(_cfg(cfg, "divider_band_hi_pct", DEFAULT_DIVIDER_BAND_HI_PCT))
+    step = int(_cfg(cfg, "divider_sample_step_px", DEFAULT_DIVIDER_SAMPLE_STEP_PX))
+    n_dark = int(_cfg(cfg, "divider_dark_rows", DEFAULT_DIVIDER_DARK_ROWS))
+    min_contrast = float(_cfg(cfg, "divider_min_contrast", DEFAULT_DIVIDER_MIN_CONTRAST))
+
+    w, h = gray.size
+    px = gray.load()
+    lo, hi = int(h * lo_pct), int(h * hi_pct)
+    step = max(1, step)
+    xs = range(0, w, step)
+    n_x = max(1, len(xs))
+    rows = [(sum(px[x, y] for x in xs) / n_x, y) for y in range(lo, hi)]
+    if not rows:
+        return fallback
+    rows.sort()
+    dark = rows[: max(1, min(n_dark, len(rows)))]
+    dark_y = int(sum(y for _, y in dark) / len(dark))
+    dark_lum = sum(lum for lum, _ in dark) / len(dark)
+    median_lum = sorted(lum for lum, _ in rows)[len(rows) // 2]
+    if median_lum - dark_lum < min_contrast:
+        return fallback  # no distinct dark bar — detection failed
+    return dark_y
+
+
+def compute_divider_y(
+    base_reel_path: Path, cfg: Any = None, *, extract_frame: Optional[Callable[..., Any]] = None
+) -> int:
+    """Detect the banner's Y (the black divider bar) from the base reel.
+
+    Extracts a frame, scans rows in y∈[lo·H, hi·H] for the darkest full-width
+    band, and returns its center. Falls back to ``cfg.divider_y`` if the frame
+    can't be read or no distinct dark bar is found. ``extract_frame`` is an
+    injectable seam (``(base, cfg) -> grayscale PIL image``) for tests.
+    """
+    fallback = int(_cfg(cfg, "divider_y", DEFAULT_DIVIDER_Y))
+    extract = extract_frame or _extract_divider_frame
+    try:
+        gray = extract(Path(base_reel_path), cfg)
+        return _divider_from_gray(gray, cfg, fallback)
+    except Exception:
+        return fallback
+
+
 # ───── B3: phrase grouping ───────────────────────────────────────────
 
 
@@ -289,11 +375,30 @@ def _banner_style_line(cfg: Any) -> str:
     return _style_line(BANNER_STYLE_NAME, getattr(cfg, "banner_style", None), _BANNER_STYLE_DEFAULTS)
 
 
-def _dialogue(start: float, end: float, style: str, x: int, y: int, text: str) -> str:
+def _dialogue(
+    start: float, end: float, style: str, x: int, y: int, text: str, extra_tags: str = ""
+) -> str:
     return (
         f"Dialogue: 0,{_ass_time(start)},{_ass_time(end)},{style},,0,0,0,,"
-        f"{{\\pos({x},{y})}}{_ass_escape(text)}"
+        f"{{\\pos({x},{y}){extra_tags}}}{_ass_escape(text)}"
     )
+
+
+def compute_banner_fontsize(hook_text: str, cfg: Any = None) -> int:
+    """Fit the banner font to the frame width so long hooks don't overflow.
+
+    ``fs = max(min_fs, min(max_fs, int((canvas_w - edge_margin) /
+    (len(text) * char_ratio))))`` — the proven ``banner_fix_proto.py`` formula,
+    every constant a config tunable.
+    """
+    canvas_w = int(_cfg(cfg, "canvas_w", DEFAULT_CANVAS_W))
+    min_fs = int(_cfg(cfg, "banner_fit_min_fs", DEFAULT_BANNER_FIT_MIN_FS))
+    max_fs = int(_cfg(cfg, "banner_fit_max_fs", DEFAULT_BANNER_FIT_MAX_FS))
+    margin = int(_cfg(cfg, "banner_fit_edge_margin_px", DEFAULT_BANNER_FIT_EDGE_MARGIN_PX))
+    ratio = float(_cfg(cfg, "banner_fit_char_width_ratio", DEFAULT_BANNER_FIT_CHAR_RATIO))
+    usable = canvas_w - margin
+    n = max(1, len(hook_text))
+    return max(min_fs, min(max_fs, int(usable / (n * ratio))))
 
 
 def _caption_events(words: list[tuple[float, float, str]], cfg: Any) -> list[str]:
@@ -310,7 +415,9 @@ def _banner_event(hook: str, dur: float, cfg: Any) -> str:
     x = _center_x(cfg)
     y = int(_cfg(cfg, "divider_y", DEFAULT_DIVIDER_Y))
     upper = bool(_cfg(cfg, "banner_uppercase", True))
-    return _dialogue(0.0, dur, BANNER_STYLE_NAME, x, y, hook.upper() if upper else hook)
+    text = hook.upper() if upper else hook
+    fs = compute_banner_fontsize(text, cfg)
+    return _dialogue(0.0, dur, BANNER_STYLE_NAME, x, y, text, extra_tags=f"\\fs{fs}")
 
 
 def _assemble(cfg: Any, styles: list[str], events: list[str]) -> str:
@@ -349,6 +456,8 @@ def write_ass(ass_text: str, out_path: Path) -> Path:
 
 __all__ = [
     "caption_words",
+    "compute_divider_y",
+    "compute_banner_fontsize",
     "group_captions",
     "build_caption_ass",
     "build_banner_ass",
