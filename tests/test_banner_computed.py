@@ -128,11 +128,20 @@ def test_fit_is_measured_not_char_ratio():
     assert narrow > wide  # a char-count·ratio guess would make these equal
 
 
-def test_balanced_wrap_splits_to_minimise_widest_line():
-    cfg = StubFinishConfig()
-    lines = captions.balanced_wrap("ALPHA BETA GAMMA DELTA", cfg, font_file=None)
-    assert len(lines) == 2
+def test_wrap_into_splits_to_minimise_widest_line():
+    # The balanced splitter puts an equal number of words on each line.
+    lines = captions._wrap_into("ALPHA BETA GAMMA DELTA".split(), 2, None, 100)
     assert lines == ["ALPHA BETA", "GAMMA DELTA"]
+
+
+def test_long_hook_wraps_for_readability():
+    # A long hook that would be tiny on one line wraps to more lines.
+    cfg = StubFinishConfig()
+    short_lines = captions.balanced_wrap("AI IS STUPID.", cfg)
+    long_lines = captions.balanced_wrap(
+        "THE SINGLE BIGGEST MISTAKE EVERYONE MAKES WITH AI TODAY", cfg
+    )
+    assert len(short_lines) < len(long_lines)
 
 
 def test_banner_event_embeds_computed_fs_override():

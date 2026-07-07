@@ -97,13 +97,19 @@ class ReelFinishConfig(BaseModel):
     caption_style: AssStyle = _obj(AssStyle, "caption_style")
     banner_style: AssStyle = _obj(AssStyle, "banner_style")
 
-    # ── Banner box (V3): full-width box that HUGS the text with banner_pad_*
-    #    padding on every side (default 20px). The font fills the width; the line
-    #    count is chosen to maximise the font while the box stays ≤ box_max_h;
-    #    the box height then follows the text so padding is exactly banner_pad_y.
+    # ── Banner box (V3): full-width box; text ALWAYS fills the width; the box
+    #    HUGS the text height (so vertical padding is ~banner_pad_y), clamped to
+    #    [box_min_h, box_max_h] so a single line is never a thin sliver. Line
+    #    count is chosen by readability: use the fewest lines whose width-filling
+    #    font is ≥ banner_min_readable_fs. A geometry fact: a fixed box can't hit
+    #    the pad on BOTH axes for every hook aspect ratio, so we fix width + hug
+    #    height. banner_render_*_ratio calibrate PIL measurements to libass.
     banner_font_ref_fs: int = _v("banner_font_ref_fs")
+    banner_min_fs: int = _v("banner_min_fs")
     banner_max_fs: int = _v("banner_max_fs")
+    banner_min_readable_fs: int = _v("banner_min_readable_fs")
     banner_max_lines: int = _v("banner_max_lines")
+    banner_box_min_h: int = _v("banner_box_min_h")
     banner_box_max_h: int = _v("banner_box_max_h")
     banner_side_margin_px: int = _v("banner_side_margin_px")
     banner_pad_x: int = _v("banner_pad_x")

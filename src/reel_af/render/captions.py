@@ -45,8 +45,11 @@ DEFAULT_MAX_DUR_S = _D["caption_max_dur_s"]
 DEFAULT_GAP_S = _D["caption_gap_s"]
 
 DEFAULT_BANNER_REF_FS = _D["banner_font_ref_fs"]
+DEFAULT_BANNER_MIN_FS = _D["banner_min_fs"]
 DEFAULT_BANNER_MAX_FS = _D["banner_max_fs"]
+DEFAULT_BANNER_MIN_READABLE_FS = _D["banner_min_readable_fs"]
 DEFAULT_BANNER_MAX_LINES = _D["banner_max_lines"]
+DEFAULT_BANNER_BOX_MIN_H = _D["banner_box_min_h"]
 DEFAULT_BANNER_BOX_MAX_H = _D["banner_box_max_h"]
 DEFAULT_BANNER_SIDE_MARGIN = _D["banner_side_margin_px"]
 DEFAULT_BANNER_PAD_X = _D["banner_pad_x"]
@@ -506,19 +509,26 @@ def _line_metrics_ref(cfg: Any, font_file: Optional[str], ref_fs: int) -> tuple[
 def banner_layout(
     hook: str, cfg: Any = None, font_file: Optional[str] = None
 ) -> tuple[list[str], int, int]:
-    """Choose (lines, font size, box height) so the text fills a full-width box
-    with exactly ``banner_pad_*`` padding on every side.
+    """Fit the text to a full-width banner box: (lines, font size, box height).
 
-    The font always fills the width (``fs`` set so the widest line spans the box
-    width minus padding). The line count is chosen to maximise the font while the
-    resulting box height stays ≤ ``banner_box_max_h``; the box height then follows
-    the text (block + 2·pad), so the vertical padding is exactly ``banner_pad_y``.
+    The text ALWAYS fills the box width (font sized so the widest balanced line
+    spans the width minus padding). The box HUGS the text height, so vertical
+    padding is ~``banner_pad_y``, clamped to ``[box_min_h, box_max_h]`` so a
+    single line is never a thin sliver. The line count is chosen by readability:
+    the fewest lines whose width-filling font is ≥ ``banner_min_readable_fs``
+    (more lines ⇒ shorter lines ⇒ bigger font), so a long hook that would be
+    tiny on one line wraps, and a short hook stays on one line. Geometry fact: a
+    box can't hit the pad on BOTH axes for every hook aspect, so we fix width
+    and hug height. PIL is corrected to libass by ``k_w``/``k_h``.
     """
     ref_fs = int(_cfg(cfg, "banner_font_ref_fs", DEFAULT_BANNER_REF_FS))
+    min_fs = int(_cfg(cfg, "banner_min_fs", DEFAULT_BANNER_MIN_FS))
     max_fs = int(_cfg(cfg, "banner_max_fs", DEFAULT_BANNER_MAX_FS))
+    read_fs = int(_cfg(cfg, "banner_min_readable_fs", DEFAULT_BANNER_MIN_READABLE_FS))
     max_lines = int(_cfg(cfg, "banner_max_lines", DEFAULT_BANNER_MAX_LINES))
     pad_x = int(_cfg(cfg, "banner_pad_x", DEFAULT_BANNER_PAD_X))
     pad_y = int(_cfg(cfg, "banner_pad_y", DEFAULT_BANNER_PAD_Y))
+    min_h = int(_cfg(cfg, "banner_box_min_h", DEFAULT_BANNER_BOX_MIN_H))
     max_h = int(_cfg(cfg, "banner_box_max_h", DEFAULT_BANNER_BOX_MAX_H))
     k_w = float(_cfg(cfg, "banner_render_width_ratio", DEFAULT_BANNER_RENDER_WIDTH_RATIO))
     k_h = float(_cfg(cfg, "banner_render_height_ratio", DEFAULT_BANNER_RENDER_HEIGHT_RATIO))
@@ -526,41 +536,41 @@ def banner_layout(
     avail_w = max(1, _banner_box_width(cfg) - 2 * pad_x)
     cap_ref, line_adv_ref = _line_metrics_ref(cfg, font_file, ref_fs)
     words = hook.split()
+    n_max = min(max_lines, max(1, len(words)))
 
-    def _block_ref(n: int) -> float:
-        return (n - 1) * line_adv_ref + cap_ref
-
-    # Fill the width (correcting PIL→rendered by k_w); box height follows the
-    # rendered block (k_h) plus padding.
-    cands = []  # (fs, lines, box_h)
-    for n in range(1, min(max_lines, max(1, len(words))) + 1):
-        lines = _wrap_into(words, n, font_file, ref_fs)
+    def _fs_w(lines: list[str]) -> float:
         widest = max(_ref_text_width(ln, font_file, ref_fs) for ln in lines)
-        fs = min(max_fs, ref_fs * avail_w / (k_w * widest))
-        box_h = k_h * _block_ref(n) * fs / ref_fs + 2 * pad_y
-        cands.append((fs, lines, box_h))
+        return ref_fs * avail_w / (k_w * widest)
 
-    fitting = [c for c in cands if c[2] <= max_h]
-    if fitting:
-        fs, lines, box_h = max(fitting, key=lambda c: c[0])
-    else:
-        # Every option is too tall: take the shortest and shrink to the cap.
-        fs, lines, _ = min(cands, key=lambda c: c[2])
-        n = len(lines)
-        fs = min(fs, ref_fs * (max_h - 2 * pad_y) / (k_h * _block_ref(n)))
-        box_h = k_h * _block_ref(n) * fs / ref_fs + 2 * pad_y
+    # Fewest lines whose width-filling font is readable (last option otherwise).
+    chosen_n, chosen_lines, chosen_fs = 1, [hook], float(min_fs)
+    for n in range(1, n_max + 1):
+        lines = _wrap_into(words, n, font_file, ref_fs)
+        if len(lines) != n:
+            continue
+        fs = min(_fs_w(lines), float(max_fs))
+        chosen_n, chosen_lines, chosen_fs = n, lines, fs
+        if fs >= read_fs:
+            break
 
-    fs_val = max(8, int(fs))
-    return lines, fs_val, int(round(box_h))
+    # Hug the rendered height; if it would exceed max_h, shrink the font to fit.
+    block_ref = (chosen_n - 1) * line_adv_ref + cap_ref
+    box_h = k_h * block_ref * chosen_fs / ref_fs + 2 * pad_y
+    if box_h > max_h:
+        chosen_fs = (max_h - 2 * pad_y) * ref_fs / (k_h * block_ref)
+        box_h = float(max_h)
+    box_h = min(max_h, max(min_h, box_h))
+
+    return chosen_lines, max(min_fs, int(chosen_fs)), int(round(box_h))
 
 
 def balanced_wrap(hook: str, cfg: Any = None, font_file: Optional[str] = None) -> list[str]:
-    """The line breakdown the banner fill chooses for ``hook``."""
+    """The line breakdown the banner auto-fit chooses for ``hook``."""
     return banner_layout(hook, cfg, font_file)[0]
 
 
 def compute_banner_fontsize(hook_text: str, cfg: Any = None) -> int:
-    """Font size the banner fill chooses for ``hook_text`` (measured, not guessed)."""
+    """Font size the banner auto-fit chooses for ``hook_text`` (measured, not guessed)."""
     return banner_layout(hook_text, cfg, _banner_font_file(cfg))[1]
 
 
@@ -575,14 +585,12 @@ def _caption_events(words: list[tuple[float, float, str]], cfg: Any) -> list[str
 
 
 def _banner_geometry(
-    lines: list[str], fs: int, cfg: Any, font_file: Optional[str], cx: int, cy: int,
+    lines: list[str], fs: int, box_h: int, cfg: Any, font_file: Optional[str], cx: int, cy: int,
 ) -> dict[str, int]:
-    """The full-width box rectangle (bw,bh,bx0,by0) hugging the text with padding,
-    and the text y that centres the ink block on ``cy``."""
+    """The full-width box rectangle (bw,bh,bx0,by0) of height ``box_h``, and the
+    text y that centres the ink block on ``cy``."""
     n = len(lines)
     spacing = float(_cfg(cfg, "banner_line_spacing", DEFAULT_BANNER_LINE_SPACING))
-    pad_y = int(_cfg(cfg, "banner_pad_y", DEFAULT_BANNER_PAD_Y))
-    k_h = float(_cfg(cfg, "banner_render_height_ratio", DEFAULT_BANNER_RENDER_HEIGHT_RATIO))
     box_w = _banner_box_width(cfg)
 
     if font_file is not None:
@@ -596,13 +604,12 @@ def _banner_geometry(
         y0 = asc - ink_h_one
     line_adv = int((asc + desc) * spacing)
     block_h = (n - 1) * line_adv + ink_h_one
-    # Box hugs the RENDERED ink block (k_h·PIL) with exactly pad_y above and below.
-    bh = int(k_h * block_h) + 2 * pad_y
-    bx0, by0 = cx - box_w // 2, cy - bh // 2
+    # Fixed box; the text (auto-fit) fills it. Centre the ink block on cy.
+    bx0, by0 = cx - box_w // 2, cy - box_h // 2
     total_line_box = (n - 1) * line_adv + (asc + desc)
     ink_center_from_block_top = y0 + block_h / 2
     ty = cy + int(total_line_box / 2 - ink_center_from_block_top)
-    return {"bw": box_w, "bh": bh, "bx0": bx0, "by0": by0, "ty": ty}
+    return {"bw": box_w, "bh": box_h, "bx0": bx0, "by0": by0, "ty": ty}
 
 
 def _banner_events(hook: str, dur: float, cfg: Any) -> list[str]:
@@ -613,8 +620,8 @@ def _banner_events(hook: str, dur: float, cfg: Any) -> list[str]:
     text = hook.upper() if upper else hook
 
     font_file = _banner_font_file(cfg)
-    lines, fs, _box_h = banner_layout(text, cfg, font_file)
-    g = _banner_geometry(lines, fs, cfg, font_file, cx, cy)
+    lines, fs, box_h = banner_layout(text, cfg, font_file)
+    g = _banner_geometry(lines, fs, box_h, cfg, font_file, cx, cy)
     body = "\\N".join(_ass_escape(ln) for ln in lines)
     box_ev = (
         f"Dialogue: 0,{_ass_time(0.0)},{_ass_time(dur)},{BANNER_BOX_STYLE_NAME},,0,0,0,,"
