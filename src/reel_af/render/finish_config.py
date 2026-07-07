@@ -1,171 +1,145 @@
-"""B0 — ``ReelFinishConfig``: the single, no-literal home for finish tunables.
+"""B0 — ``ReelFinishConfig``: the typed schema over the finish-stage config.
 
-Every number the finish stage burns into a reel — caption safe-zone Y, banner
-divider Y, grouping thresholds, ASS styles, image cut-in count / region /
-duration — lives here so the render code carries no magic literals. Defaults
-are the exact values proven on the ppWtqV0auok crisp renders
-(``enhance_reel.py``): caption ``\\pos(540,1330)``, banner ``\\pos(540,772)``,
-Cap/Banner ASS styles, ≤4-word / ≤1.8s caption phrases.
+Per ARCHITECTURE §10, **no tuning value or style dictionary is a literal here** —
+every default is sourced from ``config/finish.json`` via ``load_finish_defaults``.
+This module is the *schema* (field names + types + validation); the *values* live
+in JSON. Access to the raw dict is a single hop
+(``load_finish_defaults()["banner_pad_x"]``).
 
-Kept as a dependency-light module (pydantic only, no ffmpeg/whisper imports) so
-every sibling module — ``captions.py`` (B3/B4), ``hooks.py`` (B6),
-``image_cutins.py`` (B8) and ``finish.py`` (B9) — can import the config without
-dragging heavy render deps into unit tests.
+Kept dependency-light (pydantic + the stdlib loader only) so every sibling module
+— ``captions.py`` (B3/B4), ``hooks.py`` (B6), ``image_cutins.py`` (B8) and
+``finish.py`` (B9) — can import the config without heavy render deps.
 """
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, ConfigDict, Field
+
+from reel_af.render.finish_defaults import load_finish_defaults
+
+_D = load_finish_defaults()
+
+
+def _v(key: str) -> Any:
+    """A pydantic field default sourced from the JSON config (1-hop lookup)."""
+    return Field(default_factory=lambda: _D[key])
+
+
+def _obj(model: type[BaseModel], key: str) -> Any:
+    """A pydantic sub-model default built from the JSON config dict at ``key``."""
+    return Field(default_factory=lambda: model(**_D[key]))
+
+
+def _base(key: str) -> Any:
+    """An ``AssStyle`` field default sourced from ``ass_style_base`` in JSON."""
+    return Field(default_factory=lambda: _D["ass_style_base"][key])
+
+
+def _region(key: str) -> Any:
+    """An ``ImageRegion`` field default sourced from ``image_region`` in JSON."""
+    return Field(default_factory=lambda: _D["image_region"][key])
 
 
 class AssStyle(BaseModel):
-    """One ASS ``[V4+ Styles]`` row's tunable fields.
+    """One ASS ``[V4+ Styles]`` row's tunable fields (values from JSON).
 
-    Colours are ASS ``&HAABBGGRR`` strings (alpha+BGR); ``outline`` and
-    ``shadow`` are widths in px; ``border_style`` 1 = outline+shadow, 3 =
-    opaque box (used by the banner).
+    Colours are ASS ``&HAABBGGRR`` strings (alpha+BGR); ``outline``/``shadow`` are
+    px widths; ``border_style`` 1 = outline+shadow, 3 = opaque box.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    fontname: str = "Arial"
-    fontsize: int = 58
-    primary: str = "&H00FFFFFF"          # PrimaryColour (fill)
-    secondary: str = "&H000000FF"        # SecondaryColour (unused, karaoke)
-    outline_colour: str = "&H00000000"   # OutlineColour
-    back: str = "&H00000000"             # BackColour (box fill when border_style=3)
-    bold: bool = True
-    border_style: int = 1
-    outline: int = 5                     # outline width px
-    shadow: int = 2                      # shadow depth px
-
-
-def _caption_style() -> AssStyle:
-    """Caption "Cap" style — high contrast: white text in a semi-opaque dark box.
-
-    Validated visually as the default: white fill on a translucent dark card
-    (``BorderStyle=3`` + ``BackColour=&HB0000000``) reads on any footage.
-    """
-    return AssStyle(
-        fontname="Arial",
-        fontsize=62,
-        primary="&H00FFFFFF",     # white fill
-        outline_colour="&H00000000",
-        back="&HB0000000",        # semi-opaque dark box (alpha B0)
-        bold=True,
-        border_style=3,           # opaque box behind text
-        outline=4,
-        shadow=0,
-    )
-
-
-def _banner_style() -> AssStyle:
-    """Banner style — high contrast: PURPLE text on an OPAQUE WHITE box.
-
-    Chosen by the user over the earlier lime-on-dark look. Sits on the divider
-    bar; the per-hook font size is computed at render time (``banner_fit_*``).
-    """
-    return AssStyle(
-        fontname="Arial",
-        fontsize=58,
-        primary="&H00CE227E",     # purple #7E22CE (ASS is &HAABBGGRR)
-        outline_colour="&H00FFFFFF",  # white — blends into the box edge
-        back="&H00FFFFFF",        # opaque white box
-        bold=True,
-        border_style=3,           # opaque box
-        outline=6,
-        shadow=0,
-    )
+    fontname: str = _base("fontname")
+    fontsize: int = _base("fontsize")
+    primary: str = _base("primary")           # PrimaryColour (fill)
+    secondary: str = _base("secondary")       # SecondaryColour (karaoke, unused)
+    outline_colour: str = _base("outline_colour")
+    back: str = _base("back")                 # BackColour (box fill when border_style=3)
+    bold: bool = _base("bold")
+    border_style: int = _base("border_style")
+    outline: int = _base("outline")
+    shadow: int = _base("shadow")
 
 
 class ImageRegion(BaseModel):
-    """Rectangle (px, canvas coords) that image cut-ins are scaled/cropped into.
-
-    Defaults to the screenshare pane below the divider (y≈800..1920).
-    """
+    """Rectangle (px, canvas coords) that image cut-ins are scaled/cropped into."""
 
     model_config = ConfigDict(extra="forbid")
 
-    x: int = 0
-    y: int = 800
-    w: int = 1080
-    h: int = 1120
+    x: int = _region("x")
+    y: int = _region("y")
+    w: int = _region("w")
+    h: int = _region("h")
 
 
 class ReelFinishConfig(BaseModel):
-    """All finish-stage tunables, one config, no literals in the render code."""
+    """All finish-stage tunables — schema only; values come from ``finish.json``."""
 
     model_config = ConfigDict(extra="forbid")
 
     # ── Geometry ──────────────────────────────────────────────────────
-    canvas_w: int = 1080
-    canvas_h: int = 1920
-    center_x: int = 540
-    caption_safe_y: int = 1344   # int(0.70·canvas_h) — clears IG/Meta + YT UI
-    divider_y: int = 772         # fallback when compute_divider_y can't detect the bar
+    canvas_w: int = _v("canvas_w")
+    canvas_h: int = _v("canvas_h")
+    center_x: int = _v("center_x")
+    caption_safe_y: int = _v("caption_safe_y")
+    divider_y: int = _v("divider_y")
 
     # ── Caption grouping (B3) ─────────────────────────────────────────
-    caption_max_words: int = 4
-    caption_max_dur_s: float = 1.8
-    caption_gap_s: float = 0.35  # silence gap that forces a new phrase
-    caption_uppercase: bool = True
-    banner_uppercase: bool = True
+    caption_max_words: int = _v("caption_max_words")
+    caption_max_dur_s: float = _v("caption_max_dur_s")
+    caption_gap_s: float = _v("caption_gap_s")
+    caption_uppercase: bool = _v("caption_uppercase")
+    banner_uppercase: bool = _v("banner_uppercase")
 
     # ── Styles (B3/B4) ────────────────────────────────────────────────
-    caption_style: AssStyle = Field(default_factory=_caption_style)
-    banner_style: AssStyle = Field(default_factory=_banner_style)
+    caption_style: AssStyle = _obj(AssStyle, "caption_style")
+    banner_style: AssStyle = _obj(AssStyle, "banner_style")
 
-    # ── Banner two-line box fit (V3, user-chosen) ─────────────────────
-    # The hook is balanced-wrapped to ≤ banner_max_lines lines and the font is
-    # MEASURED against the real resolved font (freetype/PIL) and scaled to fill
-    # a box that hugs the ink on both axes. No char-ratio guessing.
-    # The box is FIXED (full width × banner_box_h). The text fills it: for each
-    # candidate line count (1..banner_max_lines) the largest font that fits both
-    # box width and box height is computed, and the line count giving the biggest
-    # text wins. Maximising font size = maximising fill = the line count whose
-    # text shape matches the box. So a long hook lands on more lines + smaller
-    # font, a short hook on fewer lines + huge font — both fill the same box.
-    banner_font_ref_fs: int = 100            # reference size for measurement
-    banner_max_fs: int = 200                 # sane ceiling only (a 1-word hook)
-    banner_max_lines: int = 3                # most lines to consider
-    banner_box_h: int = 210                  # FIXED box height (the invariant)
-    banner_side_margin_px: int = 40          # legacy (hugging mode only)
-    banner_pad_x: int = 40                   # inner horizontal padding (text↔box)
-    banner_pad_y: int = 22                   # inner vertical padding (text↔box)
-    banner_line_spacing: float = 0.98        # line advance ÷ (ascent+descent)
-    banner_max_block_h: int = 250            # legacy (unused by fixed-box fit)
-    banner_text_outline: int = 0             # text outline px (0 = clean on box)
-    banner_full_width: bool = True           # box spans the full frame width
-    banner_box_margin_x: int = 0             # inset from each frame edge
+    # ── Banner fixed-box fill (V3): the box is fixed (full width × box_h) and
+    #    the text fills it — for each line count 1..max_lines the largest font
+    #    that fits box width AND height is computed, biggest wins. ─────────
+    banner_font_ref_fs: int = _v("banner_font_ref_fs")
+    banner_max_fs: int = _v("banner_max_fs")
+    banner_max_lines: int = _v("banner_max_lines")
+    banner_box_h: int = _v("banner_box_h")
+    banner_side_margin_px: int = _v("banner_side_margin_px")
+    banner_pad_x: int = _v("banner_pad_x")
+    banner_pad_y: int = _v("banner_pad_y")
+    banner_line_spacing: float = _v("banner_line_spacing")
+    banner_max_block_h: int = _v("banner_max_block_h")
+    banner_text_outline: int = _v("banner_text_outline")
+    banner_full_width: bool = _v("banner_full_width")
+    banner_box_margin_x: int = _v("banner_box_margin_x")
 
-    # Legacy single-line char-ratio fit fields (deprecated, unused by the fit
-    # path; kept so older configs/tests don't break on unknown attributes).
-    banner_fit_min_fs: int = 30
-    banner_fit_max_fs: int = 58
-    banner_fit_edge_margin_px: int = 90
-    banner_fit_char_width_ratio: float = 0.52
+    # Legacy single-line char-ratio fit fields (deprecated; kept for back-compat).
+    banner_fit_min_fs: int = _v("banner_fit_min_fs")
+    banner_fit_max_fs: int = _v("banner_fit_max_fs")
+    banner_fit_edge_margin_px: int = _v("banner_fit_edge_margin_px")
+    banner_fit_char_width_ratio: float = _v("banner_fit_char_width_ratio")
 
     # ── Divider detection (finish.py computes divider_y per reel) ──────
-    divider_probe_t_s: float = 3.0           # frame timestamp to sample
-    divider_band_lo_pct: float = 0.28        # search y ∈ [lo·H, hi·H]
-    divider_band_hi_pct: float = 0.58
-    divider_sample_step_px: int = 8          # x-sampling stride per row
-    divider_dark_rows: int = 24              # darkest N rows → band center
-    divider_min_contrast: float = 12.0       # median−dark luminance to trust it
+    divider_probe_t_s: float = _v("divider_probe_t_s")
+    divider_band_lo_pct: float = _v("divider_band_lo_pct")
+    divider_band_hi_pct: float = _v("divider_band_hi_pct")
+    divider_sample_step_px: int = _v("divider_sample_step_px")
+    divider_dark_rows: int = _v("divider_dark_rows")
+    divider_min_contrast: float = _v("divider_min_contrast")
 
     # ── Image cut-ins (B6/B7/B8) ──────────────────────────────────────
-    image_count: int = 3               # 2-3 per reel over the screenshare pane
-    image_region: ImageRegion = Field(default_factory=ImageRegion)
-    image_min_dur_s: float = 2.0
-    image_max_dur_s: float = 3.0
-    image_edge_guard_s: float = 2.0    # no cut-in in first/last N seconds
+    image_count: int = _v("image_count")
+    image_region: ImageRegion = _obj(ImageRegion, "image_region")
+    image_min_dur_s: float = _v("image_min_dur_s")
+    image_max_dur_s: float = _v("image_max_dur_s")
+    image_edge_guard_s: float = _v("image_edge_guard_s")
 
     # ── Whisper / encode (B2, B9) ─────────────────────────────────────
-    whisper_model: str = "base.en"
-    whisper_device: str = "cpu"
-    whisper_compute_type: str = "int8"
-    encode_crf: int = 19
-    encode_preset: str = "fast"
+    whisper_model: str = _v("whisper_model")
+    whisper_device: str = _v("whisper_device")
+    whisper_compute_type: str = _v("whisper_compute_type")
+    encode_crf: int = _v("encode_crf")
+    encode_preset: str = _v("encode_preset")
 
 
 def caption_pos_tag(cfg: ReelFinishConfig) -> str:
@@ -184,4 +158,5 @@ __all__ = [
     "ReelFinishConfig",
     "caption_pos_tag",
     "banner_pos_tag",
+    "load_finish_defaults",
 ]

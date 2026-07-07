@@ -27,79 +27,58 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-# ───── proven defaults (from the delivered enhance_reel.py) ──────────
+from reel_af.render.finish_defaults import load_finish_defaults
 
-DEFAULT_CANVAS_W = 1080
-DEFAULT_CANVAS_H = 1920
-DEFAULT_CENTER_X = 540
-DEFAULT_CAPTION_SAFE_Y = 1344          # int(0.70·canvas_h) — clears IG/Meta + YT UI
-DEFAULT_DIVIDER_Y = 772                # fallback when the divider bar isn't detected
-DEFAULT_MAX_WORDS = 4
-DEFAULT_MAX_DUR_S = 1.8
-DEFAULT_GAP_S = 0.35                   # silence gap that forces a new phrase
+# ───── defaults sourced from config/finish.json (ARCHITECTURE §10) ───
+# No tuning literal lives in this module: the fallbacks used when ``cfg`` is
+# ``None`` or a stub lacks a field come from the one JSON config, 1-hop.
 
-# Banner two-line box-fit defaults (used when cfg lacks the fields / cfg is None).
-DEFAULT_BANNER_REF_FS = 100
-DEFAULT_BANNER_MAX_FS = 200
-DEFAULT_BANNER_MAX_LINES = 3
-DEFAULT_BANNER_BOX_H = 210
-DEFAULT_BANNER_SIDE_MARGIN = 40
-DEFAULT_BANNER_PAD_X = 40
-DEFAULT_BANNER_PAD_Y = 22
-DEFAULT_BANNER_LINE_SPACING = 0.98
-DEFAULT_BANNER_MAX_BLOCK_H = 250
-DEFAULT_BANNER_TEXT_OUTLINE = 0
-DEFAULT_BANNER_FULL_WIDTH = True
-DEFAULT_BANNER_BOX_MARGIN_X = 0
+_D = load_finish_defaults()
 
-# Legacy char-ratio fit defaults (fallback ONLY when the real font can't be
-# measured — e.g. Pillow or the font file is missing in a bare unit env).
-DEFAULT_BANNER_FIT_MAX_FS = 110
-DEFAULT_BANNER_FIT_CHAR_RATIO = 0.52
+DEFAULT_CANVAS_W = _D["canvas_w"]
+DEFAULT_CANVAS_H = _D["canvas_h"]
+DEFAULT_CENTER_X = _D["center_x"]
+DEFAULT_CAPTION_SAFE_Y = _D["caption_safe_y"]
+DEFAULT_DIVIDER_Y = _D["divider_y"]
+DEFAULT_MAX_WORDS = _D["caption_max_words"]
+DEFAULT_MAX_DUR_S = _D["caption_max_dur_s"]
+DEFAULT_GAP_S = _D["caption_gap_s"]
 
-# Divider-detection defaults.
-DEFAULT_DIVIDER_PROBE_T_S = 3.0
-DEFAULT_DIVIDER_BAND_LO_PCT = 0.28
-DEFAULT_DIVIDER_BAND_HI_PCT = 0.58
-DEFAULT_DIVIDER_SAMPLE_STEP_PX = 8
-DEFAULT_DIVIDER_DARK_ROWS = 24
-DEFAULT_DIVIDER_MIN_CONTRAST = 12.0
+DEFAULT_BANNER_REF_FS = _D["banner_font_ref_fs"]
+DEFAULT_BANNER_MAX_FS = _D["banner_max_fs"]
+DEFAULT_BANNER_MAX_LINES = _D["banner_max_lines"]
+DEFAULT_BANNER_BOX_H = _D["banner_box_h"]
+DEFAULT_BANNER_SIDE_MARGIN = _D["banner_side_margin_px"]
+DEFAULT_BANNER_PAD_X = _D["banner_pad_x"]
+DEFAULT_BANNER_PAD_Y = _D["banner_pad_y"]
+DEFAULT_BANNER_LINE_SPACING = _D["banner_line_spacing"]
+DEFAULT_BANNER_MAX_BLOCK_H = _D["banner_max_block_h"]
+DEFAULT_BANNER_TEXT_OUTLINE = _D["banner_text_outline"]
+DEFAULT_BANNER_FULL_WIDTH = _D["banner_full_width"]
+DEFAULT_BANNER_BOX_MARGIN_X = _D["banner_box_margin_x"]
 
+# Legacy char-ratio fallback (only when the real font can't be measured).
+DEFAULT_BANNER_FIT_MAX_FS = _D["banner_fit_max_fs"]
+DEFAULT_BANNER_FIT_CHAR_RATIO = _D["banner_fit_char_width_ratio"]
+
+DEFAULT_DIVIDER_PROBE_T_S = _D["divider_probe_t_s"]
+DEFAULT_DIVIDER_BAND_LO_PCT = _D["divider_band_lo_pct"]
+DEFAULT_DIVIDER_BAND_HI_PCT = _D["divider_band_hi_pct"]
+DEFAULT_DIVIDER_SAMPLE_STEP_PX = _D["divider_sample_step_px"]
+DEFAULT_DIVIDER_DARK_ROWS = _D["divider_dark_rows"]
+DEFAULT_DIVIDER_MIN_CONTRAST = _D["divider_min_contrast"]
+
+# ASS style names are loader identifiers (schema, not tunable) — see §10 ex. 2.
 CAPTION_STYLE_NAME = "Cap"
 BANNER_STYLE_NAME = "Banner"
 BANNER_BOX_STYLE_NAME = "BannerBox"
 
-WHISPER_MODEL = "base.en"
+WHISPER_MODEL = _D["whisper_model"]
 
-# Style field defaults — one dict per named ASS style. A ``cfg.<x>_style``
-# object overrides any of these via getattr; missing attrs fall through.
-# High-contrast defaults, validated visually as the reel finish default.
-_CAPTION_STYLE_DEFAULTS: dict[str, Any] = {
-    "fontname": "Arial",
-    "fontsize": 62,
-    "primary": "&H00FFFFFF",           # white fill
-    "secondary": "&H000000FF",
-    "outline_color": "&H00000000",
-    "back": "&HB0000000",              # semi-opaque dark box (alpha B0)
-    "bold": 1,
-    "border_style": 3,                 # opaque box behind text
-    "outline": 4,
-    "shadow": 0,
-    "alignment": 5,                    # middle-center anchor (pos overrides)
-}
-_BANNER_STYLE_DEFAULTS: dict[str, Any] = {
-    "fontname": "Arial",
-    "fontsize": 58,
-    "primary": "&H00CE227E",           # purple #7E22CE
-    "secondary": "&H000000FF",
-    "outline_color": "&H00FFFFFF",     # white — blends into the box edge
-    "back": "&H00FFFFFF",              # opaque white box
-    "bold": 1,
-    "border_style": 3,                 # opaque box behind text
-    "outline": 6,
-    "shadow": 0,
-    "alignment": 5,
-}
+# Per-style fallback dictionaries (values from JSON; used when a cfg style is
+# absent). ``cfg.<x>_style`` overrides any field via getattr.
+_CAPTION_STYLE_DEFAULTS: dict[str, Any] = _D["caption_ass_defaults"]
+_BANNER_STYLE_DEFAULTS: dict[str, Any] = _D["banner_ass_defaults"]
 
 
 # ───── config access (duck-typed) ───────────────────────────────────
