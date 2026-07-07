@@ -97,17 +97,20 @@ class ReelFinishConfig(BaseModel):
     caption_style: AssStyle = _obj(AssStyle, "caption_style")
     banner_style: AssStyle = _obj(AssStyle, "banner_style")
 
-    # ── Banner fixed-box fill (V3): the box is fixed (full width × box_h) and
-    #    the text fills it — for each line count 1..max_lines the largest font
-    #    that fits box width AND height is computed, biggest wins. ─────────
+    # ── Banner box (V3): full-width box that HUGS the text with banner_pad_*
+    #    padding on every side (default 20px). The font fills the width; the line
+    #    count is chosen to maximise the font while the box stays ≤ box_max_h;
+    #    the box height then follows the text so padding is exactly banner_pad_y.
     banner_font_ref_fs: int = _v("banner_font_ref_fs")
     banner_max_fs: int = _v("banner_max_fs")
     banner_max_lines: int = _v("banner_max_lines")
-    banner_box_h: int = _v("banner_box_h")
+    banner_box_max_h: int = _v("banner_box_max_h")
     banner_side_margin_px: int = _v("banner_side_margin_px")
     banner_pad_x: int = _v("banner_pad_x")
     banner_pad_y: int = _v("banner_pad_y")
     banner_line_spacing: float = _v("banner_line_spacing")
+    banner_render_width_ratio: float = _v("banner_render_width_ratio")
+    banner_render_height_ratio: float = _v("banner_render_height_ratio")
     banner_max_block_h: int = _v("banner_max_block_h")
     banner_text_outline: int = _v("banner_text_outline")
     banner_full_width: bool = _v("banner_full_width")

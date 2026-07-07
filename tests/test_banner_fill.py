@@ -69,7 +69,7 @@ def _extents(png: Path):
             r, g, b = px[x, y]
             if r > 235 and g > 235 and b > 235:
                 box = _grow(box, x, y)
-            elif r > 70 and b > 70 and g < 110 and r > g + 25 and b > g + 15:
+            elif r > 40 and b > 40 and r > g and b > g and (r > g + 15 or b > g + 15):
                 ink = _grow(ink, x, y)
     return box, ink
 
@@ -117,18 +117,29 @@ def test_text_fills_box_and_is_centred(hook):
 
 
 @requires_render
-def test_box_is_fixed_and_identical_across_hooks():
-    """THE consistency invariant: the box is the same fixed size for every hook,
-    regardless of length — so the banners never look cheap/variable."""
+def test_box_is_full_width_for_every_hook():
+    """The box spans the full frame width for every hook (no footage bleed)."""
     cfg = ReelFinishConfig(divider_y=785)
-    dims = []
     for hook in HOOKS:
         box, _ = _extents(_render_banner(hook, cfg))
-        dims.append((box[2] - box[0], box[3] - box[1]))
-    # all boxes equal (within AA slack)
-    w0, h0 = dims[0]
-    for w, h in dims[1:]:
-        assert abs(w - w0) <= 4 and abs(h - h0) <= 4, f"box varies across hooks: {dims}"
-    # and equal to the configured full-width × banner_box_h band
-    assert abs(w0 - cfg.canvas_w) <= 6
-    assert abs(h0 - cfg.banner_box_h) <= 6
+        assert abs((box[2] - box[0]) - cfg.canvas_w) <= 6, f"{hook!r}: box not full width"
+
+
+@requires_render
+@pytest.mark.parametrize("hook", HOOKS)
+def test_text_fills_box_to_target_padding(hook):
+    """THE invariant: the text fills the box down to ~banner_pad on every side.
+
+    The box height hugs the text, so padding is the configured pad (±slack for
+    antialiasing / the pixel detector), not a big floating gap.
+    """
+    cfg = ReelFinishConfig(divider_y=785)
+    box, ink = _extents(_render_banner(hook, cfg))
+    assert box is not None and ink is not None
+    pad_t = ink[1] - box[1]
+    pad_b = box[3] - ink[3]
+    pad_l = ink[0] - box[0]
+    pad_r = box[2] - ink[2]
+    lo, hi = cfg.banner_pad_y - 12, cfg.banner_pad_y + 18
+    for name, p in [("top", pad_t), ("bottom", pad_b), ("left", pad_l), ("right", pad_r)]:
+        assert lo <= p <= hi, f"{hook!r}: {name} padding {p}px not ≈{cfg.banner_pad_y}px"
