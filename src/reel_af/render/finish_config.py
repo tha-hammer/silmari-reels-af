@@ -127,6 +127,12 @@ class ReelFinishConfig(BaseModel):
     banner_duration_s: float = _v("banner_duration_s")
     banner_fade_in_ms: int = _v("banner_fade_in_ms")
     banner_fade_out_ms: int = _v("banner_fade_out_ms")
+    # Optional Remotion animated lower-third title (see render/lower_third.py +
+    # the remotion/ project) — an alternative to the ASS banner.
+    lower_third_enabled: bool = _v("lower_third_enabled")
+    lower_third_accent: str = _v("lower_third_accent")
+    lower_third_duration_s: float = _v("lower_third_duration_s")
+    lower_third_project_dir: str = _v("lower_third_project_dir")
 
     # Legacy single-line char-ratio fit fields (deprecated; kept for back-compat).
     banner_fit_min_fs: int = _v("banner_fit_min_fs")

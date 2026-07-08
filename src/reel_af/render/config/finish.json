@@ -32,6 +32,10 @@
   "banner_duration_s": 0.0,
   "banner_fade_in_ms": 300,
   "banner_fade_out_ms": 500,
+  "lower_third_enabled": false,
+  "lower_third_accent": "#7E22CE",
+  "lower_third_duration_s": 6.0,
+  "lower_third_project_dir": "",
 
   "banner_fit_min_fs": 30,
   "banner_fit_max_fs": 58,
