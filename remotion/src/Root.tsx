@@ -28,6 +28,7 @@ export const RemotionRoot: React.FC = () => {
           ] as Segment[],
           accent: "#7E22CE",
           totalFrames: 0,
+          verticalAnchor: 0.5,
         }}
         calculateMetadata={({ props }) => {
           const segs = (props.segments ?? []) as Segment[];

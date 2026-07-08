@@ -7,9 +7,11 @@
     "overlay": "middle_third",
     "remotion_composition": "MiddleThird",
     "overlay_accent": "#7E22CE",
+    "overlay_vertical_anchor": 0.32,
     "phrase_max_words": 6,
     "phrase_max_dur_s": 3.2,
     "phrase_gap_s": 0.4,
+    "phrase_hold_s": 0.6,
     "phrase_uppercase": false,
     "captions_burned_source": false
   },
