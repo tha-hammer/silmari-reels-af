@@ -28,7 +28,6 @@ _DEFAULT_PROJECT_DIR = Path(__file__).resolve().parents[3] / "remotion"
 _COMPOSITION_ID = "LowerThird"
 _ENTRY = "src/index.ts"
 _FRAME_GLOB = "element-*.png"
-_FRAME_PATTERN = "element-%03d.png"
 
 
 def _cfg(cfg: Any, name: str, default: Any) -> Any:
@@ -73,8 +72,11 @@ def render_lower_third(
 
 
 def input_args(seq_dir: Path, fps: int = 30) -> list[str]:
-    """ffmpeg input args for the lower-third PNG sequence (place before its use)."""
-    return ["-framerate", str(fps), "-i", str(Path(seq_dir) / _FRAME_PATTERN)]
+    """ffmpeg input args for a Remotion PNG sequence (glob — Remotion pads the
+    frame index to the digit-width of the total frame count, so a fixed %0Nd
+    pattern is fragile; glob sorts correctly for any width)."""
+    return ["-framerate", str(fps), "-pattern_type", "glob",
+            "-i", str(Path(seq_dir) / _FRAME_GLOB)]
 
 
 def overlay_filter(in_label: str, out_label: str, lt_input_index: int, cfg: Any = None) -> str:
