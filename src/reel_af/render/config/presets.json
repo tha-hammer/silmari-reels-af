@@ -1,0 +1,32 @@
+{
+  "middle-third-dynamic": {
+    "description": "Vertical 2-minute reels with a script-synced Remotion middle-third text overlay that animates in and out per phrase.",
+    "canvas_w": 1080,
+    "canvas_h": 1920,
+    "reel_seconds": 120,
+    "overlay": "middle_third",
+    "remotion_composition": "MiddleThird",
+    "overlay_accent": "#7E22CE",
+    "overlay_vertical_anchor": 0.32,
+    "phrase_max_words": 6,
+    "phrase_max_dur_s": 3.2,
+    "phrase_gap_s": 0.4,
+    "phrase_hold_s": 0.6,
+    "phrase_uppercase": false,
+    "captions_burned_source": false
+  },
+  "horizontal-youtube-lowerthird": {
+    "description": "Horizontal 16:9 YouTube reels: Remotion lower-third title (fades after 6s), Ken Burns zoom, full-frame image cut-ins every ~30s, safe-zone captions.",
+    "canvas_w": 1920,
+    "canvas_h": 1080,
+    "reel_seconds": 180,
+    "overlay": "lower_third",
+    "remotion_composition": "LowerThird",
+    "overlay_accent": "#7E22CE",
+    "lower_third_duration_s": 6.0,
+    "image_placement": "full",
+    "image_count": 6,
+    "image_every_s": 30,
+    "zoom": true
+  }
+}

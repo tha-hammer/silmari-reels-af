@@ -39,6 +39,9 @@ class StubStyle:
     fontname: str = "Arial"
     fontsize: int = 58
     primary: str = "&H00FFFFFF"
+    back: str = "&H00FFFFFF"
+    outline_color: str = "&H00FFFFFF"
+    bold: bool = True
 
 
 @dataclass
@@ -55,7 +58,17 @@ class StubFinishConfig:
     banner_uppercase: bool = True
     caption_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=62, primary="&H00FFFFFF"))
     banner_style: StubStyle = field(default_factory=lambda: StubStyle(fontsize=58, primary="&H00CE227E"))
-    # Banner font-fit (TASK 2)
+    # Banner two-line box-fit (V3)
+    banner_font_ref_fs: int = 100
+    banner_max_fs: int = 110
+    banner_max_lines: int = 2
+    banner_side_margin_px: int = 40
+    banner_pad_x: int = 34
+    banner_pad_y: int = 16
+    banner_line_spacing: float = 0.94
+    banner_max_block_h: int = 250
+    banner_text_outline: int = 0
+    # Legacy char-ratio fit fields (deprecated, kept for back-compat)
     banner_fit_min_fs: int = 30
     banner_fit_max_fs: int = 58
     banner_fit_edge_margin_px: int = 90

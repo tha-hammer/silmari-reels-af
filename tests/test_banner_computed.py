@@ -98,37 +98,64 @@ def test_compute_divider_y_real_ffmpeg_frame(tmp_path):
     assert 745 <= dy <= 805, f"expected divider near the black bar, got {dy}"
 
 
-# ───── banner font-fit ───────────────────────────────────────────────
+# ───── banner font-fit (MEASURED, two-line) ──────────────────────────
 
 
 def test_long_hook_gets_smaller_fontsize_than_short_hook():
     cfg = StubFinishConfig()
     short = captions.compute_banner_fontsize("HI", cfg)
-    long = captions.compute_banner_fontsize("A" * 60, cfg)
+    long = captions.compute_banner_fontsize("SUPERCALIFRAGILISTIC EXPIALIDOCIOUS ANTIDISESTABLISHMENT", cfg)
     assert long < short
 
 
 def test_fontsize_capped_at_max_for_short_hooks():
-    cfg = StubFinishConfig(banner_fit_max_fs=58)
-    assert captions.compute_banner_fontsize("HI", cfg) == 58
+    cfg = StubFinishConfig(banner_max_fs=90)
+    assert captions.compute_banner_fontsize("HI", cfg) == 90
 
 
-def test_fontsize_floored_at_min_for_very_long_hooks():
-    cfg = StubFinishConfig(banner_fit_min_fs=30)
-    assert captions.compute_banner_fontsize("A" * 200, cfg) == 30
+def test_fontsize_shrinks_for_a_very_long_single_word():
+    # One un-splittable word can't be balanced-wrapped, so it must shrink to fit.
+    cfg = StubFinishConfig()
+    fs = captions.compute_banner_fontsize("A" * 60, cfg)
+    assert 8 <= fs < captions.compute_banner_fontsize("HI", cfg)
+
+
+def test_fit_is_measured_not_char_ratio():
+    """Two strings of equal length but different real widths fit differently."""
+    cfg = StubFinishConfig(banner_max_fs=200, banner_max_lines=1)
+    wide = captions.compute_banner_fontsize("W" * 20, cfg)   # W is a wide glyph
+    narrow = captions.compute_banner_fontsize("i" * 20, cfg)  # i is a narrow glyph
+    assert narrow > wide  # a char-count·ratio guess would make these equal
+
+
+def test_wrap_into_splits_to_minimise_widest_line():
+    # The balanced splitter puts an equal number of words on each line.
+    lines = captions._wrap_into("ALPHA BETA GAMMA DELTA".split(), 2, None, 100)
+    assert lines == ["ALPHA BETA", "GAMMA DELTA"]
+
+
+def test_long_hook_wraps_for_readability():
+    # A long hook that would be tiny on one line wraps to more lines.
+    cfg = StubFinishConfig()
+    short_lines = captions.balanced_wrap("AI IS STUPID.", cfg)
+    long_lines = captions.balanced_wrap(
+        "THE SINGLE BIGGEST MISTAKE EVERYONE MAKES WITH AI TODAY", cfg
+    )
+    assert len(short_lines) < len(long_lines)
 
 
 def test_banner_event_embeds_computed_fs_override():
     cfg = StubFinishConfig()
     hook = "stop telling ai what to do and start"
     ass = captions.build_banner_ass(hook, 10.0, cfg)
-    banner_line = next(ln for ln in ass.splitlines() if ln.startswith("Dialogue:") and ",Banner," in ln)
-    m = _FS_RE.search(banner_line)
-    assert m, "banner dialogue must carry a computed \\fs override"
+    text_line = next(
+        ln for ln in ass.splitlines()
+        if ln.startswith("Dialogue:") and ",Banner," in ln and ",BannerBox," not in ln
+    )
+    m = _FS_RE.search(text_line)
+    assert m, "banner text dialogue must carry a computed \\fs override"
     expected = captions.compute_banner_fontsize(hook.upper(), cfg)
     assert int(m.group(1)) == expected
-    # \pos still present and parseable alongside \fs
-    assert parse_dialogues(ass)[0].y == cfg.divider_y
 
 
 # ───── styles against the REAL config ────────────────────────────────
@@ -139,17 +166,19 @@ def _style_fields(ass_text, style_name):
     return line.split(",")
 
 
-def test_banner_style_is_purple_on_white_box():
+def test_banner_is_purple_text_on_white_box():
     from reel_af.render.finish_config import ReelFinishConfig
 
     cfg = ReelFinishConfig()
     ass = captions.build_banner_ass("hook", 5.0, cfg)
-    f = _style_fields(ass, captions.BANNER_STYLE_NAME)
+    # The white box is its own BannerBox drawing; the text is clean purple on it.
+    box = _style_fields(ass, captions.BANNER_BOX_STYLE_NAME)
+    text = _style_fields(ass, captions.BANNER_STYLE_NAME)
     # fields (Name at [0]): Primary[3], Back[6], BorderStyle[15], Outline[16]
-    assert f[3] == "&H00CE227E"   # purple #7E22CE
-    assert f[6] == "&H00FFFFFF"   # opaque white box
-    assert f[15].strip() == "3"   # BorderStyle = opaque box
-    assert int(f[16]) >= 6        # thick outline
+    assert box[3] == "&H00FFFFFF"    # box fill = opaque white
+    assert text[3] == "&H00CE227E"   # purple #7E22CE text
+    assert text[15].strip() == "1"   # text has no opaque box of its own
+    assert int(text[16]) == 0        # clean text, no outline over the box
 
 
 def test_caption_style_is_white_on_dark_box_at_70pct():

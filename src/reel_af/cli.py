@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -356,6 +357,134 @@ def composite(
         )
     )
     console.print(f"[green]done:[/green] {final}")
+
+
+def _ffprobe_duration(source: Path) -> float:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(source)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return float(out)
+
+
+def _resolve_source(source: str, work: Path) -> Path:
+    """A local path is used as-is; a URL is downloaded to ``work/source.mp4``."""
+    if source.startswith(("http://", "https://")):
+        from reel_af.render.hooks import download_crisp_source
+
+        dest = work / "source.mp4"
+        console.print(f"  [dim]downloading {source} → {dest}[/dim]")
+        return download_crisp_source(source, dest)
+    path = Path(source).expanduser()
+    if not path.exists():
+        raise SystemExit(f"source not found: {path}")
+    return path
+
+
+def _resolve_words(source: Path, whisper_json: Path | None, work: Path) -> list:
+    """Word timestamps for the source: a cached whisper JSON if given, else run
+    the repo's whisper helper once (its result stays consumable as tuples)."""
+    from reel_af.render.middle_third import load_whisper_words
+
+    if whisper_json is not None:
+        console.print(f"  [dim]using cached transcript {whisper_json}[/dim]")
+        return load_whisper_words(whisper_json)
+    from reel_af.render.captions import caption_words
+
+    console.print("  [dim]transcribing source (whisper)…[/dim]")
+    return caption_words(source, workdir=work)
+
+
+@app.command("reels")
+def reels(
+    source: Annotated[str, typer.Argument(help="Source video: a local file path or a URL.")],
+    preset: Annotated[
+        str,
+        typer.Option("--preset", help="Named reel-format preset (see config/presets.json)."),
+    ],
+    out_dir: Annotated[
+        Optional[Path],
+        typer.Option("--out", help="Output directory for the reels.", show_default=False),
+    ] = None,
+    only: Annotated[
+        Optional[str],
+        typer.Option("--only", help="Comma-separated 1-based reel indices (default: all)."),
+    ] = None,
+    whisper_json: Annotated[
+        Optional[Path],
+        typer.Option("--whisper", help="Cached whisper word-timestamp JSON (skips transcription)."),
+    ] = None,
+    chrome: Annotated[
+        str,
+        typer.Option("--chrome", help="Chromium/Chrome executable for Remotion."),
+    ] = "/usr/bin/chromium",
+) -> None:
+    """Cut a source into preset-formatted reels with a Remotion overlay.
+
+    Currently supports presets whose ``overlay`` is ``middle_third`` (the
+    ``middle-third-dynamic`` format): each reel is a window of the source with a
+    script-synced ``MiddleThird`` overlay composited on top.
+    """
+    import shutil
+
+    from reel_af.render import middle_third
+    from reel_af.render.presets import load_preset, preset_names
+
+    try:
+        cfg = load_preset(preset)
+    except KeyError:
+        raise SystemExit(f"unknown preset {preset!r}; available: {preset_names()}")
+
+    overlay = cfg.get("overlay")
+    if overlay != "middle_third":
+        raise SystemExit(
+            f"preset {preset!r} uses overlay={overlay!r}; `reels` currently supports "
+            "overlay='middle_third'. Use `composite` for other formats."
+        )
+
+    fps = int(cfg.get("fps", 30))
+    reel_s = float(cfg["reel_seconds"])
+    work = out_dir or (_PROJECT_ROOT / "out" / "reels" / preset)
+    work.mkdir(parents=True, exist_ok=True)
+
+    console.rule(f"[bold]reels · {preset}")
+    src = _resolve_source(source, work)
+    words = _resolve_words(src, whisper_json, work)
+    total = _ffprobe_duration(src)
+    n = int(total // reel_s)
+    tail = total - n * reel_s
+    console.print(f"  source={total:.0f}s → {n} × {reel_s:.0f}s reels; words={len(words)}")
+    if tail >= 1:
+        console.print(f"  [dim](final {tail:.0f}s < one reel — not cut)[/dim]")
+    if n < 1:
+        raise SystemExit(
+            f"source is {total:.0f}s — shorter than one {reel_s:.0f}s reel; nothing to cut."
+        )
+
+    if only:
+        try:
+            picks = [int(x) for x in only.split(",")]
+        except ValueError:
+            raise SystemExit(f"--only must be comma-separated integers, got {only!r}")
+        out_of_range = [i for i in picks if i < 1 or i > n]
+        if out_of_range:
+            raise SystemExit(f"--only index out of range (valid: 1..{n}): {out_of_range}")
+    else:
+        picks = list(range(1, n + 1))
+    for idx in picks:
+        t0 = (idx - 1) * reel_s
+        d = work / f"reel{idx:02d}"
+        seq = d / "seq"
+        segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
+        total_frames = int(reel_s * fps)
+        console.print(f"  [dim]reel{idx:02d} [{t0:.0f}-{t0 + reel_s:.0f}s] segs={len(segs)}[/dim]")
+        middle_third.render_overlay(segs, total_frames, seq, cfg, chrome=chrome)
+        final = middle_third.composite_window(src, t0, reel_s, seq, d / f"reel{idx:02d}.mp4", fps=fps)
+        shutil.rmtree(seq, ignore_errors=True)
+        console.print(f"  [green]→ {final}[/green]")
+
+    console.print(f"[green]done:[/green] {work}")
 
 
 @app.command("serve")
