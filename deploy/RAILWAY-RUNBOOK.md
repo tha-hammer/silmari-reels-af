@@ -9,6 +9,19 @@ end-to-end deploy — the **Gotchas** section is the part that saves hours.
 
 ---
 
+## Status (2026-07-10)
+
+✅ **Live and working end-to-end.** UI at https://reel-af-ui-production.up.railway.app; the
+`reel-af` agent is registered (`discovery` shows it), and clicking **ROLL** submits a job that
+the reasoner executes on the server. The registration-401 and the ROLL-403/CORS issues are
+fixed (Gotchas #6 and #8).
+
+⏳ **Active follow-up:** hardening video ingest — the YouTube path needs deno + cookies and the
+generic format selector fails on non-YouTube hosts (Vimeo etc.). See `deploy/RAILWAY-RUNBOOK.md`
+§7 and the ingest TDD plan under `thoughts/searchable/shared/plans/`.
+
+---
+
 ## 1. What gets deployed
 
 Two services, added to the **existing** `silmari-deep-research` Railway project (which already
