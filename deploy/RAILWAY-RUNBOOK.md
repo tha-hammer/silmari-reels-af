@@ -190,10 +190,28 @@ curl -s -X POST https://reel-af-ui-production.up.railway.app/api/v1/execute/asyn
 
 ## 7. Known limitations / follow-ups
 
-- **YouTube ingest fails on the headless server.** yt-dlp needs **deno** (JS runtime — *"No
-  supported JavaScript runtime"*) **and cookies** (*"Sign in to confirm you're not a bot"*). Add
-  deno + `--js-runtimes deno` + a mounted cookies file to `download_crisp_source`
-  (`render/hooks.py`). Non-gated video URLs work today. (bead `A1_workspace-blueprint-gm9`)
+### YouTube ingest setup (deno + cookies)
+
+YouTube ingest is host-aware in `download_crisp_source` (`render/hooks.py`): YouTube URLs use the
+crisp itag ladder plus `--js-runtimes deno`; Vimeo/generic URLs use a portable `height<=1080`
+ladder with no JS runtime. Deno is now baked into the image (pinned `DENO_VERSION` in the
+`Dockerfile`). Cookies are supplied at runtime, not at build time. (bead `A1_workspace-blueprint-gm9`)
+
+- **Cookie file format:** a `yt-dlp`/browser-exported **Netscape `cookies.txt`** file (first line
+  `# Netscape HTTP Cookie File`). Export a fresh, logged-in YouTube session.
+- **Railway mount path:** mount the export at `/app/secrets/cookies.txt`.
+- **Runtime variable:** set `YTDLP_COOKIES_FILE=/app/secrets/cookies.txt`.
+- **Validation inside the container:** `test -f "$YTDLP_COOKIES_FILE" && deno --version`.
+- **Unset / empty env:** no `--cookies` flag is passed; non-gated URLs (e.g. Vimeo) still download.
+- **Missing configured file:** the app result contains an error naming `YTDLP_COOKIES_FILE`
+  (raised before yt-dlp is invoked).
+- **Expired / invalid cookies:** the yt-dlp failure surfaces the stderr tail plus a hint to set
+  `YTDLP_COOKIES_FILE` to a valid Netscape-format export.
+- **Missing JS runtime:** if Deno is absent, the yt-dlp failure surfaces the stderr tail plus a hint
+  to install deno in the image and keep `--js-runtimes deno` enabled.
+
+All ingest failures now come back through the app reasoner as `{"error": "<hinted message>"}`, so
+the UI shows the actionable hint instead of an opaque execution failure.
 - **Rendered-file retrieval.** A finished reel lands on the agent container's filesystem; the
   browser can't download it without object storage or a file-serving route. Not yet wired.
 - **Drop-file upload.** The UI's file-drop needs a multipart upload route on the Go control plane;

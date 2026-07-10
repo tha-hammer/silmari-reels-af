@@ -7,11 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CHROMIUM_PATH=/usr/bin/chromium \
     REMOTION_CHROME_EXECUTABLE=/usr/bin/chromium
 
+# deno → yt-dlp JS runtime for the YouTube ingest path (--js-runtimes deno).
+# Pinned via build arg; installed into DENO_INSTALL/bin (on PATH via /usr/local/bin).
+ARG DENO_VERSION=2.4.0
+ENV DENO_INSTALL=/usr/local
+
 # System deps for the full render path:
 #   ffmpeg + fonts → banner/caption burn + composite
 #   chromium       → Remotion overlay rendering (passed via --browser-executable)
 #   nodejs (+npm)  → Remotion CLI (overlay PNG-sequence render)
 #   curl/gnupg/ca-certificates → NodeSource setup, healthcheck, TLS
+#   unzip          → prerequisite for the Deno installer archive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-montserrat \
@@ -20,8 +26,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl \
         gnupg \
         ca-certificates \
+        unzip \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
+    && curl -fsSL https://deno.land/install.sh | sh -s -- v${DENO_VERSION} \
+    && deno --version \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

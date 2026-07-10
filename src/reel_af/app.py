@@ -632,7 +632,10 @@ def _run_composite_reels(
 
     fps = int(cfg.get("fps", 30))
     reel_s = float(cfg["reel_seconds"])
-    src = download_crisp_source(url, out_path / "source.mp4")
+    try:
+        src = download_crisp_source(url, out_path / "source.mp4")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
     words = caption_words(src, workdir=out_path)
     dur = float(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
