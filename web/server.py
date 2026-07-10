@@ -17,6 +17,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 CONTROL_PLANE = os.getenv(
     "AGENTFIELD_SERVER", "http://control-plane.railway.internal:8080"
 ).rstrip("/")
+# The control plane gates /api/* behind an API key; inject it server-side so the
+# key never reaches the browser (referenced from the control-plane service var).
+API_KEY = os.getenv("AGENTFIELD_API_KEY", "")
 PROXY_TIMEOUT_S = float(os.getenv("PROXY_TIMEOUT_S", "120"))
 _HOP_BY_HOP = {"content-encoding", "content-length", "transfer-encoding", "connection"}
 
@@ -39,12 +42,15 @@ def health() -> dict:
 )
 def proxy(subpath: str) -> Response:
     """Pass every /api/* call straight through to the control plane."""
+    headers = {k: v for k, v in request.headers if k.lower() != "host"}
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
     upstream = requests.request(
         method=request.method,
         url=f"{CONTROL_PLANE}/api/{subpath}",
         params=request.args,
         data=request.get_data(),
-        headers={k: v for k, v in request.headers if k.lower() != "host"},
+        headers=headers,
         timeout=PROXY_TIMEOUT_S,
     )
     headers = [

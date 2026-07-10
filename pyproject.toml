@@ -11,7 +11,10 @@ authors = [{ name = "AgentField Contributors" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "agentfield",
+    # Pinned to the control-plane-compatible SDK (the deployed control-plane +
+    # sibling agents run 0.1.96; the fast-lifecycle registration handshake changed
+    # in later releases → 401 on register). Bump only in lockstep with the plane.
+    "agentfield==0.1.96",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "aiohttp>=3.9",

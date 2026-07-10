@@ -1,0 +1,11 @@
+# Keep the Railway build context lean — the Dockerfile rebuilds these.
+.git/
+.venv/
+**/node_modules/
+output/
+out/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/

@@ -2,8 +2,8 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    UV_LINK_MODE=copy \
     PYTHONPATH=/app/src \
+    PIP_NO_CACHE_DIR=1 \
     CHROMIUM_PATH=/usr/bin/chromium \
     REMOTION_CHROME_EXECUTABLE=/usr/bin/chromium
 
@@ -24,29 +24,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get install -y --no-install-recommends nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install uv from the official distroless image.
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
-
 WORKDIR /app
 
-# Resolve Python deps first so source-only changes don't bust the cache.
+# Python deps first so source-only changes don't reinstall everything.
 COPY pyproject.toml README.md ./
 COPY src/ /app/src/
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system --no-cache .
+RUN pip install --upgrade pip && pip install .
 
-# Install the Remotion project's node deps (overlay renderer) from the lockfile,
-# in its own layer so Python/source changes don't reinstall node_modules.
+# Remotion project's node deps (overlay renderer) from the lockfile, in its own
+# layer so Python/source changes don't reinstall node_modules.
 COPY remotion/package.json remotion/package-lock.json /app/remotion/
 RUN cd /app/remotion && npm ci --no-audit --no-fund
 
-# Copy the rest of the project (entry shim, remotion sources, web, scripts).
-# node_modules/output are excluded via .dockerignore so the layer above stands.
+# Copy the rest (entry shim, remotion sources, web, scripts).
 COPY . /app/
 
 EXPOSE 8002
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=25s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8002}/health || exit 1
 
 CMD ["python", "main.py"]
