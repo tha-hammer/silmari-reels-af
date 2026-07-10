@@ -62,6 +62,10 @@ import reel_af.sdk_patches  # noqa: E402, F401
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
     agentfield_server=os.getenv("AGENTFIELD_SERVER", "http://localhost:8080"),
+    # Control-plane API key (distinct from the LLM key in ai_config below). The
+    # SDK only sends the X-API-Key registration header when this is set; without
+    # it, an auth-enabled control plane rejects registration with HTTP 401.
+    api_key=os.getenv("AGENTFIELD_API_KEY"),
     version="1.0.0",
     description="URL or topic → vertical viral reel via a multi-reasoner DAG.",
     ai_config=AIConfig(

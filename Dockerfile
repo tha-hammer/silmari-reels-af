@@ -29,7 +29,9 @@ WORKDIR /app
 # Python deps first so source-only changes don't reinstall everything.
 COPY pyproject.toml README.md ./
 COPY src/ /app/src/
-RUN pip install --upgrade pip && pip install .
+# yt-dlp  → download_crisp_source (video ingest)
+# uv/uvx  → caption_words runs `uvx whisper-ctranslate2` for word timestamps
+RUN pip install --upgrade pip && pip install . && pip install yt-dlp uv
 
 # Remotion project's node deps (overlay renderer) from the lockfile, in its own
 # layer so Python/source changes don't reinstall node_modules.
