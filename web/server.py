@@ -22,6 +22,10 @@ CONTROL_PLANE = os.getenv(
 API_KEY = os.getenv("AGENTFIELD_API_KEY", "")
 PROXY_TIMEOUT_S = float(os.getenv("PROXY_TIMEOUT_S", "120"))
 _HOP_BY_HOP = {"content-encoding", "content-length", "transfer-encoding", "connection"}
+# Drop from FORWARDED requests: Host (proxy target differs) + Origin/Referer —
+# the proxy is a server-to-server client, and forwarding the browser Origin trips
+# the control plane's CORS allowlist → 403 "rejected".
+_STRIP_REQUEST = {"host", "origin", "referer"}
 
 app = Flask(__name__, static_folder=None)
 
@@ -42,7 +46,7 @@ def health() -> dict:
 )
 def proxy(subpath: str) -> Response:
     """Pass every /api/* call straight through to the control plane."""
-    headers = {k: v for k, v in request.headers if k.lower() != "host"}
+    headers = {k: v for k, v in request.headers if k.lower() not in _STRIP_REQUEST}
     if API_KEY:
         headers["X-API-Key"] = API_KEY
     upstream = requests.request(

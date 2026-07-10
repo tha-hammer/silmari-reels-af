@@ -167,6 +167,12 @@ curl -s -X POST https://reel-af-ui-production.up.railway.app/api/v1/execute/asyn
 7. **UI job submit 401.** The control plane gates `/api/*` behind the API key. `web/server.py`
    injects `X-API-Key` from `AGENTFIELD_API_KEY` server-side so the key never reaches the browser.
 
+8. **ROLL returns 403 "rejected" (but curl works).** The control plane's CORS allowlist is
+   `localhost:3000/5173`; when the proxy forwards the **browser's `Origin` header**, the plane
+   sees a disallowed cross-origin call → 403. The proxy is a server-to-server client, so
+   `web/server.py` must **strip `Origin`/`Referer`** from forwarded requests (`_STRIP_REQUEST`).
+   Tell: a bare curl (no `Origin`) gets 202, the browser gets 403.
+
 ---
 
 ## 7. Known limitations / follow-ups
