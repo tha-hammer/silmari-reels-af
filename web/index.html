@@ -419,6 +419,18 @@
   }
   function applyPresetShape() {
     $("viewport").classList.toggle("wide", state.preset.ratio === "16:9");
+    // The topic preset has no video source — reveal the slate and reuse it as a
+    // topic-phrase box (buildInput reads $("url") for topic). Restore the URL
+    // placeholder for video presets.
+    if (state.preset.kind === "topic") {
+      state.mode = "url";
+      document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x.dataset.mode === "url"));
+      $("slate").classList.add("on");
+      $("url").placeholder = "a topic or phrase → reel";
+      $("dropHint").textContent = "Type a topic below, then roll.";
+    } else {
+      $("url").placeholder = CFG.copy.urlPlaceholder;
+    }
   }
 
   /* ── mode toggle ── */
@@ -515,8 +527,10 @@
   async function roll() {
     if (state.busy) return;
     const urlVal = $("url").value.trim();
-    if (state.mode === "url" && !urlVal) return flash("no source — paste a URL");
-    if (state.mode === "file" && !state.file) return flash("no source — drop a file");
+    const isTopic = state.preset.kind === "topic";
+    if (isTopic && !urlVal) return flash("enter a topic phrase");
+    if (!isTopic && state.mode === "url" && !urlVal) return flash("no source — paste a URL");
+    if (!isTopic && state.mode === "file" && !state.file) return flash("no source — drop a file");
 
     setBusy(true);
     $("console").classList.add("on");
