@@ -80,6 +80,7 @@ def test_index_has_carousel_review_ui_contract():
     assert config_match is not None
     config = json.loads(config_match.group(1))
 
+    assert config["api"]["carouselCreatePath"] == "/api/v1/carousels"
     assert config["api"]["carouselPath"] == "/api/v1/carousels/{id}"
     assert config["api"]["carouselSlidePath"] == "/api/v1/carousels/{id}/slides/{idx}"
     assert config["api"]["carouselRecreatePath"] == (
@@ -88,11 +89,15 @@ def test_index_has_carousel_review_ui_contract():
     assert config["api"]["carouselFinalizePath"] == "/api/v1/carousels/{id}/finalize"
     assert config["api"]["carouselCancelPath"] == "/api/v1/carousels/{id}/cancel"
     assert html.count('id="carouselReview"') == 1
-    assert 'id="carouselReview"' in html
-    assert 'id="carouselSlides"' in html
-    assert 'id="carouselCancel"' in html
-    assert 'id="carouselFinalize"' in html
+    assert html.count('id="carouselSlides"') == 1
+    assert html.count('id="carouselCancel"') == 1
+    assert html.count('id="carouselFinalize"') == 1
     assert 'data-carousel-action="recreate"' in html
+    assert "async function createCarouselReview" in html
+    assert "async function loadCarousel" in html
+    assert "async function recreateCarouselSlide" in html
+    assert "async function cancelCarousel" in html
+    assert "async function finalizeCarousel" in html
 
 
 def test_create_no_session_is_401_before_work():
