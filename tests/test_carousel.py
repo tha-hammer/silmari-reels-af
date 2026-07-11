@@ -317,6 +317,35 @@ async def test_one_slide_failure_does_not_abort_batch(tmp_path: Path, monkeypatc
     assert len(out["slides"]) == 3
 
 
+async def test_carousel_bypasses_composite_overlay_guard(tmp_path: Path, monkeypatch):
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    called = {"composite": 0}
+
+    def spy(*args, **kwargs):
+        called["composite"] += 1
+        return {"error": "should never be called"}
+
+    monkeypatch.setattr(app_module, "_run_composite_reels", spy)
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    out = await app_module.research_to_carousel(
+        text="doc",
+        preset="carousel-default",
+        slide_count=2,
+        out_dir=str(tmp_path),
+        provider=fake(),
+        storage=_FakeStoragePort(),
+        distiller=_fake_distiller,
+        prompt_planner=lambda essence, count: [f"p{i}" for i in range(count)],
+    )
+
+    assert called["composite"] == 0
+    assert "slides" in out and "error" not in out
+    assert "is not wired for video intake" not in str(out)
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images
