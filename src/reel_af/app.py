@@ -716,14 +716,23 @@ async def composite_to_reel(
         _run_composite_reels, url=url, preset_name=preset,
         count=max(1, int(count)), out_path=out_path, chrome=chrome)
     took = round(time.time() - t_start, 1)
-    meta = {"source": "video", "url": url, "preset": preset, "run_id": run_id}
+    # NB: source ``url`` is intentionally NOT surfaced in the reel result — it is the
+    # (presigned) input, and the UI must never present it as the reel download (T10).
+    meta = {"source": "video", "preset": preset, "run_id": run_id}
     if "error" in result:
         app.note(f"reel-af composite: run {run_id} failed — {result['error']}",
                  tags=["reel", "composite", "error"])
         return {**result, **meta}
-    app.note(f"reel-af composite: run {run_id} done → {result['video_path']} ({took}s)",
+    # T10: the reel is on the node's ephemeral fs — deliver it out via the shared
+    # bucket and hand the browser a presigned GET url. Fail-soft: None if unconfigured.
+    from reel_af.storage import upload_reel
+
+    download_url = await asyncio.to_thread(upload_reel, result["video_path"], run_id=run_id)
+    delivered = {"download_url": download_url} if download_url else {}
+    app.note(f"reel-af composite: run {run_id} done → {result['video_path']} "
+             f"(delivered={bool(download_url)}, {took}s)",
              tags=["reel", "composite", "done"])
-    return {**result, **meta, "timings_s": {"total": took}}
+    return {**result, **meta, **delivered, "timings_s": {"total": took}}
 
 
 # ════════════════════════════════════════════════════════════════════

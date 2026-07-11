@@ -616,7 +616,9 @@
     advanceTo("done");
     const path = result.video_path || result.path || result.output || "(see server)";
     $("resultPath").textContent = path;
-    const link = result.download_url || result.url || (typeof path === "string" && path.startsWith("http") ? path : "#");
+    // Link ONLY to the delivered reel (download_url). Never fall back to result.url —
+    // for a file/composite reel that is the uploaded SOURCE, not the output (T10).
+    const link = result.download_url || (typeof path === "string" && path.startsWith("http") ? path : "#");
     const a = $("resultLink"); a.href = link;
     if (link === "#") { a.style.display = "none"; } else { a.style.display = ""; }
     $("result").classList.add("on");
