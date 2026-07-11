@@ -24,6 +24,7 @@ from deps import (
 )
 
 CREATE = "/api/v1/carousels"
+CID = "car_1"
 TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 
 
@@ -37,6 +38,18 @@ def _post(client, key=None, json=None):
         CREATE,
         json=json or {"source_text": "doc", "preset": "carousel-default"},
         headers=headers,
+    )
+
+
+def _seed(repo, org=ORG_ID, cid=CID, status="draft"):
+    repo.seed(
+        org,
+        cid,
+        status=status,
+        slides=[
+            {"idx": idx, "image_ref": f"ref-{idx}", "prompt": f"p{idx}", "status": "ok"}
+            for idx in range(3)
+        ],
     )
 
 
@@ -239,3 +252,28 @@ def test_idempotent_replay_returns_carousel_id_not_job_id():
     assert "carousel_id" in second.get_json()
     assert "job_id" not in second.get_json()
     assert first.get_json()["carousel_id"] == second.get_json()["carousel_id"]
+
+
+def test_owner_reads_ordered_slides():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+
+    resp = _client(deps).get(f"/api/v1/carousels/{CID}")
+
+    assert resp.status_code == 200
+    slides = resp.get_json()["slides"]
+    assert [slide["idx"] for slide in slides] == [0, 1, 2]
+    assert all({"idx", "image_ref", "prompt", "status"} <= set(slide) for slide in slides)
+
+
+def test_cross_org_get_is_404():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    other = make_ctx()
+    object.__setattr__(other, "org_id", uuid.uuid4())
+    deps = make_deps(identity=FakeIdentity(other), carousels=repo)
+
+    resp = _client(deps).get(f"/api/v1/carousels/{CID}")
+
+    assert resp.status_code == 404

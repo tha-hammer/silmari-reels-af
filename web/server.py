@@ -58,6 +58,7 @@ TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 # Pure route predicates — inspect method/subpath ONLY (no I/O, no body parse).
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
+_CAROUSEL_GET_RE = re.compile(r"^v1/carousels/([^/]+)$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
 
@@ -92,6 +93,13 @@ def _poll_id(method: str, sub: str) -> str | None:
     if method != "GET":
         return None
     m = _POLL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _carousel_id(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _CAROUSEL_GET_RE.match(sub)
     return m.group(1) if m else None
 
 
@@ -363,6 +371,12 @@ def _handle_carousel_create(deps: AppDeps) -> tuple[Response, int]:
     return jsonify(payload), status
 
 
+def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    view = deps.carousels.get(ctx, carousel_id)
+    return jsonify({"status": view.status, "slides": view.slides}), 200
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -424,6 +438,9 @@ def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
     research_execution_id = _research_poll_id(method, subpath)
     if research_execution_id is not None:
         return _handle_research_poll(deps, research_execution_id)
+    carousel_id = _carousel_id(method, subpath)
+    if carousel_id is not None:
+        return _handle_carousel_get(deps, carousel_id)
     slide = _slide_target(method, subpath)
     if slide is not None:
         return _handle_slide(deps, *slide)
