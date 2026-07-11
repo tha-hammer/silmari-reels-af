@@ -15,6 +15,9 @@
     "base": "",
     "executePath": "/api/v1/execute/async/{target}",
     "pollPath": "/api/v1/executions/{id}",
+    "researchRunPath": "/api/v1/research/run",
+    "researchPollPath": "/api/v1/research/{id}",
+    "createFromTextPath": "/api/v1/research/create",
     "uploadPath": "/api/v1/uploads",
     "healthPath": "/health",
     "pollIntervalMs": 2500,
@@ -32,12 +35,18 @@
     "dropTitle": "MARK IN",
     "dropHint": "Drop a video file — or paste a link below.",
     "urlPlaceholder": "https://youtube.com/watch?v=…  ·  or any video URL",
+    "researchQueryPlaceholder": "what should we research?",
+    "researchDocPlaceholder": "research document appears here - edit before creating",
+    "researchCreate": "CREATE",
+    "researching": "RESEARCHING",
+    "creating": "CREATING",
     "roll": "ROLL",
     "rolling": "ROLLING",
     "reset": "NEW TAKE"
   },
   "stages": [
     { "key": "queued",     "label": "SLATE",      "note": "job on the bench" },
+    { "key": "research",   "label": "RESEARCH",   "note": "briefing the room" },
     { "key": "ingest",     "label": "INGEST",     "note": "pulling the source" },
     { "key": "transcribe", "label": "TRANSCRIBE", "note": "reading the words" },
     { "key": "render",     "label": "RENDER",     "note": "printing overlays" },
@@ -222,6 +231,37 @@
   .slate .row:focus-within { border-color: var(--grease); }
   input#file { display: none; }
 
+  /* research create surface */
+  .research { display: grid; gap: 12px; margin-top: 16px; border: 1px solid var(--line-2); background: var(--film-2); padding: 14px; }
+  .research[hidden] { display: none; }
+  .research-modes { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--line); width: max-content; }
+  .research-modes button {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--print-dim); background: none; border: none; padding: 8px 10px; cursor: pointer;
+  }
+  .research-modes button[aria-selected="true"] { background: var(--print); color: var(--film); font-weight: 700; }
+  .research .row { display: flex; border: 1px solid var(--line-2); background: var(--film); }
+  .research .tick { font-family: var(--mono); font-size: 11px; color: var(--grease); padding: 0 14px; display: grid; place-items: center; border-right: 1px solid var(--line); letter-spacing: 0.1em; }
+  .research input[type="text"] {
+    flex: 1; background: none; border: none; color: var(--print); font-family: var(--mono);
+    font-size: 14px; padding: 16px 14px; outline: none; letter-spacing: 0.01em; min-width: 0;
+  }
+  .research input::placeholder, .research textarea::placeholder { color: var(--print-fog); }
+  .research .row:focus-within, .research textarea:focus { border-color: var(--grease); }
+  .research textarea {
+    min-height: 180px; resize: vertical; background: var(--film); color: var(--print);
+    border: 1px solid var(--line-2); padding: 14px; font-family: var(--mono); font-size: 12px;
+    line-height: 1.55; outline: none;
+  }
+  .outputs { display: flex; flex-wrap: wrap; gap: 10px; }
+  .outputs label {
+    display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line);
+    padding: 9px 11px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+    color: var(--print-dim); cursor: pointer;
+  }
+  .outputs input { accent-color: var(--grease); }
+  .research .roll { margin-top: 0; padding: 16px; font-size: 15px; }
+
   /* right column — controls */
   .controls { opacity: 0; animation: rise 0.8s 0.44s cubic-bezier(.2,.7,.2,1) forwards; }
   .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(4px); }
@@ -349,9 +389,12 @@
         </div>
         <input type="file" id="file" accept="video/*" />
 
-        <!-- Create-from-research surface (Plan 5, ISC-28..36). Hidden until the
-             research tab is active; behavior is wired in the IIFE / verified manually. -->
+        <!-- Create-from-research surface (Plan 5, ISC-28..36). -->
         <div class="research" id="researchSurface" hidden>
+          <div class="research-modes" role="tablist" aria-label="Research create mode">
+            <button type="button" role="tab" aria-selected="true" data-research-mode="automatic">AUTO</button>
+            <button type="button" role="tab" aria-selected="false" data-research-mode="full_control">FULL CONTROL</button>
+          </div>
           <div class="row">
             <span class="tick">ASK▸</span>
             <input type="text" id="researchQuery" spellcheck="false" autocomplete="off"
@@ -364,7 +407,7 @@
             <label><input type="checkbox" data-output="carousel" /> CAROUSEL</label>
           </div>
           <button class="roll" id="createFromResearch" disabled>
-            <span class="rec"></span><span>CREATE</span>
+            <span class="rec"></span><span id="createFromResearchLabel">CREATE</span>
           </button>
         </div>
       </div>
@@ -406,7 +449,16 @@
   "use strict";
   const CFG = JSON.parse(document.getElementById("config").textContent);
   const $ = (id) => document.getElementById(id);
-  const state = { mode: "file", preset: CFG.presets[0], file: null, busy: false };
+  const state = {
+    mode: "file",
+    preset: CFG.presets[0],
+    file: null,
+    busy: false,
+    researchMode: "automatic",
+    researchRunId: null,
+    researchExecId: null,
+    researchDoc: ""
+  };
 
   /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
   const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -423,6 +475,9 @@
   $("dropTitle").textContent = CFG.copy.dropTitle;
   $("dropHint").textContent = CFG.copy.dropHint;
   $("url").placeholder = CFG.copy.urlPlaceholder;
+  $("researchQuery").placeholder = CFG.copy.researchQueryPlaceholder;
+  $("researchDoc").placeholder = CFG.copy.researchDocPlaceholder;
+  $("createFromResearchLabel").textContent = CFG.copy.researchCreate;
   $("rollLabel").textContent = CFG.copy.roll;
 
   /* ── presets ── */
@@ -445,12 +500,11 @@
     if (state.preset.kind === "topic") {
       state.mode = "url";
       document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x.dataset.mode === "url"));
-      $("slate").classList.add("on");
       $("url").placeholder = "a topic or phrase → reel";
-      $("dropHint").textContent = "Type a topic below, then roll.";
     } else {
       $("url").placeholder = CFG.copy.urlPlaceholder;
     }
+    syncModeUi();
   }
 
   /* ── mode toggle ── */
@@ -458,10 +512,65 @@
     b.onclick = () => {
       state.mode = b.dataset.mode;
       document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x === b));
-      $("slate").classList.toggle("on", state.mode === "url");
-      $("dropHint").textContent = state.mode === "url" ? "Paste a video link in the slate below." : CFG.copy.dropHint;
+      syncModeUi();
     };
   });
+
+  function syncModeUi() {
+    const isUrl = state.mode === "url";
+    const isResearch = state.mode === "research";
+    $("slate").classList.toggle("on", isUrl);
+    $("researchSurface").hidden = !isResearch;
+    if (isResearch) {
+      $("dropHint").textContent = "Run research, then create a video and carousel.";
+    } else if (state.preset.kind === "topic") {
+      $("dropHint").textContent = "Type a topic below, then roll.";
+    } else {
+      $("dropHint").textContent = isUrl ? "Paste a video link in the slate below." : CFG.copy.dropHint;
+    }
+    updateResearchModeUi();
+  }
+
+  /* ── research create surface ── */
+  document.querySelectorAll("[data-research-mode]").forEach((b) => {
+    b.onclick = () => {
+      state.researchMode = b.dataset.researchMode;
+      updateResearchModeUi();
+    };
+  });
+  $("researchQuery").addEventListener("input", () => {
+    state.researchRunId = null;
+    state.researchExecId = null;
+    state.researchDoc = "";
+    $("researchDoc").value = "";
+    updateResearchModeUi();
+  });
+  $("researchDoc").addEventListener("input", updateResearchModeUi);
+  document.querySelectorAll("#researchOutputs input[data-output]").forEach((x) => {
+    x.addEventListener("change", updateResearchModeUi);
+  });
+  $("createFromResearch").onclick = createFromResearchFlow;
+
+  function selectedResearchOutputs() {
+    if (state.researchMode === "automatic") return ["video", "carousel"];
+    return Array.from(document.querySelectorAll("#researchOutputs input[data-output]:checked"))
+      .map((x) => x.dataset.output);
+  }
+
+  function updateResearchModeUi() {
+    const full = state.researchMode === "full_control";
+    const hasDoc = Boolean(state.researchDoc);
+    document.querySelectorAll("[data-research-mode]").forEach((b) => {
+      b.setAttribute("aria-selected", b.dataset.researchMode === state.researchMode);
+    });
+    $("researchDoc").hidden = !full || !hasDoc;
+    $("researchOutputs").hidden = !full || !hasDoc;
+    const queryReady = Boolean($("researchQuery").value.trim());
+    const textReady = full && hasDoc ? Boolean($("researchDoc").value.trim()) : queryReady;
+    const outputsReady = !full || !hasDoc || selectedResearchOutputs().length > 0;
+    $("createFromResearchLabel").textContent = full && !hasDoc ? "RESEARCH" : CFG.copy.researchCreate;
+    $("createFromResearch").disabled = state.busy || !queryReady || !textReady || !outputsReady;
+  }
 
   /* ── file drop ── */
   const vp = $("viewport");
@@ -617,6 +726,112 @@
     }
   }
 
+  async function createFromResearchFlow() {
+    if (state.busy) return;
+    const query = $("researchQuery").value.trim();
+    if (!query) return flash("enter a research query");
+
+    setBusy(true);
+    $("console").classList.add("on");
+    $("result").classList.remove("on");
+    $("log").innerHTML = ""; renderTrack();
+    const clientRequestId = newClientRequestId();
+    try {
+      if (!state.researchDoc || !state.researchRunId) {
+        advanceTo("research");
+        logLine(`research: ${query}`);
+        const run = await runResearch(query, clientRequestId);
+        state.researchRunId = run.research_run_id;
+        state.researchExecId = run.execution_id;
+        $("jobId").textContent = state.researchExecId;
+        logLine(`research execution ${state.researchExecId} accepted`, "ok");
+        const doc = await pollResearch(state.researchExecId);
+        state.researchDoc = researchDocumentText(doc);
+        $("researchDoc").value = state.researchDoc;
+        if (!state.researchDoc.trim()) throw new Error("research returned no document text");
+        markStage("research", true);
+        if (state.researchMode === "full_control") {
+          logLine("research document ready for edits", "ok");
+          return;
+        }
+      }
+
+      const outputs = selectedResearchOutputs();
+      if (!outputs.length) return flash("select an output");
+      const text = state.researchMode === "full_control" ? $("researchDoc").value : state.researchDoc;
+      if (!text.trim()) throw new Error("research document is empty");
+      advanceTo("render");
+      logLine(`creating: ${outputs.join(" + ")}`);
+      const jobs = await postCreateFromResearch(text, outputs, state.researchRunId, clientRequestId);
+      const labels = jobs.map((j) => `${j.output}:${j.execution_id || j.job_id}`);
+      $("jobId").textContent = labels.join(", ");
+      $("resultPath").textContent = labels.join(" · ");
+      const a = $("resultLink"); a.href = "#"; a.style.display = "none";
+      $("result").classList.add("on");
+      advanceTo("done");
+      logLine(`created ${jobs.length} job${jobs.length === 1 ? "" : "s"}`, "ok");
+    } catch (err) {
+      if (err && err.code === "unauthenticated") return;
+      logLine(String(err && err.message || err), "err");
+      advanceTo("");
+    } finally {
+      setBusy(false);
+      updateResearchModeUi();
+    }
+  }
+
+  async function runResearch(query, clientRequestId) {
+    const r = await fetch(url(CFG.api.researchRunPath), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `${clientRequestId}:research` },
+      body: JSON.stringify({ query }),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const body = await r.text();
+    const j = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`research rejected (${r.status}): ${body.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    if (!j.execution_id || !j.research_run_id) throw new Error("research returned no execution_id");
+    return j;
+  }
+
+  async function pollResearch(id) {
+    const start = Date.now();
+    let last = null;
+    while (true) {
+      if (Date.now() - start > CFG.api.timeoutMs) throw new Error("research timed out");
+      await sleep(CFG.api.pollIntervalMs);
+      let j;
+      try { j = await (await fetch(url(CFG.api.researchPollPath, { id }))).json(); }
+      catch { logLine("research poll error — retrying"); continue; }
+      const status = String(j.status || "?");
+      if (status !== last) { last = status; advanceTo("research"); logLine(`research status → ${status}`); }
+      if (status === "succeeded") return j;
+      if (CFG.ui.terminalFailureStatuses.includes(status)) {
+        throw new Error(`research ${status}: ${JSON.stringify(j.error || "").slice(0, CFG.ui.maxErrorBodyChars)}`);
+      }
+    }
+  }
+
+  function researchDocumentText(doc) {
+    return String(doc.markdown || doc.html || "");
+  }
+
+  async function postCreateFromResearch(text, outputs, researchRunId, clientRequestId) {
+    const body = { text, outputs };
+    if (researchRunId) body.research_run_id = researchRunId;
+    const r = await fetch(url(CFG.api.createFromTextPath), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `${clientRequestId}:create` },
+      body: JSON.stringify(body),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`create rejected (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    if (!Array.isArray(j.jobs) || !j.jobs.length) throw new Error("create returned no jobs");
+    return j.jobs;
+  }
+
   async function poll(id) {
     const start = Date.now();
     let last = null;
@@ -671,7 +886,9 @@
     $("roll").disabled = b;
     $("roll").classList.toggle("busy", b);
     $("rollLabel").textContent = b ? CFG.copy.rolling : CFG.copy.roll;
+    $("createFromResearch").classList.toggle("busy", b);
     vp.classList.toggle("busy", b);
+    updateResearchModeUi();
   }
   let flashT;
   function flash(msg) {
@@ -681,7 +898,7 @@
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  $("roll").onclick = roll;
+  $("roll").onclick = () => state.mode === "research" ? createFromResearchFlow() : roll();
 
   /* ── boot ── */
   renderPresets(); applyPresetShape(); renderTrack();
