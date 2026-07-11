@@ -17,7 +17,9 @@ seam is still landing, and so callers/tests can inject a ``_regenerate`` spy.
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 from typing import Protocol
 
 from reel_af.render.images import IMAGE_MODEL
@@ -28,11 +30,18 @@ _HQ_CAP_ENV = "REEL_AF_HQ_RECREATE_CAP"   # operator knob: per-carousel HQ cap
 _PROMPT_NOTE_SEPARATOR = "\n\n"           # joins the original prompt and the note (ISC-18)
 _STATUS_OK = "ok"                          # Plan 1 slide-record success status (shared enum)
 
-# Per-carousel HQ-recreate cap. Read once via the app.py:63-81 getenv-tunable
-# convention — configurable, one jump, no literal scattered at call sites. The
-# real cross-request persistence of the count is Plan 6 (repo-backed guard);
-# HQ_RECREATE_CAP is the shared default both the in-memory and repo guards use.
-HQ_RECREATE_CAP = int(os.getenv(_HQ_CAP_ENV, "5"))
+# ExternalizeConfig: tunables (HQ cap default, carousel crop, content mode) and all
+# user-facing copy live in a flat JSON dict, read once and reached in one jump
+# (``_CFG["key"]``). Operators still override the cap/model via the env knobs above;
+# the JSON supplies the defaults and the message text.
+_CFG = json.loads(Path(__file__).with_name("recreate_config.json").read_text(encoding="utf-8"))
+_DEFAULT_CROP = _CFG["default_carousel_crop"]
+_DEFAULT_CONTENT_MODE = _CFG["default_content_mode"]
+
+# Per-carousel HQ-recreate cap. Env knob overrides the JSON default; read once (the
+# app.py:63-81 getenv-tunable convention). The real cross-request persistence of the
+# count is Plan 6 (repo-backed guard); HQ_RECREATE_CAP is the shared default.
+HQ_RECREATE_CAP = int(os.getenv(_HQ_CAP_ENV, str(_CFG["hq_recreate_cap_default"])))
 
 
 class PremiumNotAcknowledgedError(RuntimeError):
@@ -61,10 +70,7 @@ class RecreateDepsUnresolvedError(RuntimeError):
 
 class HqRecreateCapError(RuntimeError):
     def __init__(self, carousel_id, cap):
-        super().__init__(
-            f"carousel {carousel_id} reached its HQ-recreate cap of {cap}; "
-            "no further premium recreates allowed"
-        )
+        super().__init__(_CFG["msg_hq_cap_exceeded"].format(carousel_id=carousel_id, cap=cap))
         self.carousel_id = carousel_id
         self.cap = cap
 
@@ -93,7 +99,7 @@ def compose_recreate_prompt(original_prompt: str, note: str) -> str:
     """
     cleaned_note = (note or "").strip()
     if not cleaned_note:
-        raise ValueError("recreate: note is empty or whitespace-only")
+        raise ValueError(_CFG["msg_blank_note"])
     # Compose with the RAW note (validate on the stripped value only): ISC-18 requires
     # the note to survive verbatim as a substring, so leading/trailing whitespace the
     # user typed is preserved rather than trimmed out of the model prompt.
@@ -114,7 +120,7 @@ def resolve_hq_model() -> str:
 def _find_slide(carousel: dict, idx: int) -> dict:
     slides = carousel["slides"]
     if idx < 0 or idx >= len(slides):
-        raise IndexError(f"recreate: slide idx {idx} out of range 0..{len(slides) - 1}")
+        raise IndexError(_CFG["msg_slide_idx_out_of_range"].format(idx=idx, max_idx=len(slides) - 1))
     return slides[idx]
 
 
@@ -128,7 +134,7 @@ def apply_recreate(manifest: dict, record: dict) -> dict:
     slides = manifest["slides"]
     idx = record["idx"]
     if idx < 0 or idx >= len(slides):
-        raise IndexError(f"apply_recreate: record idx {idx} out of range 0..{len(slides) - 1}")
+        raise IndexError(_CFG["msg_apply_idx_out_of_range"].format(idx=idx, max_idx=len(slides) - 1))
     new_slides = [record if s["idx"] == idx else s for s in slides]
     return {**manifest, "slides": new_slides}
 
@@ -143,8 +149,8 @@ async def recreate_slide(
     storage=None,
     guard: HqRecreateGuard,
     acknowledge_premium: bool = False,
-    content_mode: str = "general",
-    crop: str = "4x5",
+    content_mode: str = _DEFAULT_CONTENT_MODE,
+    crop: str = _DEFAULT_CROP,
     _regenerate=None,
 ) -> dict:
     """Recreate a single carousel slide on the HQ image model, with a note.
@@ -157,22 +163,15 @@ async def recreate_slide(
     (sibling-safety, ISC-A1, is structural — apply the record via ``apply_recreate``).
     """
     if not acknowledge_premium:
-        raise PremiumNotAcknowledgedError(
-            "recreate uses a premium image model; acknowledge_premium=True is required"
-        )
+        raise PremiumNotAcknowledgedError(_CFG["msg_premium_not_acknowledged"])
 
     carousel_id = carousel.get("carousel_id")
     run_id = carousel.get("run_id")
     if not carousel_id or not run_id:
-        raise RecreateInputError(
-            "recreate: carousel must carry both carousel_id and run_id"
-        )
+        raise RecreateInputError(_CFG["msg_missing_carousel_keys"])
 
     if provider is None or storage is None:
-        raise RecreateDepsUnresolvedError(
-            "recreate: provider/storage is None; the route must resolve deps and gate "
-            "OPENROUTER_API_KEY before calling recreate_slide (see app.py:478-479)"
-        )
+        raise RecreateDepsUnresolvedError(_CFG["msg_deps_unresolved"])
 
     slide = _find_slide(carousel, idx)
     composed = compose_recreate_prompt(slide["image_prompt"], note)

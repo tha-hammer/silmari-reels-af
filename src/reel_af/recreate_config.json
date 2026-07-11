@@ -1,0 +1,12 @@
+{
+  "hq_recreate_cap_default": 5,
+  "default_carousel_crop": "4x5",
+  "default_content_mode": "general",
+  "msg_blank_note": "recreate: note is empty or whitespace-only",
+  "msg_premium_not_acknowledged": "recreate uses a premium image model; acknowledge_premium=True is required",
+  "msg_missing_carousel_keys": "recreate: carousel must carry both carousel_id and run_id",
+  "msg_deps_unresolved": "recreate: provider/storage is None; the route must resolve deps and gate OPENROUTER_API_KEY before calling recreate_slide (see app.py:478-479)",
+  "msg_slide_idx_out_of_range": "recreate: slide idx {idx} out of range 0..{max_idx}",
+  "msg_apply_idx_out_of_range": "apply_recreate: record idx {idx} out of range 0..{max_idx}",
+  "msg_hq_cap_exceeded": "carousel {carousel_id} reached its HQ-recreate cap of {cap}; no further premium recreates allowed"
+}
