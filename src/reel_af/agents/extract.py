@@ -30,6 +30,8 @@ FETCH_TIMEOUT_S = float(_EXTRACT_CFG["fetch_timeout_s"])
 MAX_BODY_CHARS = int(_EXTRACT_CFG["max_body_chars"])
 PROMPT_BODY_CHARS = int(_EXTRACT_CFG["prompt_body_chars"])
 USER_AGENT = str(_EXTRACT_CFG["user_agent"])
+_ACCEPT_HEADER = str(_EXTRACT_CFG["accept_header"])
+_FETCH_MAX_REDIRECTS = int(_EXTRACT_CFG["max_redirects"])
 
 # --- YouTube intake ----------------------------------------------------------
 # A YouTube watch page has no readable article body, so readability yields
@@ -39,21 +41,41 @@ USER_AGENT = str(_EXTRACT_CFG["user_agent"])
 #   &reel_end=<sec>  end of the moment
 # so one video can seed N reels, one per moment, by varying the range.
 _YT_HOSTS = tuple(_EXTRACT_CFG["youtube_hosts"])
+_YT_SHORT_HOSTS = tuple(_EXTRACT_CFG["youtube_short_hosts"])
+_YT_PATH_PREFIXES = (
+    str(_EXTRACT_CFG["youtube_shorts_path_prefix"]),
+    str(_EXTRACT_CFG["youtube_embed_path_prefix"]),
+)
 _YT_TRANSCRIPT_LANGS = tuple(_EXTRACT_CFG["youtube_transcript_langs"])
 _SYSTEM = str(_EXTRACT_CFG["essence_system_prompt"])
 _ESSENCE_USER_TEMPLATE = str(_EXTRACT_CFG["essence_user_template"])
 _EMPTY_TEXT_ERROR = str(_EXTRACT_CFG["empty_text_error"])
+_EXTRACT_EMPTY_BODY_ERROR_TEMPLATE = str(_EXTRACT_CFG["extract_empty_body_error_template"])
 _NO_TITLE_LABEL = str(_EXTRACT_CFG["no_title_label"])
 _PROVIDED_TEXT_TITLE = str(_EXTRACT_CFG["provided_text_title"])
 _PROVIDED_TEXT_URL = str(_EXTRACT_CFG["provided_text_url"])
+_YT_VIDEO_ID_QUERY_KEY = str(_EXTRACT_CFG["youtube_video_id_query_key"])
+_YT_START_QUERY_KEY = str(_EXTRACT_CFG["youtube_start_query_key"])
+_YT_END_QUERY_KEY = str(_EXTRACT_CFG["youtube_end_query_key"])
+_YT_SCOPE_END_LABEL = str(_EXTRACT_CFG["youtube_scope_end_label"])
+_YT_SCOPE_TEMPLATE = str(_EXTRACT_CFG["youtube_scope_template"])
+_YT_TITLE_TEMPLATE = str(_EXTRACT_CFG["youtube_title_template"])
+_YT_TRANSCRIPT_MISSING_PACKAGE_ERROR = str(
+    _EXTRACT_CFG["youtube_transcript_missing_package_error"]
+)
+_YOUTUBE_PATH_VIDEO_ID_INDEX = 2
 
 
 async def _fetch(url: str) -> tuple[str, str]:
     """Fetch URL, return (raw_html, final_url)."""
     timeout = aiohttp.ClientTimeout(total=FETCH_TIMEOUT_S)
-    headers = {"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml"}
+    headers = {"User-Agent": USER_AGENT, "Accept": _ACCEPT_HEADER}
     async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
-        async with session.get(url, allow_redirects=True, max_redirects=5) as resp:
+        async with session.get(
+            url,
+            allow_redirects=True,
+            max_redirects=_FETCH_MAX_REDIRECTS,
+        ) as resp:
             resp.raise_for_status()
             text = await resp.text(errors="replace")
             return text, str(resp.url)
@@ -107,13 +129,17 @@ def _youtube_ref(url: str) -> tuple[str, float | None, float | None] | None:
     if host not in _YT_HOSTS:
         return None
     q = parse_qs(u.query)
-    if host in ("youtu.be", "www.youtu.be"):
+    if host in _YT_SHORT_HOSTS:
         vid = u.path.lstrip("/").split("/")[0]
-    elif u.path.startswith(("/shorts/", "/embed/")):
+    elif u.path.startswith(_YT_PATH_PREFIXES):
         parts = u.path.split("/")
-        vid = parts[2] if len(parts) > 2 else ""
+        vid = (
+            parts[_YOUTUBE_PATH_VIDEO_ID_INDEX]
+            if len(parts) > _YOUTUBE_PATH_VIDEO_ID_INDEX
+            else ""
+        )
     else:
-        vid = (q.get("v") or [""])[0]
+        vid = (q.get(_YT_VIDEO_ID_QUERY_KEY) or [""])[0]
     if not vid:
         return None
 
@@ -126,7 +152,7 @@ def _youtube_ref(url: str) -> tuple[str, float | None, float | None] | None:
         except ValueError:
             return None
 
-    return vid, _sec("t"), _sec("reel_end")
+    return vid, _sec(_YT_START_QUERY_KEY), _sec(_YT_END_QUERY_KEY)
 
 
 def _youtube_segments(video_id: str) -> list[dict]:
@@ -135,7 +161,7 @@ def _youtube_segments(video_id: str) -> list[dict]:
         from youtube_transcript_api import YouTubeTranscriptApi
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError(
-            "YouTube intake needs the `youtube-transcript-api` package"
+            _YT_TRANSCRIPT_MISSING_PACKAGE_ERROR
         ) from exc
     langs = list(_YT_TRANSCRIPT_LANGS)
     if hasattr(YouTubeTranscriptApi, "get_transcript"):  # 0.6.x classmethod API
@@ -156,9 +182,14 @@ def _youtube_body(video_id: str, t_start: float | None, t_end: float | None) -> 
     body_chars = len(body)
     if body_chars > MAX_BODY_CHARS:
         body = body[:MAX_BODY_CHARS]
-    end_label = int(t_end) if t_end is not None else "end"
-    scope = f" [{int(t_start or 0)}s-{end_label}]" if (t_start is not None or t_end is not None) else ""
-    return f"YouTube {video_id}{scope}", body
+    end_label = int(t_end) if t_end is not None else _YT_SCOPE_END_LABEL
+    has_scope = t_start is not None or t_end is not None
+    scope = (
+        _YT_SCOPE_TEMPLATE.format(start=int(t_start or 0), end=end_label)
+        if has_scope
+        else ""
+    )
+    return _YT_TITLE_TEMPLATE.format(video_id=video_id, scope=scope), body
 
 
 async def extract_essence(app: Any, url: str) -> Essence:
@@ -178,7 +209,7 @@ async def extract_essence(app: Any, url: str) -> Essence:
         title, body = await loop.run_in_executor(None, _clean, html)
 
     if not body:
-        raise RuntimeError(f"extract_essence: could not extract readable text from {url}")
+        raise RuntimeError(_EXTRACT_EMPTY_BODY_ERROR_TEMPLATE.format(url=url))
 
     user = _essence_user_prompt(final_url=final_url, title=title, body=body)
 
