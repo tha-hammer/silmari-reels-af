@@ -886,20 +886,31 @@ async def research_to_carousel(
         )
     slides = []
     for idx, prompt in enumerate(prompts):
-        slides.append(
-            await _render_one_slide(
-                provider=provider,
-                storage=storage,
-                run_id=run_id,
-                idx=idx,
-                prompt=prompt,
-                out_dir=run_dir,
-                content_mode=essence.content_mode,
-                model=model,
-                crop=crop,
-                _generate_frame=_generate_frame,
+        try:
+            slides.append(
+                await _render_one_slide(
+                    provider=provider,
+                    storage=storage,
+                    run_id=run_id,
+                    idx=idx,
+                    prompt=prompt,
+                    out_dir=run_dir,
+                    content_mode=essence.content_mode,
+                    model=model,
+                    crop=crop,
+                    _generate_frame=_generate_frame,
+                )
             )
-        )
+        except Exception as exc:
+            slides.append(
+                _slide_record(
+                    idx,
+                    prompt,
+                    None,
+                    "failed",
+                    error=str(exc),
+                )
+            )
     return {
         "run_id": run_id,
         "preset": preset,

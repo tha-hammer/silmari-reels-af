@@ -285,6 +285,38 @@ async def test_plan_carousel_prompts_returns_exactly_n():
     assert app.ai_calls and app.ai_calls[0]["schema"] == list[str]
 
 
+async def test_one_slide_failure_does_not_abort_batch(tmp_path: Path, monkeypatch):
+    import reel_af.app as app_module
+    from reel_af.render.images import generate_first_frame as real_gff
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+
+    async def flaky_gff(provider, prompt, idx, out_dir, content_mode="general", **kwargs):
+        if idx == 1:
+            raise RuntimeError("image model refused slide 1")
+        return await real_gff(provider, prompt, idx, out_dir, content_mode, **kwargs)
+
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+    out = await app_module.research_to_carousel(
+        text="doc",
+        slide_count=3,
+        out_dir=str(tmp_path),
+        provider=fake(),
+        storage=_FakeStoragePort(),
+        distiller=_fake_distiller,
+        prompt_planner=lambda essence, count: [f"p{i}" for i in range(count)],
+        _generate_frame=flaky_gff,
+    )
+
+    by_idx = {slide["idx"]: slide for slide in out["slides"]}
+    assert by_idx[1]["status"] == "failed"
+    assert by_idx[1]["image_ref"] is None
+    assert "slide 1" in by_idx[1]["error"]
+    assert by_idx[0]["status"] == "ok"
+    assert by_idx[2]["status"] == "ok"
+    assert len(out["slides"]) == 3
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images
