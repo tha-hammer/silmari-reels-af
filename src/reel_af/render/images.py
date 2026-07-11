@@ -92,6 +92,8 @@ async def generate_first_frame(
     idx: int,
     out_dir: Path,
     content_mode: str = "general",
+    *,
+    model: str | None = None,
 ) -> Path:
     """Generate one 720×1280 first frame for a beat.
 
@@ -104,9 +106,10 @@ async def generate_first_frame(
     final_path = out_dir / f"frame-{idx:02d}.jpg"
 
     augmented = _augment(image_prompt, content_mode)
+    selected_model = (model or "").strip() or IMAGE_MODEL
     resp = await provider.generate_image(
         prompt=augmented,
-        model=IMAGE_MODEL,
+        model=selected_model,
         n=1,
     )
     # generate_image returns a MultimodalResponse; its .images are
