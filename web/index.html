@@ -46,15 +46,30 @@
     "researchCreate": "CREATE",
     "researching": "RESEARCHING",
     "creating": "CREATING",
-    "carouselCancel": "CANCEL",
-    "carouselCreate": "CREATE",
-    "carouselRecreate": "RECREATE",
-    "carouselRecreating": "RECREATING",
-    "carouselNotePlaceholder": "note for this image",
     "roll": "ROLL",
     "rolling": "ROLLING",
     "reset": "NEW TAKE"
   },
+  "carouselReviewTitle": "CAROUSEL REVIEW",
+  "carouselReviewAriaLabel": "Carousel review",
+  "carouselCancelLabel": "CANCEL",
+  "carouselCreateLabel": "CREATE",
+  "carouselRecreateLabel": "RECREATE",
+  "carouselRecreatingLabel": "RECREATING",
+  "carouselNotePlaceholder": "note for this image",
+  "carouselDefaultPreset": "carousel-default",
+  "carouselOutputKey": "carousel",
+  "carouselOutcomeReview": "review",
+  "carouselClientRequestSuffix": "carousel-review",
+  "carouselDraftStatus": "draft",
+  "carouselSucceededStatus": "succeeded",
+  "carouselTerminalStatuses": ["succeeded", "failed", "cancelled", "canceled"],
+  "carouselReadyLog": "carousel {id} ready for review",
+  "carouselRecreatedLog": "slide {idx} recreated",
+  "carouselCancelledLog": "carousel {id} cancelled",
+  "carouselFinalizedLog": "carousel {id} finalized",
+  "carouselSlideAlt": "Slide {idx}",
+  "carouselSlideLabel": "SLIDE {idx}",
   "stages": [
     { "key": "queued",     "label": "SLATE",      "note": "job on the bench" },
     { "key": "research",   "label": "RESEARCH",   "note": "briefing the room" },
@@ -491,22 +506,22 @@
       </div>
     </div>
 
-    <section class="carousel-review" id="carouselReview" hidden aria-label="Carousel review">
+    <section class="carousel-review" id="carouselReview" hidden>
       <div class="carousel-top">
-        <div class="carousel-title">CAROUSEL REVIEW</div>
+        <div class="carousel-title" id="carouselTitle"></div>
         <div class="carousel-actions">
-          <button type="button" id="carouselCancel">CANCEL</button>
-          <button type="button" class="primary" id="carouselFinalize">CREATE</button>
+          <button type="button" id="carouselCancel"></button>
+          <button type="button" class="primary" id="carouselFinalize"></button>
         </div>
       </div>
       <div class="carousel-scroll" id="carouselSlides">
         <article class="carousel-slide" data-carousel-slide-template hidden>
           <div class="carousel-frame"><img alt="" /></div>
           <div class="carousel-meta">
-            <div class="idx">SLIDE 00</div>
+            <div class="idx"></div>
             <div class="prompt"></div>
-            <textarea placeholder="note for this image"></textarea>
-            <button type="button" data-carousel-action="recreate">RECREATE</button>
+            <textarea></textarea>
+            <button type="button" data-carousel-action="recreate"></button>
           </div>
         </article>
       </div>
@@ -538,6 +553,7 @@
   "use strict";
   const CFG = JSON.parse(document.getElementById("config").textContent);
   const $ = (id) => document.getElementById(id);
+  const DISPLAY_INDEX_OFFSET = 1;
   const state = {
     mode: "file",
     preset: CFG.presets[0],
@@ -550,6 +566,9 @@
     carouselId: null,
     carouselView: null
   };
+  function template(text, values) {
+    return String(text).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => String(values[key] ?? ""));
+  }
 
   /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
   const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -569,14 +588,16 @@
   $("researchQuery").placeholder = CFG.copy.researchQueryPlaceholder;
   $("researchDoc").placeholder = CFG.copy.researchDocPlaceholder;
   $("createFromResearchLabel").textContent = CFG.copy.researchCreate;
-  $("carouselCancel").textContent = CFG.copy.carouselCancel;
-  $("carouselFinalize").textContent = CFG.copy.carouselCreate;
+  $("carouselReview").setAttribute("aria-label", CFG.carouselReviewAriaLabel);
+  $("carouselTitle").textContent = CFG.carouselReviewTitle;
+  $("carouselCancel").textContent = CFG.carouselCancelLabel;
+  $("carouselFinalize").textContent = CFG.carouselCreateLabel;
   $("rollLabel").textContent = CFG.copy.roll;
 
   const carouselSlideTemplate = document.querySelector("[data-carousel-slide-template]");
   if (carouselSlideTemplate) {
-    carouselSlideTemplate.querySelector("textarea").placeholder = CFG.copy.carouselNotePlaceholder;
-    carouselSlideTemplate.querySelector("[data-carousel-action]").textContent = CFG.copy.carouselRecreate;
+    carouselSlideTemplate.querySelector("textarea").placeholder = CFG.carouselNotePlaceholder;
+    carouselSlideTemplate.querySelector("[data-carousel-action]").textContent = CFG.carouselRecreateLabel;
   }
 
   /* ── presets ── */
@@ -873,11 +894,12 @@
       advanceTo("render");
       logLine(`creating: ${outputs.join(" + ")}`);
       const jobs = [];
-      const fanoutOutputs = outputs.filter((output) => output !== "carousel");
+      const fanoutOutputs = outputs.filter((output) => output !== CFG.carouselOutputKey);
       if (fanoutOutputs.length) {
         jobs.push(...await postCreateFromResearch(text, fanoutOutputs, state.researchRunId, clientRequestId));
       }
-      if (outputs.includes("carousel")) {
+      const shouldCreateCarousel = outputs.includes(CFG.carouselOutputKey);
+      if (shouldCreateCarousel) {
         jobs.push(await createCarouselReview(text, state.researchRunId, clientRequestId));
       }
       const labels = jobs.map((j) => `${j.output}:${j.execution_id || j.carousel_id || j.job_id}`);
@@ -974,25 +996,25 @@
   }
 
   async function createCarouselReview(text, researchRunId, clientRequestId) {
-    const body = { source_text: text, preset: "carousel-default" };
+    const body = { source_text: text, preset: CFG.carouselDefaultPreset };
     if (researchRunId) body.research_run_id = researchRunId;
     const created = await postJson(
       CFG.api.carouselCreatePath,
       body,
       {},
-      `${clientRequestId}:carousel-review`,
+      `${clientRequestId}:${CFG.carouselClientRequestSuffix}`,
     );
     const carouselId = created.carousel_id || created.id;
     if (!carouselId) throw new Error("carousel create returned no carousel_id");
     state.carouselId = carouselId;
     $("jobId").textContent = created.execution_id || carouselId;
     await loadCarousel(carouselId);
-    logLine(`carousel ${carouselId} ready for review`, "ok");
+    logLine(template(CFG.carouselReadyLog, { id: carouselId }), "ok");
     return {
-      output: "carousel",
+      output: CFG.carouselOutputKey,
       carousel_id: carouselId,
       execution_id: created.execution_id,
-      outcome: "review",
+      outcome: CFG.carouselOutcomeReview,
     };
   }
 
@@ -1010,7 +1032,7 @@
     $("carouselSlides").replaceChildren();
     for (const slide of slides) renderCarouselSlide(slide);
     $("carouselReview").hidden = false;
-    const terminal = ["succeeded", "failed", "cancelled", "canceled"].includes(String(view.status || ""));
+    const terminal = CFG.carouselTerminalStatuses.includes(String(view.status || ""));
     $("carouselCancel").disabled = state.busy || terminal;
     $("carouselFinalize").disabled = state.busy || terminal || slides.length === 0;
   }
@@ -1022,27 +1044,29 @@
     row.removeAttribute("data-carousel-slide-template");
     const img = row.querySelector("img");
     img.src = url(CFG.api.carouselSlidePath, { id: state.carouselId, idx });
-    img.alt = `Slide ${pad(idx + 1)}`;
-    row.querySelector(".idx").textContent = `SLIDE ${pad(idx + 1)}`;
+    const displayIdx = pad(idx + DISPLAY_INDEX_OFFSET);
+    img.alt = template(CFG.carouselSlideAlt, { idx: displayIdx });
+    row.querySelector(".idx").textContent = template(CFG.carouselSlideLabel, { idx: displayIdx });
     row.querySelector(".prompt").textContent = slide.prompt || slide.image_prompt || "";
-    row.querySelector("textarea").placeholder = CFG.copy.carouselNotePlaceholder;
+    row.querySelector("textarea").placeholder = CFG.carouselNotePlaceholder;
     const button = row.querySelector("[data-carousel-action]");
     button.dataset.idx = String(idx);
-    button.textContent = CFG.copy.carouselRecreate;
-    button.disabled = state.busy || String(state.carouselView && state.carouselView.status) !== "draft";
+    button.textContent = CFG.carouselRecreateLabel;
+    button.disabled = state.busy || String(state.carouselView && state.carouselView.status) !== CFG.carouselDraftStatus;
     $("carouselSlides").appendChild(row);
   }
 
   async function recreateCarouselSlide(idx, note, button) {
     if (!state.carouselId || state.busy) return;
     setBusy(true);
-    button.textContent = CFG.copy.carouselRecreating;
+    button.textContent = CFG.carouselRecreatingLabel;
     try {
       await postJson(CFG.api.carouselRecreatePath, { note }, { id: state.carouselId, idx });
       await loadCarousel(state.carouselId);
-      logLine(`slide ${pad(idx + 1)} recreated`, "ok");
+      logLine(template(CFG.carouselRecreatedLog, { idx: pad(idx + DISPLAY_INDEX_OFFSET) }), "ok");
     } finally {
-      if (document.body.contains(button)) button.textContent = CFG.copy.carouselRecreate;
+      const buttonStillMounted = document.body.contains(button);
+      if (buttonStillMounted) button.textContent = CFG.carouselRecreateLabel;
       setBusy(false);
     }
   }
@@ -1057,7 +1081,7 @@
       state.carouselId = null;
       $("carouselReview").hidden = true;
       $("carouselSlides").replaceChildren();
-      logLine(`carousel ${carouselId} cancelled`, "ok");
+      logLine(template(CFG.carouselCancelledLog, { id: carouselId }), "ok");
     } finally {
       setBusy(false);
     }
@@ -1070,12 +1094,12 @@
       const result = await postJson(CFG.api.carouselFinalizePath, {}, { id: state.carouselId });
       const view = {
         ...(state.carouselView || {}),
-        status: result.status || "succeeded",
+        status: result.status || CFG.carouselSucceededStatus,
         slides: state.carouselView ? state.carouselView.slides : [],
       };
       state.carouselView = view;
       renderCarousel(view);
-      logLine(`carousel ${state.carouselId} finalized`, "ok");
+      logLine(template(CFG.carouselFinalizedLog, { id: state.carouselId }), "ok");
     } finally {
       setBusy(false);
     }
@@ -1137,7 +1161,7 @@
     $("rollLabel").textContent = b ? CFG.copy.rolling : CFG.copy.roll;
     $("createFromResearch").classList.toggle("busy", b);
     const carouselStatus = String(state.carouselView && state.carouselView.status || "");
-    const carouselTerminal = ["succeeded", "failed", "cancelled", "canceled"].includes(carouselStatus);
+    const carouselTerminal = CFG.carouselTerminalStatuses.includes(carouselStatus);
     const carouselHasSlides = Boolean(state.carouselView && Array.isArray(state.carouselView.slides) && state.carouselView.slides.length);
     $("carouselCancel").disabled = b || !state.carouselId || carouselTerminal;
     $("carouselFinalize").disabled = b || !state.carouselId || carouselTerminal || !carouselHasSlides;
