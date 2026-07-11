@@ -22,6 +22,7 @@ timing and it avoids a second ffmpeg pass.
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import shutil
 import subprocess
@@ -33,6 +34,19 @@ from reel_af.render.subtitles import (
     write_reel_ass,
     write_reel_ass_with_accents,
 )
+
+# Each beat is a full 1080x1920 libx264 encode. Rendering ALL beats at once spikes
+# memory and gets OOM-killed (SIGKILL/-9) on a small node, so concurrent beat
+# renders are capped by a semaphore. Override via REEL_STITCH_CONCURRENCY.
+_DEFAULT_BEAT_RENDER_CONCURRENCY = 2
+
+
+def _max_beat_concurrency() -> int:
+    try:
+        return max(1, int(os.getenv("REEL_STITCH_CONCURRENCY", str(_DEFAULT_BEAT_RENDER_CONCURRENCY))))
+    except ValueError:
+        return _DEFAULT_BEAT_RENDER_CONCURRENCY
+
 
 TARGET_W = CANVAS_W
 TARGET_H = CANVAS_H
@@ -159,6 +173,38 @@ async def _render_beat(
         )
 
 
+async def _render_beats(
+    beats: list[Beat],
+    artifacts_by_idx: dict[int, BeatArtifact],
+    out_dir: Path,
+    *,
+    concurrency: int | None = None,
+) -> list[Path]:
+    """Render every beat's silent 1080×1920 clip and return their paths in beat order.
+
+    Concurrency is capped by a semaphore (``concurrency`` or ``_max_beat_concurrency()``)
+    so a many-beat reel cannot spawn N full-resolution ffmpeg encodes at once and get
+    OOM-killed (SIGKILL/-9) on a memory-limited node.
+    """
+    sem = asyncio.Semaphore(concurrency if concurrency is not None else _max_beat_concurrency())
+    clip_paths: list[Path] = []
+    jobs: list[asyncio.Task[None]] = []
+
+    async def _bounded(beat: Beat, artifact: BeatArtifact, out_path: Path) -> None:
+        async with sem:
+            await _render_beat(beat=beat, artifact=artifact, out_path=out_path)
+
+    for beat in beats:
+        artifact = artifacts_by_idx.get(beat.idx)
+        if artifact is None:
+            raise RuntimeError(f"stitch: no artifact found for beat idx={beat.idx}")
+        out_clip = out_dir / f"beat-{beat.idx:02d}-silent.mp4"
+        clip_paths.append(out_clip)
+        jobs.append(asyncio.create_task(_bounded(beat, artifact, out_clip)))
+    await asyncio.gather(*jobs)
+    return clip_paths
+
+
 # ───── Single-pass final assembly ────────────────────────────────────
 
 
@@ -268,23 +314,10 @@ async def stitch_reel(
     else:
         write_reel_ass(cards, reel_ass, font_name=font_family)
 
-    # Step 2 — render each beat's SILENT clip in parallel.
-    clip_paths: list[Path] = []
-    render_jobs: list[asyncio.Task[None]] = []
-    for beat in beats:
-        artifact = artifacts_by_idx.get(beat.idx)
-        if artifact is None:
-            raise RuntimeError(
-                f"stitch: no artifact found for beat idx={beat.idx}"
-            )
-        out_clip = out_dir / f"beat-{beat.idx:02d}-silent.mp4"
-        clip_paths.append(out_clip)
-        render_jobs.append(
-            asyncio.create_task(
-                _render_beat(beat=beat, artifact=artifact, out_path=out_clip)
-            )
-        )
-    await asyncio.gather(*render_jobs)
+    # Step 2 — render each beat's SILENT clip, with BOUNDED concurrency (see
+    # _render_beats): a semaphore caps simultaneous encodes so a many-beat reel
+    # can't OOM-kill ffmpeg (SIGKILL/-9) on a memory-limited node.
+    clip_paths = await _render_beats(beats, artifacts_by_idx, out_dir)
 
     # Step 3 — single ffmpeg invocation.
     final = out_dir / "reel.mp4"
