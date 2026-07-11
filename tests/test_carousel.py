@@ -147,6 +147,13 @@ async def test_short_text_passes_through():
     assert extract._fit_text_body("short note") == "short note"
 
 
+def test_research_to_carousel_is_registered():
+    import reel_af.app as app_module
+
+    names = [r["wrapper"].__name__ for r in app_module.reel.reasoners]
+    assert "research_to_carousel" in names
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images

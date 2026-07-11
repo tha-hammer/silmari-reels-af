@@ -736,6 +736,34 @@ async def composite_to_reel(
 
 
 # ════════════════════════════════════════════════════════════════════
+# ENTRY REASONER 4 — Research/Text → Carousel
+# ════════════════════════════════════════════════════════════════════
+
+
+@reel.reasoner()
+async def research_to_carousel(
+    text: str,
+    preset: str = "carousel-default",
+    slide_count: int | None = None,
+    model: str | None = None,
+    out_dir: str | None = None,
+    *,
+    provider=None,
+    storage=None,
+    distiller=None,
+    prompt_planner=None,
+    _generate_frame=None,
+) -> dict:
+    """Text/research document to an ordered image carousel."""
+    return {
+        "run_id": uuid.uuid4().hex[:8],
+        "preset": preset,
+        "out_dir": out_dir,
+        "slides": [],
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
 # Shared downstream orchestrator
 # ════════════════════════════════════════════════════════════════════
 
