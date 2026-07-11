@@ -56,6 +56,17 @@ async def test_default_crop_still_9x16(tmp_path: Path):
         assert image.size == (720, 1280)
 
 
+def test_carousel_default_preset_is_4x5_portrait():
+    from reel_af.render.presets import load_preset, preset_names
+
+    assert "carousel-default" in preset_names()
+    cfg = load_preset("carousel-default")
+    assert (cfg["canvas_w"], cfg["canvas_h"]) == (1080, 1350)
+    assert cfg["slide_count"] >= 1
+    assert cfg["kind"] == "carousel"
+    assert cfg.get("overlay") not in {"middle_third", "lower_third"}
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images
