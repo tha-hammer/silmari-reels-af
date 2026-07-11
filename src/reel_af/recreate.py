@@ -85,7 +85,8 @@ def compose_recreate_prompt(original_prompt: str, note: str) -> str:
     adjustment ON TOP of the established scene, not a replacement. This is the
     single place prompt+note is assembled — callers never re-concatenate.
     """
-    if not (note or "").strip():
+    cleaned_note = (note or "").strip()
+    if not cleaned_note:
         raise ValueError("recreate: note is empty or whitespace-only")
     # Compose with the RAW note (validate on the stripped value only): ISC-18 requires
     # the note to survive verbatim as a substring, so leading/trailing whitespace the
@@ -186,6 +187,7 @@ async def recreate_slide(
     )
 
     # register-after-success: only successful premium spend consumes a cap slot.
-    if record.get("status") == "ok":
+    status = record.get("status")
+    if status == "ok":
         guard.register(carousel_id)
     return record
