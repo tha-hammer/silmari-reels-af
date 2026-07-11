@@ -441,6 +441,10 @@ async def article_to_reel(
         f"reel-af article: run {run_id} done → {final['video_path']}",
         tags=["reel", "article", "done"],
     )
+    # T10: deliver the reel out via the shared bucket so the browser can download it.
+    from reel_af.storage import upload_reel
+
+    download_url = await asyncio.to_thread(upload_reel, final["video_path"], run_id=run_id)
     return {
         **final,
         "source": "article",
@@ -450,6 +454,7 @@ async def article_to_reel(
         "content_mode": essence["content_mode"],
         "domain": essence["domain"],
         "run_id": run_id,
+        **({"download_url": download_url} if download_url else {}),
         "timings_s": timings,
     }
 
@@ -586,6 +591,10 @@ async def topic_to_reel(
         f"reel-af topic: run {run_id} done → {final['video_path']}",
         tags=["reel", "topic", "done"],
     )
+    # T10: deliver the reel out via the shared bucket so the browser can download it.
+    from reel_af.storage import upload_reel
+
+    download_url = await asyncio.to_thread(upload_reel, final["video_path"], run_id=run_id)
     return {
         **final,
         "source": "topic",
@@ -601,6 +610,7 @@ async def topic_to_reel(
         "all_candidates": all_candidates,
         "all_narrations": [s["narration"] for s in scripts],
         "run_id": run_id,
+        **({"download_url": download_url} if download_url else {}),
         "timings_s": timings,
     }
 
