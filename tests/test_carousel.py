@@ -259,6 +259,32 @@ async def test_planner_wrong_count_raises(tmp_path: Path, monkeypatch):
         )
 
 
+async def test_plan_carousel_prompts_returns_exactly_n():
+    import reel_af.app as app_module
+
+    class _PromptApp:
+        def __init__(self):
+            self.ai_calls = []
+
+        async def ai(self, *, system, user, schema):
+            self.ai_calls.append({"system": system, "user": user, "schema": schema})
+            return ["prompt A", "prompt B", "prompt C", "extra"]
+
+    essence = Essence(
+        core_claim="c",
+        mechanism="m",
+        evidence=["e"],
+        content_mode="general",
+        domain="tech",
+    )
+    app = _PromptApp()
+
+    prompts = await app_module.plan_carousel_prompts(app, essence, 3)
+
+    assert prompts == ["prompt A", "prompt B", "prompt C"]
+    assert app.ai_calls and app.ai_calls[0]["schema"] == list[str]
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images

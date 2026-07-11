@@ -61,6 +61,7 @@ from agentfield.media_providers import OpenRouterProvider  # noqa: E402
 # the fixed behaviour. Module is idempotent.
 import reel_af.sdk_patches  # noqa: E402, F401
 from reel_af.agents.extract import essence_from_text  # noqa: E402
+from reel_af.models import Essence  # noqa: E402
 from reel_af.render.images import generate_first_frame  # noqa: E402
 from reel_af.render.presets import load_preset  # noqa: E402
 
@@ -782,6 +783,39 @@ def _slide_record(
     if error is not None:
         record["error"] = error
     return record
+
+
+_CAROUSEL_PROMPT_SYSTEM = (
+    "You are an image-prompt planner for a still-image carousel. Given the "
+    "distilled essence of a document, produce exactly N ordered image prompts "
+    "one per slide. Each prompt is a self-contained visual scene description "
+    "that carries the claim, mechanism, or evidence. Do not request text, "
+    "letters, captions, charts with readable labels, or UI copy in the image."
+)
+
+
+async def plan_carousel_prompts(planner_app: Any, essence: Essence, count: int) -> list[str]:
+    """Turn an Essence into ordered still-image prompts for a carousel."""
+    n = max(1, int(count))
+    user = (
+        f"N = {n}\n"
+        f"CORE CLAIM: {essence.core_claim}\n"
+        f"MECHANISM: {essence.mechanism}\n"
+        f"EVIDENCE: {'; '.join(essence.evidence)}\n"
+        f"CONTENT MODE: {essence.content_mode}\n"
+        f"DOMAIN: {essence.domain}"
+    )
+    raw = await planner_app.ai(
+        system=_CAROUSEL_PROMPT_SYSTEM,
+        user=user,
+        schema=list[str],
+    )
+    if isinstance(raw, str):
+        raw_prompts = [raw]
+    else:
+        raw_prompts = list(raw or [])
+    prompts = [prompt.strip() for prompt in raw_prompts if prompt and prompt.strip()]
+    return prompts[:n]
 
 
 async def _render_one_slide(
