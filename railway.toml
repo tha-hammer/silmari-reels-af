@@ -1,0 +1,14 @@
+# reel-af render agent - private Railway service (control-plane callback only).
+# Set Root Directory = silmari-reels-af for this service.
+# Env: OPENROUTER_API_KEY, AGENTFIELD_SERVER=http://control-plane.railway.internal:8080,
+#      AGENT_CALLBACK_URL=http://reel-af.railway.internal:8002, PORT=8002,
+#      CHROMIUM_PATH=/usr/bin/chromium
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 120
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5
