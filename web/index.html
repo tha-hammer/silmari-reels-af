@@ -18,13 +18,57 @@
     "uploadPath": "/api/v1/uploads",
     "healthPath": "/health",
     "pollIntervalMs": 2500,
-    "timeoutMs": 1800000
+    "timeoutMs": 1800000,
+    "submitPendingTimeoutMs": 120000
   },
   "presets": [
-    { "id": "middle-third-dynamic", "label": "MIDDLE-THIRD", "sub": "vertical · script cards", "ratio": "9:16", "target": "reel-af.reel_composite_to_reel" },
-    { "id": "horizontal-youtube-lowerthird", "label": "LOWER-THIRD", "sub": "16:9 · yt title + zoom", "ratio": "16:9", "target": "reel-af.reel_composite_to_reel" },
+    { "id": "middle-third-dynamic", "label": "MIDDLE-THIRD", "sub": "vertical · script cards", "ratio": "9:16", "target": "reel-af.reel_composite_to_reel",
+      "details": {
+        "description": "Vertical 2-minute reels with a script-synced Remotion middle-third text overlay that animates in and out per phrase.",
+        "reelSeconds": 120,
+        "canvas": { "w": 1080, "h": 1920 },
+        "overlay": "middle_third",
+        "remotionComposition": "MiddleThird",
+        "overlayAccent": "#7E22CE",
+        "phrase": {
+          "maxWords": 6,
+          "maxDurationS": 3.2,
+          "gapS": 0.4,
+          "holdS": 0.6,
+          "uppercase": false,
+          "verticalAnchor": 0.32,
+          "captionsBurnedSource": false
+        }
+      }
+    },
+    { "id": "horizontal-youtube-lowerthird", "label": "LOWER-THIRD", "sub": "16:9 · yt title + zoom", "ratio": "16:9", "target": "reel-af.reel_composite_to_reel",
+      "details": {
+        "description": "Horizontal 16:9 YouTube reels: Remotion lower-third title (fades after 6s), Ken Burns zoom, full-frame image cut-ins every ~30s, safe-zone captions.",
+        "reelSeconds": 180,
+        "canvas": { "w": 1920, "h": 1080 },
+        "overlay": "lower_third",
+        "remotionComposition": "LowerThird",
+        "overlayAccent": "#7E22CE",
+        "lowerThird": { "durationS": 6.0 },
+        "images": { "placement": "full", "count": 6, "everyS": 30, "zoom": true }
+      }
+    },
     { "id": "topic", "label": "TOPIC", "sub": "phrase → reel", "ratio": "9:16", "target": "reel-af.reel_topic_to_reel", "kind": "topic" }
   ],
+  "finishDefaults": {
+    "readOnly": true,
+    "scope": "global_finish_stage_defaults",
+    "geometry": {
+      "canvas": { "w": 1080, "h": 1920 },
+      "centerX": 540,
+      "captionSafeY": 1344,
+      "dividerY": 772,
+      "imageRegion": { "x": 0, "y": 800, "w": 1080, "h": 1120 }
+    },
+    "captions": { "maxWords": 4, "maxDurationS": 1.8, "gapS": 0.35, "uppercase": true },
+    "images": { "count": 3, "placement": "full", "minDurationS": 2.0, "maxDurationS": 3.0, "edgeGuardS": 2.0 },
+    "encode": { "crf": 19, "preset": "fast", "contextOnly": true }
+  },
   "copy": {
     "mark": "REEL-AF",
     "sub": "CUTTING ROOM",
@@ -52,6 +96,9 @@
     "healthProbeMs": 20000,
     "idempotentPendingCode": "idempotent_request_pending",
     "defaultRetryAfterMs": 3000,
+    "countDefault": 1,
+    "countMin": 1,
+    "countMax": 12,
     "terminalFailureStatuses": ["failed", "cancelled", "canceled", "error"],
     "statusStageByExecutionStatus": {
       "queued": "queued", "pending": "queued",
@@ -240,6 +287,29 @@
   .preset .meta .l { font-family: var(--disp); font-weight: 700; font-size: 14px; letter-spacing: 0.02em; }
   .preset .meta .s { font-family: var(--body); font-size: 11px; color: var(--print-dim); margin-top: 2px; }
 
+  /* config detail rows — preset metadata + read-only finish defaults */
+  .detail-rows { padding: 6px 18px 16px; display: flex; flex-direction: column; gap: 4px; }
+  .detail-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; min-height: 20px; padding: 2px 0; border-bottom: 1px dashed var(--line); }
+  .detail-row:last-child { border-bottom: none; }
+  .detail-row .dk { font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--print-fog); flex: none; }
+  .detail-row .dv { font-family: var(--body); font-size: 12px; color: var(--print-dim); text-align: right; }
+  .panel.readonly h3::after { content: " · READ-ONLY"; color: var(--print-fog); }
+  .panel .scopeNote { font-family: var(--body); font-size: 11px; color: var(--print-fog); padding: 4px 18px 0; }
+
+  /* count stepper — composite-only "how many reels" job setting */
+  .jobsettings { padding: 14px 18px 18px; }
+  .count-ctl { display: flex; align-items: stretch; gap: 0; border: 1px solid var(--line-2); background: var(--film-2); width: 152px; height: 44px; }
+  .count-ctl button { width: 44px; flex: none; background: none; border: none; color: var(--print); font-family: var(--mono); font-size: 20px; line-height: 1; cursor: pointer; transition: color .2s, background .2s; }
+  .count-ctl button:hover { color: var(--grease); }
+  .count-ctl input {
+    flex: 1; min-width: 0; text-align: center; background: none; border: none;
+    border-left: 1px solid var(--line); border-right: 1px solid var(--line);
+    color: var(--print); font-family: var(--mono); font-size: 16px; outline: none;
+    -moz-appearance: textfield;
+  }
+  .count-ctl input::-webkit-outer-spin-button, .count-ctl input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  .count-note { font-family: var(--mono); font-size: 10px; color: var(--print-fog); margin-top: 8px; letter-spacing: 0.06em; }
+
   /* ROLL button */
   .roll {
     width: 100%; margin-top: 18px; font-family: var(--disp); font-weight: 800; font-size: 19px;
@@ -354,6 +424,23 @@
         <div class="panel">
           <h3>Format</h3>
           <div class="presets" id="presets"></div>
+          <div class="detail-rows" id="presetDetails"></div>
+        </div>
+        <div class="panel" id="jobSettings">
+          <h3>Job Settings</h3>
+          <div class="jobsettings">
+            <div class="count-ctl">
+              <button type="button" id="countDec" aria-label="fewer reels">−</button>
+              <input type="number" id="countInput" inputmode="numeric" aria-label="how many reels to cut" />
+              <button type="button" id="countInc" aria-label="more reels">+</button>
+            </div>
+            <div class="count-note" id="countNote">how many composite reels to cut</div>
+          </div>
+        </div>
+        <div class="panel readonly" id="finishPanel">
+          <h3>Global Polished Defaults</h3>
+          <div class="scopeNote">Finish-stage output defaults — not editable per job.</div>
+          <div class="detail-rows" id="finishDefaults"></div>
         </div>
         <button class="roll" id="roll"><span class="rec"></span><span id="rollLabel">ROLL</span></button>
         <div class="hint" id="hint">select a source + format, then roll</div>
@@ -386,7 +473,28 @@
   "use strict";
   const CFG = JSON.parse(document.getElementById("config").textContent);
   const $ = (id) => document.getElementById(id);
-  const state = { mode: "file", preset: CFG.presets[0], file: null, busy: false };
+
+  // ── named constants (no bare literals for modes / kinds / statuses) ──
+  const MODE_FILE = "file";
+  const MODE_URL = "url";
+  const KIND_TOPIC = "topic";
+  const TARGET_TOPIC = "reel-af.reel_topic_to_reel";
+  const TARGET_COMPOSITE = "reel-af.reel_composite_to_reel";
+  const STATUS_UNAUTHORIZED = 401;
+  const STATUS_CONFLICT = 409;
+  const STATUS_TOO_MANY_REQUESTS = 429;
+  const SERVER_ERROR_MIN = 500;
+  const SERVER_ERROR_MAX = 599;
+  const MILLISECONDS_PER_SECOND = 1000;
+  const NO_DOWNLOAD_HREF = "#";
+
+  const state = {
+    mode: MODE_FILE,
+    preset: CFG.presets[0],
+    file: null,
+    busy: false,
+    count: CFG.ui.countDefault,
+  };
 
   /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
   const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -413,7 +521,14 @@
       el.className = "preset";
       el.setAttribute("aria-selected", p.id === state.preset.id);
       el.innerHTML = `<span class="ratio">${p.ratio}</span><span class="meta"><span class="l">${p.label}</span><span class="s">${p.sub}</span></span>`;
-      el.onclick = () => { state.preset = p; renderPresets(); applyPresetShape(); };
+      el.onclick = () => {
+        state.preset = p;
+        renderPresets();
+        applyPresetShape();
+        renderPresetDetails(p);
+        renderJobSettings();
+        setCount(state.count);   // preserve current count, re-clamped to bounds
+      };
       $("presets").appendChild(el);
     });
   }
@@ -422,15 +537,104 @@
     // The topic preset has no video source — reveal the slate and reuse it as a
     // topic-phrase box (buildInput reads $("url") for topic). Restore the URL
     // placeholder for video presets.
-    if (state.preset.kind === "topic") {
-      state.mode = "url";
-      document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x.dataset.mode === "url"));
+    if (state.preset.kind === KIND_TOPIC) {
+      state.mode = MODE_URL;
+      document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x.dataset.mode === MODE_URL));
       $("slate").classList.add("on");
       $("url").placeholder = "a topic or phrase → reel";
       $("dropHint").textContent = "Type a topic below, then roll.";
     } else {
       $("url").placeholder = CFG.copy.urlPlaceholder;
     }
+  }
+
+  /* ── preset detail rows (config-sourced, textContent only — no innerHTML) ── */
+  function renderPresetDetails(p) {
+    const box = $("presetDetails");
+    while (box.firstChild) box.removeChild(box.firstChild);
+    const d = p && p.details ? p.details : null;
+    if (!d) return;
+    presetDetailRows(d).forEach((row) => {
+      const el = document.createElement("div");
+      el.className = "detail-row";
+      const k = document.createElement("span");
+      k.className = "dk";
+      k.textContent = row[0];
+      const v = document.createElement("span");
+      v.className = "dv";
+      v.textContent = row[1];
+      el.appendChild(k);
+      el.appendChild(v);
+      box.appendChild(el);
+    });
+  }
+  function presetDetailRows(d) {
+    const rows = [];
+    if (d.description) rows.push(["What", d.description]);
+    if (d.reelSeconds != null) rows.push(["Length", `${d.reelSeconds}s`]);
+    if (d.canvas) rows.push(["Canvas", `${d.canvas.w}×${d.canvas.h}`]);
+    if (d.overlay) rows.push(["Overlay", d.overlay]);
+    if (d.remotionComposition) rows.push(["Composition", d.remotionComposition]);
+    if (d.phrase) {
+      if (d.phrase.maxWords != null) rows.push(["Phrase max words", String(d.phrase.maxWords)]);
+      if (d.phrase.maxDurationS != null) rows.push(["Phrase max seconds", `${d.phrase.maxDurationS}s`]);
+      if (d.phrase.verticalAnchor != null) rows.push(["Vertical anchor", String(d.phrase.verticalAnchor)]);
+    }
+    if (d.lowerThird && d.lowerThird.durationS != null) rows.push(["Lower-third seconds", `${d.lowerThird.durationS}s`]);
+    if (d.images) {
+      if (d.images.count != null) rows.push(["Image cut-ins", String(d.images.count)]);
+      if (d.images.everyS != null) rows.push(["Image every", `${d.images.everyS}s`]);
+      if (d.images.placement) rows.push(["Image placement", d.images.placement]);
+    }
+    return rows;
+  }
+  function appendDetailRow(parent, label, value) {
+    const el = document.createElement("div");
+    el.className = "detail-row";
+    const k = document.createElement("span");
+    k.className = "dk";
+    k.textContent = label;
+    const v = document.createElement("span");
+    v.className = "dv";
+    v.textContent = value;
+    el.appendChild(k);
+    el.appendChild(v);
+    parent.appendChild(el);
+  }
+
+  /* ── global finish defaults (read-only context; never submitted) ── */
+  function renderFinishDefaults() {
+    const box = $("finishDefaults");
+    while (box.firstChild) box.removeChild(box.firstChild);
+    const f = CFG.finishDefaults;
+    const g = f.geometry, c = f.captions, im = f.images, en = f.encode;
+    const rows = [
+      ["Canvas", `${g.canvas.w}×${g.canvas.h}`],
+      ["Center X", String(g.centerX)],
+      ["Caption anchor Y", String(g.captionSafeY)],
+      ["Banner anchor Y", String(g.dividerY)],
+      ["Image region", `${g.imageRegion.x},${g.imageRegion.y} · ${g.imageRegion.w}×${g.imageRegion.h}`],
+      ["Captions", `${c.maxWords} words · ${c.maxDurationS}s · ${c.gapS}s gap`],
+      ["Images", `${im.count} · ${im.placement} · ${im.minDurationS}-${im.maxDurationS}s · guard ${im.edgeGuardS}s`],
+      ["Encode", `CRF ${en.crf} · ${en.preset}`],
+    ];
+    rows.forEach((row) => appendDetailRow(box, row[0], row[1]));
+  }
+
+  /* ── composite count control (job setting; topic mode hides it) ── */
+  function clampCount(n) {
+    const v = Number.isFinite(n) ? Math.round(n) : CFG.ui.countDefault;
+    return Math.min(CFG.ui.countMax, Math.max(CFG.ui.countMin, v));
+  }
+  function selectedCount() {
+    return clampCount(parseInt($("countInput").value, 10));
+  }
+  function setCount(next) {
+    state.count = clampCount(next);
+    $("countInput").value = String(state.count);
+  }
+  function renderJobSettings() {
+    $("jobSettings").style.display = (state.preset.kind === KIND_TOPIC) ? "none" : "";
   }
 
   /* ── mode toggle ── */
@@ -513,10 +717,10 @@
   }
 
   function buildInput(handle) {
-    if (state.preset.kind === "topic") return { topic: $("url").value.trim() };
-    if (state.mode === "file") return { source: handle, preset: state.preset.id };
+    if (state.preset.kind === KIND_TOPIC) return { topic: $("url").value.trim() };
+    if (state.mode === MODE_FILE) return { source: handle, preset: state.preset.id, count: selectedCount() };
     const u = $("url").value.trim();
-    return { url: u, source: u, preset: state.preset.id };
+    return { url: u, preset: state.preset.id, count: selectedCount() };
   }
 
   function goToLogin() {
@@ -574,19 +778,25 @@
   }
 
   async function execute(target, input, clientRequestId) {
-    // Retry the SAME idempotency key on 409 pending (server-deduped, no double dispatch).
+    // Retry the SAME idempotency key on 409 pending (server-deduped, no double
+    // dispatch), but bound the wait: after submitPendingTimeoutMs stop retrying
+    // and report a timeout. This does NOT cancel any CP work already accepted.
+    const submitPendingStartedAt = Date.now();
     for (;;) {
       const r = await fetch(url(CFG.api.executePath, { target }), {
         method: "POST",
         headers: { "Content-Type": "application/json", "Idempotency-Key": clientRequestId },
         body: JSON.stringify({ input }),
       });
-      if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+      if (r.status === STATUS_UNAUTHORIZED) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
       const body = await r.text();
       const j = (() => { try { return JSON.parse(body); } catch { return {}; } })();
-      if (r.status === 409 && j.code === CFG.ui.idempotentPendingCode) {
-        const retryMs = (Number(r.headers.get("Retry-After")) * 1000) || CFG.ui.defaultRetryAfterMs;
-        logLine(`submit pending — retrying in ${retryMs / 1000}s`);
+      if (r.status === STATUS_CONFLICT && j.code === CFG.ui.idempotentPendingCode) {
+        if (Date.now() - submitPendingStartedAt > CFG.api.submitPendingTimeoutMs) {
+          throw new Error("submit still pending — timed out (already-accepted server work is not cancelled)");
+        }
+        const retryMs = retryAfterMs(r);
+        logLine(`submit pending — retrying in ${retryMs / MILLISECONDS_PER_SECOND}s`);
         await sleep(retryMs);
         continue;
       }
@@ -603,8 +813,24 @@
     while (true) {
       if (Date.now() - start > CFG.api.timeoutMs) throw new Error("timed out");
       await sleep(CFG.api.pollIntervalMs);
+      let pollResponse;
+      try { pollResponse = await fetch(url(CFG.api.pollPath, { id })); }
+      catch { logLine("poll error — retrying"); continue; }
+      if (pollResponse.status === STATUS_UNAUTHORIZED) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+      // Transient CP backpressure/outage (429 / 5xx) preserved by the server:
+      // honor Retry-After and keep polling within the overall timeout.
+      if (isTransientPollStatus(pollResponse.status)) {
+        const waitMs = retryAfterMs(pollResponse);
+        logLine(`transient ${pollResponse.status} — waiting ${waitMs / MILLISECONDS_PER_SECOND}s`);
+        await sleep(waitMs);
+        continue;
+      }
+      if (!pollResponse.ok) {
+        const errBody = await pollResponse.text().catch(() => "");
+        throw new Error(`poll failed (${pollResponse.status}): ${errBody.slice(0, CFG.ui.maxErrorBodyChars)}`);
+      }
       let j;
-      try { j = await (await fetch(url(CFG.api.pollPath, { id }))).json(); }
+      try { j = await pollResponse.json(); }
       catch { logLine("poll error — retrying"); continue; }
       const status = String(j.status || "?");
       if (status !== last) { last = status; mapStatus(status); logLine(`status → ${status}`); }
@@ -620,6 +846,16 @@
     }
   }
 
+  function retryAfterMs(response) {
+    const seconds = Number(response.headers.get("Retry-After"));
+    return (Number.isFinite(seconds) && seconds > 0)
+      ? seconds * MILLISECONDS_PER_SECOND
+      : CFG.ui.defaultRetryAfterMs;
+  }
+  function isTransientPollStatus(status) {
+    return status === STATUS_TOO_MANY_REQUESTS || (status >= SERVER_ERROR_MIN && status <= SERVER_ERROR_MAX);
+  }
+
   function mapStatus(status) {
     advanceTo(CFG.ui.statusStageByExecutionStatus[status] || "render");
   }
@@ -632,9 +868,9 @@
     $("resultPath").textContent = path;
     // Link ONLY to the delivered reel (download_url). Never fall back to result.url —
     // for a file/composite reel that is the uploaded SOURCE, not the output (T10).
-    const link = result.download_url || (typeof path === "string" && path.startsWith("http") ? path : "#");
+    const link = result.download_url || (typeof path === "string" && path.startsWith("http") ? path : NO_DOWNLOAD_HREF);
     const a = $("resultLink"); a.href = link;
-    if (link === "#") { a.style.display = "none"; } else { a.style.display = ""; }
+    if (link === NO_DOWNLOAD_HREF) { a.style.display = "none"; } else { a.style.display = ""; }
     $("result").classList.add("on");
     logLine("reel struck — print ready", "ok");
   }
@@ -663,8 +899,21 @@
 
   $("roll").onclick = roll;
 
+  /* ── count stepper wiring ── */
+  $("countInput").min = String(CFG.ui.countMin);
+  $("countInput").max = String(CFG.ui.countMax);
+  $("countDec").onclick = () => setCount(state.count - 1);
+  $("countInc").onclick = () => setCount(state.count + 1);
+  $("countInput").addEventListener("change", () => setCount(selectedCount()));
+
   /* ── boot ── */
-  renderPresets(); applyPresetShape(); renderTrack();
+  renderPresets();
+  applyPresetShape();
+  renderPresetDetails(state.preset);
+  renderJobSettings();
+  renderFinishDefaults();
+  setCount(CFG.ui.countDefault);
+  renderTrack();
   probe(); setInterval(probe, CFG.ui.healthProbeMs);
 })();
 </script>

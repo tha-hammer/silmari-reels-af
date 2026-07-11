@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 
+import pytest
 import server
 from conftest import (
     ORG_ID,
@@ -185,3 +186,248 @@ def test_empty_topic_is_400():
     deps = make_deps(identity=FakeIdentity(make_ctx()))
     resp = _client(deps).post(TOPIC_URL, json={"input": {"topic": "   "}})
     assert resp.status_code == 400
+
+
+# ─────────────────── Behavior 1: composite count is a typed job setting ───────────────────
+
+TOPIC_TARGET = "reel-af.reel_topic_to_reel"
+COMPOSITE_TARGET = "reel-af.reel_composite_to_reel"
+
+
+def test_composite_url_count_is_forwarded_as_integer():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_count"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic", "count": 3}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched == {"input": {"url": "https://youtube.com/watch?v=abc",
+                                    "preset": "middle-third-dynamic", "count": 3}}
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params == {
+        "target": COMPOSITE_TARGET,
+        "source_mode": "url",
+        "preset": "middle-third-dynamic",
+        "count": 3,
+    }
+
+
+def test_composite_file_count_survives_presign_and_drops_raw_source():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_c2"}, {}))
+    uploads = FakeUploadStore(presigned="https://bucket.example/signed/clip.mp4?sig=xyz")
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
+    )
+    handle = f"{ORG_ID}/abc-clip.mp4"
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"source": handle, "preset": "middle-third-dynamic", "count": 2}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"] == {
+        "url": "https://bucket.example/signed/clip.mp4?sig=xyz",
+        "preset": "middle-third-dynamic",
+        "count": 2,
+    }
+    assert "source" not in dispatched["input"]
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params == {
+        "target": COMPOSITE_TARGET,
+        "source_mode": "file",
+        "preset": "middle-third-dynamic",
+        "count": 2,
+    }
+
+
+def test_composite_url_missing_count_defaults_to_one():
+    repo = FakeReelJobRepo()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc", "preset": "middle-third-dynamic"}},
+    )
+
+    assert resp.status_code == 202
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params["count"] == 1
+
+
+def test_composite_file_missing_count_defaults_to_one():
+    repo = FakeReelJobRepo()
+    uploads = FakeUploadStore(presigned="https://bucket.example/signed/clip.mp4?sig=xyz")
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, uploads=uploads)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"source": f"{ORG_ID}/abc-clip.mp4", "preset": "middle-third-dynamic"}},
+    )
+
+    assert resp.status_code == 202
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params["count"] == 1
+
+
+def test_composite_count_numeric_string_normalizes_to_int():
+    repo = FakeReelJobRepo()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic", "count": " 3 "}},
+    )
+
+    assert resp.status_code == 202
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params["count"] == 3
+
+
+@pytest.mark.parametrize("bad_count", [0, -1, "two", "1.5", 1.5, True, 13])
+def test_composite_rejects_invalid_count_before_row_or_cp(bad_count):
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic", "count": bad_count}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_count"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_topic_with_count_is_unsupported_input_field():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        TOPIC_URL, json={"input": {"topic": "black holes", "count": 3}}
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "unsupported_input_field"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+# ─────────── Behavior 2: submit boundary rejects unsupported config fields ───────────
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["out_dir", "finish_config", "canvas_w", "whisper_model", "encode_crf",
+     "remotion_project_dir", "totally_unknown"],
+)
+def test_composite_url_unsupported_field_rejected(field):
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic", field: "x"}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "unsupported_input_field"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_file_mode_unsupported_field_rejects_before_presign_row_or_cp():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    uploads = FakeUploadStore()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo,
+                     control_plane=cp, uploads=uploads)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"source": f"{ORG_ID}/clip.mp4",
+                        "preset": "middle-third-dynamic",
+                        "finish_config": {"caption_safe_y": 1200}}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "unsupported_input_field"
+    assert uploads.presign_calls == []
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_composite_url_source_mismatch_is_invalid_source():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "source": "https://vimeo.com/other",
+                        "preset": "middle-third-dynamic"}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_source"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_composite_url_legacy_source_equal_is_accepted_and_not_forwarded():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_dup"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+    same = "https://youtube.com/watch?v=abc"
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": same, "source": same, "preset": "middle-third-dynamic"}},
+    )
+
+    assert resp.status_code == 202
+    _ctx, submission, *_ = repo.inserted[0]
+    assert "source" not in submission.params
+    _target, dispatched = cp.dispatch_calls[0]
+    assert "source" not in dispatched["input"]
+    assert dispatched["input"]["url"] == same
+
+
+def test_unauthenticated_invalid_body_returns_401_before_validation():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(
+        identity=FakeIdentity(error=Unauthorized("no session")),
+        reel_jobs=repo,
+        control_plane=cp,
+    )
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "not-a-url", "finish_config": {}}},
+    )
+
+    assert resp.status_code == 401
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_topic_canonical_params_are_exact():
+    repo = FakeReelJobRepo()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo)
+
+    resp = _client(deps).post(TOPIC_URL, json={"input": {"topic": "black holes"}})
+
+    assert resp.status_code == 202
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params == {"target": TOPIC_TARGET}

@@ -27,6 +27,26 @@ ALLOWLISTED_TARGETS = frozenset({TARGET_TOPIC, TARGET_COMPOSITE})
 
 TITLE_MAX = 120
 
+# Composite "count" contract — how many composite reels to cut (plan Behavior 1).
+# Kept next to the target constants; mirrored by CFG.ui in web/index.html.
+COMPOSITE_COUNT_DEFAULT = 1
+COMPOSITE_COUNT_MIN = 1
+COMPOSITE_COUNT_MAX = 12
+
+# Idempotency metadata is accepted for every target but never persisted/forwarded.
+_METADATA_INPUT_KEYS = frozenset({"client_request_id"})
+
+# Target-specific allowed input keys (plan Behavior 2). Anything else under
+# ``input`` is an authenticated UI-boundary hardening reject (unsupported_input_field).
+TOPIC_ALLOWED_INPUT_KEYS = frozenset({"topic"}) | _METADATA_INPUT_KEYS
+# URL mode carries a legacy duplicate ``source`` (compat-only; must equal ``url``).
+COMPOSITE_URL_ALLOWED_INPUT_KEYS = (
+    frozenset({"url", "source", "preset", "count"}) | _METADATA_INPUT_KEYS
+)
+COMPOSITE_FILE_ALLOWED_INPUT_KEYS = (
+    frozenset({"source", "preset", "count"}) | _METADATA_INPUT_KEYS
+)
+
 # Forbidden at top level AND under ``input`` (plan §6). Client can never supply
 # ownership/identity — it is always server-derived.
 FORBIDDEN_IDENTITY_FIELDS = frozenset(
@@ -85,20 +105,69 @@ def _is_valid_url(value: str) -> bool:
 
 
 # Never forwarded to the control plane: identity fields + the idempotency key
-# (the key is ownership/dedup metadata, not reasoner input; plan B0.4).
+# (the key is ownership/dedup metadata, not reasoner input; plan B0.4). Canonical
+# ``cp_input``/``params`` are built from normalized locals below, so metadata can
+# never leak through — this set stays the documented forbidden-forward contract.
 _CP_STRIP = FORBIDDEN_IDENTITY_FIELDS | {"client_request_id"}
 
 
-def _clean_input(raw_input: dict) -> dict:
-    """Strip forbidden identity fields + idempotency key; the base CP-bound input."""
-    return {k: v for k, v in raw_input.items() if k not in _CP_STRIP}
+def _reject_unsupported_fields(raw_input: dict, allowed: frozenset[str]) -> None:
+    """Reject any per-job field outside the target's allowed set (plan Behavior 2)."""
+    for key in raw_input:
+        if key not in allowed:
+            raise BadRequest(f"unsupported input field: {key}", code="unsupported_input_field")
 
 
-def _sanitized_params(raw_input: dict, target: str, preset: str | None) -> dict:
-    params = _clean_input(raw_input)
-    params["target"] = target
+def _parse_composite_count(raw_input: dict) -> int:
+    """Normalize the composite ``count`` to an int in ``1..12`` (plan Behavior 1).
+
+    Missing → default. Accepts ``int`` (not ``bool``) and decimal-digit strings
+    like ``"3"`` / ``" 3 "``. Rejects booleans, floats, fractional/non-numeric
+    strings, and out-of-range values with ``invalid_count``.
+    """
+    if "count" not in raw_input:
+        return COMPOSITE_COUNT_DEFAULT
+    raw = raw_input["count"]
+    value: int | None = None
+    if isinstance(raw, bool):
+        value = None
+    elif isinstance(raw, int):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().isdigit():
+        value = int(raw.strip())
+    if value is None or value < COMPOSITE_COUNT_MIN or value > COMPOSITE_COUNT_MAX:
+        raise BadRequest(
+            f"count must be an integer in {COMPOSITE_COUNT_MIN}..{COMPOSITE_COUNT_MAX}",
+            code="invalid_count",
+        )
+    return value
+
+
+def _reject_legacy_source_mismatch(raw_input: dict, normalized_url: str) -> None:
+    """URL mode accepts a legacy duplicate ``source`` only when it equals the
+    normalized ``url``; a mismatch is ``invalid_source`` (plan Submit Canonicalization)."""
+    raw_source = raw_input.get("source")
+    if raw_source is None:
+        return
+    if not isinstance(raw_source, str) or raw_source.strip() != normalized_url:
+        raise BadRequest("legacy source must equal url", code="invalid_source")
+
+
+def _canonical_params(
+    target: str,
+    *,
+    source_mode: str | None = None,
+    preset: str | None = None,
+    count: int | None = None,
+) -> dict:
+    """Exact persisted ``submission.params`` — built from normalized values only."""
+    params: dict = {"target": target}
+    if source_mode is not None:
+        params["source_mode"] = source_mode
     if preset is not None:
         params["preset"] = preset
+    if count is not None:
+        params["count"] = count
     return params
 
 
@@ -106,7 +175,8 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
     """Validate + canonicalize a submit body into a ``ReelSubmission`` (plan §6).
 
     Raises ``BadRequest`` for unsupported target, invalid JSON shape, missing
-    ``input``, empty topic, invalid URL, missing upload handle, or any forbidden
+    ``input``, empty topic, invalid URL, missing upload handle, unsupported
+    per-job fields, invalid count, legacy source mismatch, or any forbidden
     identity field at top level or under ``input``.
     """
     if not isinstance(body, dict):
@@ -122,6 +192,7 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
     _reject_forbidden_identity(raw_input)
 
     if target == TARGET_TOPIC:
+        _reject_unsupported_fields(raw_input, TOPIC_ALLOWED_INPUT_KEYS)
         topic = raw_input.get("topic")
         if not isinstance(topic, str) or not topic.strip():
             raise BadRequest("topic must be a non-empty string", code="invalid_topic")
@@ -132,46 +203,56 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
             source_url=None,
             topic=topic,
             source_research_run_id=None,
-            params=_sanitized_params(raw_input, target, raw_input.get("preset")),
-            cp_input={**_clean_input(raw_input), "topic": topic},
+            params=_canonical_params(target),
+            cp_input={"topic": topic},
         )
 
-    # TARGET_COMPOSITE — URL mode (has url) or file mode (has source handle).
-    preset = raw_input.get("preset")
-    if not isinstance(preset, str) or not preset.strip():
-        raise BadRequest("preset must be a non-empty string", code="invalid_preset")
-    preset = preset.strip()
+    if target == TARGET_COMPOSITE:
+        preset = raw_input.get("preset")
+        if not isinstance(preset, str) or not preset.strip():
+            raise BadRequest("preset must be a non-empty string", code="invalid_preset")
+        preset = preset.strip()
 
-    raw_url = raw_input.get("url")
-    if raw_url is not None:
-        if not isinstance(raw_url, str) or not _is_valid_url(raw_url.strip()):
-            raise BadRequest("url must be a valid http(s) URL", code="invalid_url")
-        normalized = raw_url.strip()
-        host = urlparse(normalized).netloc
+        raw_url = raw_input.get("url")
+        if raw_url is not None:
+            # URL mode.
+            _reject_unsupported_fields(raw_input, COMPOSITE_URL_ALLOWED_INPUT_KEYS)
+            if not isinstance(raw_url, str) or not _is_valid_url(raw_url.strip()):
+                raise BadRequest("url must be a valid http(s) URL", code="invalid_url")
+            normalized = raw_url.strip()
+            _reject_legacy_source_mismatch(raw_input, normalized)
+            count = _parse_composite_count(raw_input)
+            return ReelSubmission(
+                target=target,
+                title=preset[:TITLE_MAX],
+                source_url=normalized,
+                topic=None,
+                source_research_run_id=None,
+                params=_canonical_params(target, source_mode="url", preset=preset, count=count),
+                cp_input={"url": normalized, "preset": preset, "count": count},
+            )
+
+        # File mode.
+        _reject_unsupported_fields(raw_input, COMPOSITE_FILE_ALLOWED_INPUT_KEYS)
+        handle = raw_input.get("source")
+        if not isinstance(handle, str) or not handle.strip():
+            raise BadRequest("file submit requires an upload handle", code="missing_source")
+        handle = handle.strip()
+        count = _parse_composite_count(raw_input)
         return ReelSubmission(
             target=target,
-            title=(preset or host)[:TITLE_MAX],
-            source_url=normalized,
+            title=preset[:TITLE_MAX],
+            source_url=None,
             topic=None,
             source_research_run_id=None,
-            params=_sanitized_params(raw_input, target, preset),
-            cp_input={**_clean_input(raw_input), "url": normalized},
+            params=_canonical_params(target, source_mode="file", preset=preset, count=count),
+            cp_input={"source": handle, "preset": preset, "count": count},
+            source_handle=handle,
         )
 
-    handle = raw_input.get("source")
-    if not isinstance(handle, str) or not handle.strip():
-        raise BadRequest("file submit requires an upload handle", code="missing_source")
-    handle = handle.strip()
-    return ReelSubmission(
-        target=target,
-        title=preset[:TITLE_MAX],
-        source_url=None,
-        topic=None,
-        source_research_run_id=None,
-        params=_sanitized_params(raw_input, target, preset),
-        cp_input=_clean_input(raw_input),
-        source_handle=handle,
-    )
+    # Unreachable: target is allowlisted above. Guard against a future target
+    # slipping past the branches without a canonicalizer.
+    raise BadRequest(f"unsupported target: {target}", code="unsupported_target")
 
 
 # ─────────────────────────── status normalization (plan §B12) ───────────────────────────

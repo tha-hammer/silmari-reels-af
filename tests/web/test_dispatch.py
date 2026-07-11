@@ -116,3 +116,40 @@ def test_attach_failure_after_acceptance_is_503_orphan():
     deps = make_deps(identity=FakeIdentity(make_ctx()), reel_jobs=repo, control_plane=cp)
     resp = _post(_client(deps), key="K")
     assert resp.status_code == 503
+
+
+# ── Behavior 3: idempotency metadata remains metadata ──
+def test_input_client_request_id_fallback_dedupes_without_header():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_body_key"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), reel_jobs=repo, control_plane=cp)
+    client = _client(deps)
+    body = {"input": {"topic": "black holes", "client_request_id": "BODY-K"}}
+
+    first = client.post(TOPIC_URL, json=body)
+    second = client.post(TOPIC_URL, json=body)
+
+    assert first.status_code == 202 and second.status_code == 202
+    assert len(cp.dispatch_calls) == 1
+    _ctx, submission, _job, _now, crid = repo.inserted[0]
+    assert crid == "BODY-K"
+    assert "client_request_id" not in submission.params
+    assert "client_request_id" not in cp.dispatch_calls[0][1]["input"]
+
+
+def test_idempotency_header_precedes_input_client_request_id():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_header_key"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        TOPIC_URL,
+        headers={"Idempotency-Key": "HEADER-K"},
+        json={"input": {"topic": "black holes", "client_request_id": "BODY-K"}},
+    )
+
+    assert resp.status_code == 202
+    _ctx, submission, _job, _now, crid = repo.inserted[0]
+    assert crid == "HEADER-K"
+    assert "client_request_id" not in submission.params
+    assert "client_request_id" not in cp.dispatch_calls[0][1]["input"]
