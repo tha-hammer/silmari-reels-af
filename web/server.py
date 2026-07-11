@@ -22,7 +22,13 @@ import re
 
 from deps import AppDeps, BadGateway, HttpError, NotFound, RepositoryUnavailable, default_deps
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
-from reel_jobs import TERMINAL_STATUSES, ReelJobStatus, build_submission, normalize_reel_status
+from reel_jobs import (
+    TERMINAL_STATUSES,
+    ReelJobStatus,
+    build_research_dispatch,
+    build_submission,
+    normalize_reel_status,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
@@ -46,6 +52,10 @@ _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 
 def _is_upload(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/uploads"
+
+
+def _is_research_run(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/research/run"
 
 
 def _slide_target(method: str, sub: str) -> tuple[str, int] | None:
@@ -201,6 +211,19 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     return jsonify(payload), status
 
 
+def _handle_research_run(deps: AppDeps) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.access_guard.authorize_create(ctx)
+    body = request.get_json(silent=True)
+    target, cp_body_out = build_research_dispatch(body)
+    status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
+    if status >= 400:
+        return jsonify(cp_body), status
+    if "execution_id" not in cp_body:
+        raise BadGateway("control plane returned no execution_id")
+    return jsonify(cp_body), status
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -249,6 +272,8 @@ def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
+    if _is_research_run(method, subpath):
+        return _handle_research_run(deps)
     target = _submit_target(method, subpath)
     if target is not None:
         return _handle_submit(deps, target)

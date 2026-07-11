@@ -1,0 +1,12 @@
+{
+  "_comment": "Mirror of silmari-af-deep-research/ui/defaults.json one-click defaults, so reel-af does not import across repos (Plan 4, ISC-22). EXCLUSIONS: 'query' is caller-supplied, not a default; 'model' is omitted (blank => DR server default); 'api_key' is NEVER mirrored (secret-shaped, must not live in a defaults file). Keys prefixed with '_' are documentation only and are dropped by _load_research_defaults(). num_parallel_streams default is 2 (matches defaults.json).",
+  "research_focus": 3,
+  "research_scope": 3,
+  "max_research_loops": 3,
+  "num_parallel_streams": 2,
+  "analysis_depth": "ANALYTICAL_BRIEF",
+  "source_strictness": "mixed",
+  "tension_lens": "balanced",
+  "mode": "general",
+  "evidence_style": "standard"
+}

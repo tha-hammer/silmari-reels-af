@@ -7,6 +7,8 @@ mapping (plan §6) and the CP→DB status normalization (plan §B12).
 
 from __future__ import annotations
 
+import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +23,28 @@ ReelJobStatus = Literal["queued", "producing", "succeeded", "failed", "cancelled
 TARGET_TOPIC = "reel-af.reel_topic_to_reel"
 TARGET_COMPOSITE = "reel-af.reel_composite_to_reel"
 TARGET_ARTICLE = "reel-af.reel_article_to_reel"  # future; not visible/allowlisted yet
+
+# Cross-node deep-research target (Plan 4, ISC-22). Byte-exact node.reasoner —
+# dispatched via a dedicated /api/v1/research/run route, NOT the reel allowlist.
+TARGET_RESEARCH = "meta_deep_research.execute_deep_research"
+
+_RESEARCH_DEFAULTS_PATH = os.path.join(os.path.dirname(__file__), "research_defaults.json")
+
+
+def _load_research_defaults() -> dict:
+    """Load the one-click research defaults mirror (web/research_defaults.json).
+
+    Drops documentation-only keys (``_``-prefixed). Never carries ``query``
+    (caller-supplied), ``model`` (blank => DR server default), or ``api_key``
+    (secret-shaped, never mirrored). See the JSON ``_comment`` for the contract.
+    """
+    with open(_RESEARCH_DEFAULTS_PATH, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+# The 9 non-secret one-click defaults merged under every research dispatch.
+RESEARCH_DEFAULTS = _load_research_defaults()
 
 # Only targets with a visible preset in web/index.html are allowlisted (plan §1).
 ALLOWLISTED_TARGETS = frozenset({TARGET_TOPIC, TARGET_COMPOSITE})
@@ -172,6 +196,32 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
         cp_input=_clean_input(raw_input),
         source_handle=handle,
     )
+
+
+def build_research_dispatch(raw_input: dict | None) -> tuple[str, dict]:
+    """Build the identity-free control-plane dispatch for a research run (ISC-22).
+
+    Merges the one-click ``RESEARCH_DEFAULTS`` under the caller's ``query`` (and an
+    optional ``mode`` override), rejects forbidden identity fields (reusing the same
+    gate as ``build_submission``), and returns ``(TARGET_RESEARCH, {"input": ...})``.
+
+    Raises ``BadRequest`` for an empty/whitespace query or any forbidden identity
+    field. Unknown keys are dropped — only ``query`` + defaults (+ ``mode``) are sent.
+    """
+    body = raw_input or {}
+    if not isinstance(body, dict):
+        raise BadRequest("body must be a JSON object", code="invalid_json")
+    _reject_forbidden_identity(body)
+
+    query = str(body.get("query", "")).strip()
+    if not query:
+        raise BadRequest("query is required", code="invalid_query")
+
+    payload = {**RESEARCH_DEFAULTS, "query": query}
+    mode = body.get("mode")
+    if isinstance(mode, str) and mode.strip():
+        payload["mode"] = mode.strip()
+    return TARGET_RESEARCH, {"input": payload}
 
 
 # ─────────────────────────── status normalization (plan §B12) ───────────────────────────
