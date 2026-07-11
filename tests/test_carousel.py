@@ -116,6 +116,37 @@ async def test_essence_from_text_rejects_empty(bad):
         await extract.essence_from_text(_NeverApp(), bad)
 
 
+async def test_long_text_is_bounded_before_prompt():
+    from reel_af.agents import extract
+
+    huge = "word " * 20_000
+    captured = {}
+
+    class _CapApp:
+        async def ai(self, *, system, user, schema):
+            captured["user"] = user
+            return Essence(
+                core_claim="c",
+                mechanism="m",
+                evidence=["e"],
+                content_mode="general",
+                domain="d",
+            )
+
+    await extract.essence_from_text(_CapApp(), huge)
+
+    prepared = extract._fit_text_body(huge.strip())
+    assert 0 < len(prepared) <= extract.PROMPT_BODY_CHARS
+    body = captured["user"].split("truncated to fit context):\n", 1)[1]
+    assert body == prepared
+
+
+async def test_short_text_passes_through():
+    from reel_af.agents import extract
+
+    assert extract._fit_text_body("short note") == "short note"
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images

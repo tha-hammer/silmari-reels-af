@@ -74,7 +74,9 @@ def _essence_user_prompt(*, final_url: str, title: str, body: str) -> str:
 
 
 def _fit_text_body(cleaned: str) -> str:
-    return cleaned
+    if len(cleaned) <= PROMPT_BODY_CHARS:
+        return cleaned
+    return cleaned[:PROMPT_BODY_CHARS]
 
 
 def _prepare_text_body(text: str | None) -> str:
