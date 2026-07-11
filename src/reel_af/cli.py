@@ -422,13 +422,13 @@ def reels(
 ) -> None:
     """Cut a source into preset-formatted reels with a Remotion overlay.
 
-    Currently supports presets whose ``overlay`` is ``middle_third`` (the
-    ``middle-third-dynamic`` format): each reel is a window of the source with a
-    script-synced ``MiddleThird`` overlay composited on top.
+    Supports the script-synced ``middle_third`` preset and the horizontal
+    ``lower_third`` preset. Each reel is a window of the source with the
+    preset's Remotion overlay composited on top.
     """
     import shutil
 
-    from reel_af.render import middle_third
+    from reel_af.render import lower_third, middle_third
     from reel_af.render.presets import load_preset, preset_names
 
     try:
@@ -437,10 +437,9 @@ def reels(
         raise SystemExit(f"unknown preset {preset!r}; available: {preset_names()}")
 
     overlay = cfg.get("overlay")
-    if overlay != "middle_third":
+    if overlay not in {"middle_third", "lower_third"}:
         raise SystemExit(
-            f"preset {preset!r} uses overlay={overlay!r}; `reels` currently supports "
-            "overlay='middle_third'. Use `composite` for other formats."
+            f"preset {preset!r} uses overlay={overlay!r}; `reels` does not support it."
         )
 
     fps = int(cfg.get("fps", 30))
@@ -476,11 +475,33 @@ def reels(
         t0 = (idx - 1) * reel_s
         d = work / f"reel{idx:02d}"
         seq = d / "seq"
-        segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
         total_frames = int(reel_s * fps)
-        console.print(f"  [dim]reel{idx:02d} [{t0:.0f}-{t0 + reel_s:.0f}s] segs={len(segs)}[/dim]")
-        middle_third.render_overlay(segs, total_frames, seq, cfg, chrome=chrome)
-        final = middle_third.composite_window(src, t0, reel_s, seq, d / f"reel{idx:02d}.mp4", fps=fps)
+        if overlay == "middle_third":
+            segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
+            console.print(
+                f"  [dim]reel{idx:02d} [{t0:.0f}-{t0 + reel_s:.0f}s] "
+                f"segs={len(segs)}[/dim]"
+            )
+            middle_third.render_overlay(segs, total_frames, seq, cfg, chrome=chrome)
+            final = middle_third.composite_window(
+                src, t0, reel_s, seq, d / f"reel{idx:02d}.mp4", fps=fps
+            )
+        else:
+            title = lower_third.title_from_words(words, t0, t0 + reel_s, cfg)
+            console.print(
+                f"  [dim]reel{idx:02d} [{t0:.0f}-{t0 + reel_s:.0f}s] "
+                f"title={title!r}[/dim]"
+            )
+            lower_third.render_lower_third(
+                title,
+                seq,
+                accent=str(cfg.get("overlay_accent", "#7E22CE")),
+                chrome=chrome,
+                cfg=cfg,
+            )
+            final = lower_third.composite_window(
+                src, t0, reel_s, seq, d / f"reel{idx:02d}.mp4", fps=fps, cfg=cfg
+            )
         shutil.rmtree(seq, ignore_errors=True)
         console.print(f"  [green]→ {final}[/green]")
 

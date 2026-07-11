@@ -253,3 +253,54 @@ def test_app_video_ingest_error_returns_error(monkeypatch, tmp_path):
     )
     assert "error" in result
     assert "YTDLP_COOKIES_FILE" in result["error"]
+
+
+def test_app_lower_third_video_preset_is_wired(monkeypatch, tmp_path):
+    from reel_af import app as app_module
+    from reel_af.render import lower_third
+
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"\x00")
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr("reel_af.render.hooks.download_crisp_source", lambda url, out: src)
+    monkeypatch.setattr(
+        "reel_af.render.captions.caption_words",
+        lambda source, workdir: [
+            (0.0, 0.5, "Railway"),
+            (0.5, 1.0, "lower"),
+            (1.0, 1.5, "third"),
+            (1.5, 2.0, "works"),
+        ],
+    )
+
+    class _FFProbe:
+        stdout = "360.0\n"
+
+    monkeypatch.setattr("subprocess.run", lambda *args, **kwargs: _FFProbe())
+
+    def render_lower_third(title, out_seq_dir, **kwargs):
+        calls["title"] = title
+        return out_seq_dir
+
+    def composite_window(source, t0, dur_s, seq_dir, out, **kwargs):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x00")
+        calls["composite"] = (source, t0, dur_s, seq_dir, out, kwargs)
+        return out
+
+    monkeypatch.setattr(lower_third, "render_lower_third", render_lower_third)
+    monkeypatch.setattr(lower_third, "composite_window", composite_window)
+
+    result = app_module._run_composite_reels(
+        url="https://youtu.be/x",
+        preset_name="horizontal-youtube-lowerthird",
+        count=1,
+        out_path=tmp_path,
+        chrome=None,
+    )
+
+    assert "error" not in result
+    assert result["reel_count"] == 1
+    assert calls["title"] == "Railway lower third works"
+    assert result["reels"] == [str(tmp_path / "reel01" / "reel01.mp4")]

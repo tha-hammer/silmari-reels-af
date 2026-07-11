@@ -233,8 +233,10 @@ async def synthesize_audio(
     """
     from reel_af.render.tts import (
         strip_tts_tags,
-        synthesize_audio as _synth,
         voice_for_tone,
+    )
+    from reel_af.render.tts import (
+        synthesize_audio as _synth,
     )
 
     voice = voice_for_tone(voice_tone)
@@ -617,7 +619,7 @@ def _run_composite_reels(
     import shutil
     import subprocess
 
-    from reel_af.render import middle_third
+    from reel_af.render import lower_third, middle_third
     from reel_af.render.captions import caption_words
     from reel_af.render.hooks import download_crisp_source
     from reel_af.render.presets import load_preset, preset_names
@@ -626,9 +628,10 @@ def _run_composite_reels(
         cfg = load_preset(preset_name)
     except KeyError:
         return {"error": f"unknown preset {preset_name!r}; available: {preset_names()}"}
-    if cfg.get("overlay") != "middle_third":
-        return {"error": (f"preset {preset_name!r} (overlay={cfg.get('overlay')!r}) is not "
-                          "yet wired for video intake — only 'middle_third' is.")}
+    overlay_kind = cfg.get("overlay")
+    if overlay_kind not in {"middle_third", "lower_third"}:
+        return {"error": (f"preset {preset_name!r} (overlay={overlay_kind!r}) is not "
+                          "wired for video intake.")}
 
     fps = int(cfg.get("fps", 30))
     reel_s = float(cfg["reel_seconds"])
@@ -649,9 +652,24 @@ def _run_composite_reels(
         t0 = (idx - 1) * reel_s
         d = out_path / f"reel{idx:02d}"
         seq = d / "seq"
-        segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
-        overlay = middle_third.render_overlay(segs, int(reel_s * fps), seq, cfg, chrome=chrome)
-        final = middle_third.composite_window(src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps)
+        if overlay_kind == "middle_third":
+            segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
+            overlay = middle_third.render_overlay(segs, int(reel_s * fps), seq, cfg, chrome=chrome)
+            final = middle_third.composite_window(
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps
+            )
+        else:
+            title = lower_third.title_from_words(words, t0, t0 + reel_s, cfg)
+            overlay = lower_third.render_lower_third(
+                title,
+                seq,
+                accent=str(cfg.get("overlay_accent", "#7E22CE")),
+                chrome=chrome,
+                cfg=cfg,
+            )
+            final = lower_third.composite_window(
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps, cfg=cfg
+            )
         shutil.rmtree(seq, ignore_errors=True)
         reels.append(str(final))
     return {"video_path": reels[0], "reels": reels, "reel_count": len(reels),

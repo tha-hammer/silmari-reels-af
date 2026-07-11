@@ -218,5 +218,6 @@ the UI shows the actionable hint instead of an opaque execution failure.
   URL mode is the working path today.
 - **Open access.** The public UI can trigger jobs unauthenticated. Add a login gate (deep-research-ui
   uses SuperTokens; or HTTP basic) to restrict it.
-- **Overlay coverage.** `reel_composite_to_reel` wires the `middle_third` overlay; the
-  `lower_third` / horizontal path is a follow-up (bead `A1_workspace-blueprint-t3u`).
+- **Overlay coverage.** `reel_composite_to_reel` wires both `middle_third` and `lower_third`
+  overlays. Horizontal lower-third reels derive the title from the transcript window unless the
+  preset supplies `lower_third_title`.
