@@ -1,0 +1,7 @@
+{
+  "_comment": "Media-serving (object storage) config for web/storage.py — FLAT, 1-jump access (mirrors web/research_defaults.json + reel_jobs.RESEARCH_DEFAULTS). Tunable defaults are FALLBACKS applied only when the matching REEL_* env var is unset. Error copy is user-facing (surfaced in HTTP error bodies). Secrets/bucket creds stay in REEL_BUCKET_* env, never here.",
+  "PRESIGN_TTL_DEFAULT_S": 3600,
+  "BUCKET_REGION_DEFAULT": "auto",
+  "STORAGE_UNCONFIGURED_MSG": "media storage not configured (REEL_BUCKET_NAME)",
+  "MISSING_MEDIA_REF_MSG": "missing media ref"
+}

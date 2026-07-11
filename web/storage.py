@@ -9,16 +9,36 @@ read. ``put`` is last-write-wins on a stable ref (same ``(org_id, key)`` → sam
 
 from __future__ import annotations
 
+import json
 import os
 
 from deps import BadRequest, SchemaUnavailable
 
-_DEFAULT_PRESIGN_TTL_S = 3600
 _MEDIA_KEY_SEP = "/"
+# Wire/API error code returned to clients (structural contract — stays in code,
+# per NamedConstantsOverLiterals; the human message is externalized to JSON).
+_MISSING_REF_CODE = "missing_ref"
+
+_MEDIA_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "media_config.json")
+
+
+def _load_media_config() -> dict:
+    """Load the flat media-serving config (web/media_config.json), 1-jump access.
+
+    Drops documentation-only keys (``_``-prefixed). Mirrors
+    ``reel_jobs.RESEARCH_DEFAULTS`` — read once at import, exposed as a flat map;
+    call sites do a single key lookup (never re-read or walk a tree)."""
+    with open(_MEDIA_CONFIG_PATH, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+# Tunable defaults (fallbacks for REEL_* env) + user-facing error copy, 1-jump.
+MEDIA_CONFIG = _load_media_config()
 
 
 def _presign_ttl_s() -> int:
-    return int(os.getenv("REEL_PRESIGN_TTL_S", str(_DEFAULT_PRESIGN_TTL_S)))
+    return int(os.getenv("REEL_PRESIGN_TTL_S", str(MEDIA_CONFIG["PRESIGN_TTL_DEFAULT_S"])))
 
 
 def _s3_client_from_env(client_factory=None):
@@ -35,7 +55,7 @@ def _s3_client_from_env(client_factory=None):
         endpoint_url=os.getenv("REEL_BUCKET_ENDPOINT") or None,
         aws_access_key_id=os.getenv("REEL_BUCKET_ACCESS_KEY_ID") or None,
         aws_secret_access_key=os.getenv("REEL_BUCKET_SECRET_ACCESS_KEY") or None,
-        region_name=os.getenv("REEL_BUCKET_REGION", "auto"),
+        region_name=os.getenv("REEL_BUCKET_REGION", MEDIA_CONFIG["BUCKET_REGION_DEFAULT"]),
     )
 
 
@@ -50,7 +70,7 @@ class ObjectStorage:
     def _bucket(self) -> str:
         name = os.getenv("REEL_BUCKET_NAME", "")
         if not name:
-            raise SchemaUnavailable("media storage not configured (REEL_BUCKET_NAME)")
+            raise SchemaUnavailable(MEDIA_CONFIG["STORAGE_UNCONFIGURED_MSG"])
         return name
 
     def _client(self):
@@ -69,7 +89,7 @@ class ObjectStorage:
     def presigned_url(self, ref: str, ttl: int | None = None) -> str:
         bucket = self._bucket()
         if not isinstance(ref, str) or not ref.strip():
-            raise BadRequest("missing media ref", code="missing_ref")
+            raise BadRequest(MEDIA_CONFIG["MISSING_MEDIA_REF_MSG"], code=_MISSING_REF_CODE)
         expires = ttl if ttl is not None else _presign_ttl_s()
         return self._client().generate_presigned_url(
             "get_object",
@@ -90,5 +110,5 @@ class ObjectStorage:
     def delete(self, ref: str) -> None:
         bucket = self._bucket()
         if not isinstance(ref, str) or not ref.strip():
-            raise BadRequest("missing media ref", code="missing_ref")
+            raise BadRequest(MEDIA_CONFIG["MISSING_MEDIA_REF_MSG"], code=_MISSING_REF_CODE)
         self._client().delete_object(Bucket=bucket, Key=ref.strip())
