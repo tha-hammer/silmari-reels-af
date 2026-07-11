@@ -919,6 +919,39 @@ async def research_to_carousel(
     }
 
 
+async def regenerate_slide(
+    *,
+    run_id: str,
+    idx: int,
+    image_prompt: str,
+    out_dir: str,
+    provider=None,
+    storage=None,
+    content_mode: str = "general",
+    model: str | None = None,
+    crop: str = "4x5",
+    _generate_frame=None,
+) -> dict:
+    """Regenerate exactly one carousel slide."""
+    if idx < 0:
+        raise ValueError(f"slide idx must be >= 0, got {idx}")
+    provider = provider or OpenRouterProvider()
+    storage = storage or _default_storage_port()
+    _generate_frame = _generate_frame or generate_first_frame
+    return await _render_one_slide(
+        provider=provider,
+        storage=storage,
+        run_id=run_id,
+        idx=idx,
+        prompt=image_prompt,
+        out_dir=Path(out_dir),
+        content_mode=content_mode,
+        model=model,
+        crop=crop,
+        _generate_frame=_generate_frame,
+    )
+
+
 # ════════════════════════════════════════════════════════════════════
 # Shared downstream orchestrator
 # ════════════════════════════════════════════════════════════════════

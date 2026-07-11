@@ -346,6 +346,44 @@ async def test_carousel_bypasses_composite_overlay_guard(tmp_path: Path, monkeyp
     assert "is not wired for video intake" not in str(out)
 
 
+async def test_failed_slide_is_individually_retryable(tmp_path: Path):
+    import reel_af.app as app_module
+
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+    storage = _FakeStoragePort()
+
+    record = await app_module.regenerate_slide(
+        run_id="run123",
+        idx=1,
+        image_prompt="retry prompt for slide 1",
+        out_dir=str(tmp_path),
+        provider=fake(),
+        storage=storage,
+        content_mode="general",
+        crop="4x5",
+    )
+
+    assert record["idx"] == 1
+    assert record["status"] == "ok"
+    assert record["image_ref"] == "stub://run123/1"
+    assert record["image_prompt"] == "retry prompt for slide 1"
+    assert [saved[1] for saved in storage.saved] == [1]
+
+
+async def test_regenerate_slide_rejects_negative_idx(tmp_path: Path):
+    import reel_af.app as app_module
+
+    with pytest.raises(ValueError, match="idx"):
+        await app_module.regenerate_slide(
+            run_id="run123",
+            idx=-1,
+            image_prompt="bad",
+            out_dir=str(tmp_path),
+            provider=make_fake_provider(image_data=square_png_bytes(300))(),
+            storage=_FakeStoragePort(),
+        )
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images
