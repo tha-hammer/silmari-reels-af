@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import re
 import uuid
+from pathlib import Path
 
 import server
 from carousels import CarouselSlideRefResolver
@@ -26,6 +29,7 @@ from deps import (
 CREATE = "/api/v1/carousels"
 CID = "car_1"
 TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
+WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
 
 
 def _client(deps):
@@ -64,6 +68,30 @@ def test_default_deps_wires_carousels_and_real_slide_resolver():
     assert isinstance(deps.carousels, CarouselRepoPort)
     assert isinstance(deps.slides, CarouselSlideRefResolver)
     assert not isinstance(deps.slides, _Unconfigured)
+
+
+def test_index_has_carousel_review_ui_contract():
+    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    config_match = re.search(
+        r'<script type="application/json" id="config">\s*(.*?)\s*</script>',
+        html,
+        re.S,
+    )
+    assert config_match is not None
+    config = json.loads(config_match.group(1))
+
+    assert config["api"]["carouselPath"] == "/api/v1/carousels/{id}"
+    assert config["api"]["carouselSlidePath"] == "/api/v1/carousels/{id}/slides/{idx}"
+    assert config["api"]["carouselRecreatePath"] == (
+        "/api/v1/carousels/{id}/slides/{idx}/recreate"
+    )
+    assert config["api"]["carouselFinalizePath"] == "/api/v1/carousels/{id}/finalize"
+    assert config["api"]["carouselCancelPath"] == "/api/v1/carousels/{id}/cancel"
+    assert 'id="carouselReview"' in html
+    assert 'id="carouselSlides"' in html
+    assert 'id="carouselCancel"' in html
+    assert 'id="carouselFinalize"' in html
+    assert 'data-carousel-action="recreate"' in html
 
 
 def test_create_no_session_is_401_before_work():

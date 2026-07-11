@@ -18,6 +18,11 @@
     "researchRunPath": "/api/v1/research/run",
     "researchPollPath": "/api/v1/research/{id}",
     "createFromTextPath": "/api/v1/research/create",
+    "carouselPath": "/api/v1/carousels/{id}",
+    "carouselSlidePath": "/api/v1/carousels/{id}/slides/{idx}",
+    "carouselRecreatePath": "/api/v1/carousels/{id}/slides/{idx}/recreate",
+    "carouselFinalizePath": "/api/v1/carousels/{id}/finalize",
+    "carouselCancelPath": "/api/v1/carousels/{id}/cancel",
     "uploadPath": "/api/v1/uploads",
     "healthPath": "/health",
     "pollIntervalMs": 2500,
@@ -40,6 +45,10 @@
     "researchCreate": "CREATE",
     "researching": "RESEARCHING",
     "creating": "CREATING",
+    "carouselCancel": "CANCEL",
+    "carouselCreate": "CREATE",
+    "carouselRecreate": "RECREATE",
+    "carouselNotePlaceholder": "note for this image",
     "roll": "ROLL",
     "rolling": "ROLLING",
     "reset": "NEW TAKE"
@@ -262,6 +271,63 @@
   .outputs input { accent-color: var(--grease); }
   .research .roll { margin-top: 0; padding: 16px; font-size: 15px; }
 
+  /* carousel review */
+  .carousel-review {
+    margin-top: 24px; border: 1px solid var(--line-2); background: var(--film-2);
+  }
+  .carousel-review[hidden] { display: none; }
+  .carousel-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .carousel-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em;
+    color: var(--print-fog); text-transform: uppercase;
+  }
+  .carousel-actions { display: flex; gap: 8px; }
+  .carousel-actions button, .carousel-slide button {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    border: 1px solid var(--line-2); background: var(--film); color: var(--print);
+    padding: 9px 11px; cursor: pointer;
+  }
+  .carousel-actions button.primary, .carousel-slide button {
+    background: var(--grease); color: var(--film); border-color: var(--grease);
+  }
+  .carousel-actions button:disabled, .carousel-slide button:disabled {
+    background: var(--film-3); color: var(--print-fog); border-color: var(--line);
+    cursor: not-allowed;
+  }
+  .carousel-scroll {
+    max-height: 680px; overflow-y: auto; display: grid; gap: 14px; padding: 14px;
+  }
+  .carousel-slide {
+    display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+    gap: 14px; align-items: stretch; border: 1px solid var(--line); background: var(--film);
+    padding: 12px;
+  }
+  .carousel-frame { aspect-ratio: 4 / 5; background: var(--film-3); overflow: hidden; }
+  .carousel-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .carousel-meta { display: grid; gap: 10px; min-width: 0; }
+  .carousel-meta .idx {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.24em;
+    color: var(--amber); text-transform: uppercase;
+  }
+  .carousel-meta .prompt {
+    font-family: var(--body); font-size: 13px; color: var(--print-dim);
+    line-height: 1.5; overflow-wrap: anywhere;
+  }
+  .carousel-meta textarea {
+    min-height: 76px; resize: vertical; background: var(--film-2); color: var(--print);
+    border: 1px solid var(--line-2); padding: 10px; font-family: var(--mono);
+    font-size: 12px; line-height: 1.45; outline: none;
+  }
+  .carousel-meta textarea:focus { border-color: var(--grease); }
+  @media (max-width: 700px) {
+    .carousel-slide { grid-template-columns: 1fr; }
+    .carousel-top { align-items: stretch; flex-direction: column; }
+    .carousel-actions { justify-content: flex-end; }
+  }
+
   /* right column — controls */
   .controls { opacity: 0; animation: rise 0.8s 0.44s cubic-bezier(.2,.7,.2,1) forwards; }
   .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(4px); }
@@ -423,6 +489,27 @@
       </div>
     </div>
 
+    <section class="carousel-review" id="carouselReview" hidden>
+      <div class="carousel-top">
+        <div class="carousel-title">CAROUSEL REVIEW</div>
+        <div class="carousel-actions">
+          <button type="button" id="carouselCancel">CANCEL</button>
+          <button type="button" class="primary" id="carouselFinalize">CREATE</button>
+        </div>
+      </div>
+      <div class="carousel-scroll" id="carouselSlides">
+        <article class="carousel-slide" data-carousel-slide-template hidden>
+          <div class="carousel-frame"><img alt="" /></div>
+          <div class="carousel-meta">
+            <div class="idx">SLIDE 00</div>
+            <div class="prompt"></div>
+            <textarea placeholder="note for this image"></textarea>
+            <button type="button" data-carousel-action="recreate">RECREATE</button>
+          </div>
+        </article>
+      </div>
+    </section>
+
     <!-- console -->
     <div class="console" id="console">
       <div class="bar"><span class="t">EDIT DECISION LIST</span><span class="t" id="jobId">—</span></div>
@@ -437,6 +524,17 @@
       </div>
       <a id="resultLink" href="#" download>DOWNLOAD ▸</a>
     </div>
+
+    <section class="carousel-review" id="carouselReview" hidden aria-label="Carousel review">
+      <div class="carousel-top">
+        <div class="carousel-title">CAROUSEL REVIEW</div>
+        <div class="carousel-actions">
+          <button type="button" id="carouselCancel">CANCEL</button>
+          <button type="button" id="carouselFinalize" class="primary">CREATE</button>
+        </div>
+      </div>
+      <div class="carousel-scroll" id="carouselSlides"></div>
+    </section>
 
     <footer>
       <span>REEL-AF · CUTTING ROOM</span>
