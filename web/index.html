@@ -325,6 +325,7 @@
         <div class="modes" role="tablist">
           <button role="tab" aria-selected="true" data-mode="file">DROP FILE</button>
           <button role="tab" aria-selected="false" data-mode="url">FROM URL</button>
+          <button role="tab" aria-selected="false" data-mode="research">FROM RESEARCH</button>
         </div>
 
         <div class="viewport-wrap">
@@ -347,6 +348,25 @@
           </div>
         </div>
         <input type="file" id="file" accept="video/*" />
+
+        <!-- Create-from-research surface (Plan 5, ISC-28..36). Hidden until the
+             research tab is active; behavior is wired in the IIFE / verified manually. -->
+        <div class="research" id="researchSurface" hidden>
+          <div class="row">
+            <span class="tick">ASK▸</span>
+            <input type="text" id="researchQuery" spellcheck="false" autocomplete="off"
+                   placeholder="what should we research?" />
+          </div>
+          <textarea id="researchDoc" placeholder="research document appears here — edit before creating"
+                    spellcheck="false" hidden></textarea>
+          <div class="outputs" id="researchOutputs" role="group" aria-label="Outputs to create">
+            <label><input type="checkbox" data-output="video" /> VIDEO</label>
+            <label><input type="checkbox" data-output="carousel" /> CAROUSEL</label>
+          </div>
+          <button class="roll" id="createFromResearch" disabled>
+            <span class="rec"></span><span>CREATE</span>
+          </button>
+        </div>
       </div>
 
       <!-- right: controls -->

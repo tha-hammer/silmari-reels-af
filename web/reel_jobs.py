@@ -28,6 +28,12 @@ TARGET_ARTICLE = "reel-af.reel_article_to_reel"  # future; not visible/allowlist
 # dispatched via a dedicated /api/v1/research/run route, NOT the reel allowlist.
 TARGET_RESEARCH = "meta_deep_research.execute_deep_research"
 
+# Create-from-research text targets (Plan 5, ISC-30/35). Plan 1 owns the reasoners;
+# Plan 5 owns only the allowlist entry + text submission shape + the output→target map.
+TARGET_TEXT_REEL = "reel-af.reel_research_to_reel"          # text → video
+TARGET_TEXT_CAROUSEL = "reel-af.reel_research_to_carousel"  # text → carousel
+TEXT_TARGET_BY_OUTPUT = {"video": TARGET_TEXT_REEL, "carousel": TARGET_TEXT_CAROUSEL}
+
 _RESEARCH_DEFAULTS_PATH = os.path.join(os.path.dirname(__file__), "research_defaults.json")
 
 
@@ -47,7 +53,10 @@ def _load_research_defaults() -> dict:
 RESEARCH_DEFAULTS = _load_research_defaults()
 
 # Only targets with a visible preset in web/index.html are allowlisted (plan §1).
-ALLOWLISTED_TARGETS = frozenset({TARGET_TOPIC, TARGET_COMPOSITE})
+# Plan 5 adds the two text targets used by the create-from-research fan-out.
+ALLOWLISTED_TARGETS = frozenset(
+    {TARGET_TOPIC, TARGET_COMPOSITE, TARGET_TEXT_REEL, TARGET_TEXT_CAROUSEL}
+)
 
 TITLE_MAX = 120
 
@@ -183,6 +192,24 @@ def build_submission(
             source_research_run_id=source_research_run_id,
             params=_sanitized_params(raw_input, target, raw_input.get("preset")),
             cp_input={**_clean_input(raw_input), "topic": topic},
+        )
+
+    if target in (TARGET_TEXT_REEL, TARGET_TEXT_CAROUSEL):
+        # Create-from-research text branch (Plan 5, ISC-35). Forward the caller's
+        # text VERBATIM — no trim beyond the non-empty check — so an edited document
+        # rides through byte-exact. Provenance stays on the DB field, stripped from
+        # cp_input via _CP_STRIP (never seen by the reasoner).
+        text = raw_input.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise BadRequest("text must be a non-empty string", code="invalid_text")
+        return ReelSubmission(
+            target=target,
+            title=text.strip()[:TITLE_MAX],
+            source_url=None,
+            topic=None,
+            source_research_run_id=source_research_run_id,
+            params=_sanitized_params(raw_input, target, None),
+            cp_input={**_clean_input(raw_input), "text": text},
         )
 
     # TARGET_COMPOSITE — URL mode (has url) or file mode (has source handle).

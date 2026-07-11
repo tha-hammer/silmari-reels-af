@@ -35,7 +35,9 @@ from deps import (
 )
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from reel_jobs import (
+    FORBIDDEN_IDENTITY_FIELDS,
     TERMINAL_STATUSES,
+    TEXT_TARGET_BY_OUTPUT,
     ReelJobStatus,
     build_research_dispatch,
     build_submission,
@@ -78,6 +80,10 @@ def _is_upload(method: str, sub: str) -> bool:
 
 def _is_research_run(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/research/run"
+
+
+def _is_create_from_research(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/research/create"
 
 
 def _slide_target(method: str, sub: str) -> tuple[str, int] | None:
@@ -362,6 +368,85 @@ def _handle_research_poll(deps: AppDeps, execution_id: str) -> tuple[Response, i
     return jsonify(_research_result_body(cp_body, normalized)), status
 
 
+# ─────────────── create-from-research fan-out (Plan 5, ISC-30/35) ───────────────
+
+_VALID_OUTPUTS = ("carousel", "video")
+
+
+class _DispatchOutcome:
+    """Result of enqueuing one fan-out leg (no exception on CP failure — the caller
+    applies the partial-failure contract: 502 only when ZERO legs enqueued)."""
+
+    def __init__(self, ok: bool, execution_id: str | None, outcome: str):
+        self.ok, self.execution_id, self.outcome = ok, execution_id, outcome
+
+
+def _validate_outputs(body: dict) -> list[str]:
+    """Sorted, de-duplicated output list. Empty → 400; unknown type → 400 (review C2)."""
+    raw = body.get("outputs")
+    if not isinstance(raw, list) or not raw:
+        raise BadRequest("outputs must be a non-empty list", code="invalid_outputs")
+    outputs = sorted(set(raw))
+    for output in outputs:
+        if output not in _VALID_OUTPUTS:
+            raise BadRequest(f"unknown output type: {output}", code="unknown_output")
+    return outputs
+
+
+def _dispatch_one(deps: AppDeps, ctx, target, submission, job_id, crid, now) -> _DispatchOutcome:
+    """Enqueue one submission: insert queued row → dispatch → attach execution_id.
+    Returns a disposition instead of raising on CP failure, so the fan-out can honor
+    'no cross-output rollback; 502 only when zero enqueued' (Plan 5 review C2)."""
+    cp_input = _resolve_cp_input(deps, ctx, submission)      # text-mode: identity/provenance-free
+    ref = deps.reel_jobs.insert_or_get_queued(ctx, submission, job_id, now, crid)
+    if not ref.created:
+        return _DispatchOutcome(True, ref.execution_id, "idempotent")  # returning key, already enqueued
+    try:
+        status, cp_body, _headers = deps.control_plane.dispatch_async(target, {"input": cp_input})
+    except HttpError:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, "dispatch_error", now)
+        return _DispatchOutcome(False, None, "cp_error")
+    if status >= 400:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, f"cp_status_{status}", now)
+        return _DispatchOutcome(False, None, "cp_error")
+    if "execution_id" not in cp_body:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, "no_execution_id", now)
+        return _DispatchOutcome(False, None, "no_execution_id")
+    deps.reel_jobs.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
+    return _DispatchOutcome(True, cp_body["execution_id"], "enqueued")
+
+
+def _handle_create_from_research(deps: AppDeps) -> tuple[Response, int]:
+    """Create-from-text fan-out: for each selected output build a text submission and
+    dispatch it, preserving provenance on the DB row (never the reasoner input). One
+    idempotency sub-key per output; distinct job_id per output; multi-job response."""
+    ctx = deps.identity.resolve(request)                     # 401
+    deps.access_guard.authorize_create(ctx)                  # 403
+    body = request.get_json(silent=True) or {}
+    for key in body:                                         # forbidden identity on the create body
+        if key in FORBIDDEN_IDENTITY_FIELDS:
+            raise BadRequest(f"forbidden identity field: {key}", code="forbidden_field")
+    outputs = _validate_outputs(body)                        # 400 empty/unknown, sorted+deduped
+    run_id = _source_research_run_id(deps, ctx, body)        # 400 malformed / 404 cross-org / None
+    crid = _client_request_id(deps, body)
+    now = deps.clock.now()
+
+    jobs, enqueued = [], 0
+    for output in outputs:                                   # deterministic sorted order (C2)
+        target = TEXT_TARGET_BY_OUTPUT[output]
+        submission = build_submission(  # 400 invalid_text before any dispatch on the first leg
+            target, {"input": {"text": body.get("text")}}, source_research_run_id=run_id)
+        job_id = deps.uuid_factory()                         # DISTINCT per output (review C3)
+        result = _dispatch_one(deps, ctx, target, submission, job_id, f"{crid}:{output}", now)
+        jobs.append({"output": output, "job_id": str(job_id),
+                     "execution_id": result.execution_id, "outcome": result.outcome})
+        enqueued += 1 if result.ok else 0
+
+    if enqueued == 0:                                        # partial-failure contract (C2)
+        raise BadGateway("all create-from-research dispatches failed")
+    return jsonify({"jobs": jobs}), HTTP_ACCEPTED
+
+
 def _handle_carousel_create(deps: AppDeps) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
@@ -510,6 +595,8 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
         return _handle_carousel_create(deps)
     if _is_research_run(method, subpath):
         return _handle_research_run(deps)
+    if _is_create_from_research(method, subpath):
+        return _handle_create_from_research(deps)
     target = _submit_target(method, subpath)
     if target is not None:
         return _handle_submit(deps, target)

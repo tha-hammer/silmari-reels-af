@@ -396,6 +396,7 @@ def make_deps(
     carousels: FakeCarouselRepo | None = None,
     storage: FakeStorage | None = None,
     slides: FakeSlideRefResolver | None = None,
+    uuid_factory=None,
 ) -> AppDeps:
     return AppDeps(
         identity=identity or FakeIdentity(make_ctx()),
@@ -407,7 +408,7 @@ def make_deps(
         storage=storage or FakeStorage(),
         slides=slides or FakeSlideRefResolver(),
         clock=FixedClock(),
-        uuid_factory=lambda: FIXED_JOB_ID,
+        uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
     )
 
