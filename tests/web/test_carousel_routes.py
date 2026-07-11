@@ -277,3 +277,94 @@ def test_cross_org_get_is_404():
     resp = _client(deps).get(f"/api/v1/carousels/{CID}")
 
     assert resp.status_code == 404
+
+
+def test_recreate_replaces_only_that_slide(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    recreated = {"idx": 1, "image_ref": "ref-1-new", "prompt": "p1", "status": "ok"}
+
+    def fake_recreate(ctx, cid, idx, note, **kwargs):
+        assert kwargs["provider"] is not None
+        assert kwargs["storage"] is not None
+        assert hasattr(kwargs["guard"], "register")
+        return recreated
+
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "brighter"})
+
+    assert resp.status_code == 200
+    assert resp.get_json()["image_ref"] == "ref-1-new"
+    assert repo.replaced == [(ORG_ID, CID, 1)]
+
+
+def test_cross_org_recreate_is_404(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    calls = []
+    other = make_ctx()
+    object.__setattr__(other, "org_id", uuid.uuid4())
+    deps = make_deps(identity=FakeIdentity(other), carousels=repo)
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+
+    assert resp.status_code == 404
+    assert calls == []
+    assert repo.replaced == []
+
+
+def test_recreate_without_openrouter_key_is_503_no_spend(monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    calls = []
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+
+    assert resp.status_code == 503
+    assert calls == []
+    assert repo.replaced == []
+
+
+def test_hq_cap_persists_across_requests(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    repo = FakeCarouselRepo(hq_cap=2)
+    _seed(repo)
+
+    def fake_recreate(ctx, cid, idx, note, *, guard, **kwargs):
+        guard.register(cid)
+        return {"idx": idx, "image_ref": f"ref-{idx}-hq", "prompt": f"p{idx}", "status": "ok"}
+
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={}).status_code == 200
+    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={}).status_code == 200
+    over = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={})
+
+    assert over.status_code in (402, 409)
+    assert repo.hq_recreate_count(make_ctx(), CID) == 2
+

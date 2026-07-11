@@ -250,11 +250,12 @@ class FakeSlideRefResolver:
 class FakeCarouselRepo:
     """In-memory CarouselRepoPort. Org-scoped; absent/foreign rows are concealed."""
 
-    def __init__(self):
+    def __init__(self, hq_cap: int = 5):
         self._rows: dict = {}
         self.inserted: list = []
         self.replaced: list = []
         self._by_key: dict = {}
+        self._hq_cap = hq_cap
 
     def ensure_ready(self) -> None:
         pass
@@ -342,8 +343,21 @@ class FakeCarouselRepo:
 
     def register_hq_recreate(self, ctx, carousel_id) -> int:
         row = self._own(ctx, carousel_id)
+        if row["hq_recreate_count"] >= self._hq_cap:
+            from carousels import HqRecreateCapError
+
+            raise HqRecreateCapError(f"HQ recreate cap reached for {carousel_id}")
         row["hq_recreate_count"] += 1
         return row["hq_recreate_count"]
+
+    def register(self, carousel_id: str) -> None:
+        self.register_hq_recreate(make_ctx(), carousel_id)
+
+    def count(self, carousel_id: str) -> int:
+        return self.hq_recreate_count(make_ctx(), carousel_id)
+
+    def hq_recreate_count(self, ctx, carousel_id) -> int:
+        return self._own(ctx, carousel_id)["hq_recreate_count"]
 
 
 class FakeControlPlane:

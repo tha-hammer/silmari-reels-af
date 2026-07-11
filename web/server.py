@@ -21,14 +21,16 @@ import os
 import re
 import uuid
 
-from carousels import build_carousel_create
+from carousels import HqRecreateCapError, build_carousel_create
 from deps import (
     AppDeps,
     BadGateway,
     BadRequest,
+    Conflict,
     HttpError,
     NotFound,
     RepositoryUnavailable,
+    SchemaUnavailable,
     default_deps,
 )
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
@@ -59,6 +61,7 @@ TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
 _CAROUSEL_GET_RE = re.compile(r"^v1/carousels/([^/]+)$")
+_CAROUSEL_RECREATE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)/recreate$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
 
@@ -101,6 +104,13 @@ def _carousel_id(method: str, sub: str) -> str | None:
         return None
     m = _CAROUSEL_GET_RE.match(sub)
     return m.group(1) if m else None
+
+
+def _carousel_recreate_target(method: str, sub: str) -> tuple[str, int] | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_RECREATE_RE.match(sub)
+    return (m.group(1), int(m.group(2))) if m else None
 
 
 def _research_poll_id(method: str, sub: str) -> str | None:
@@ -377,6 +387,40 @@ def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int
     return jsonify({"status": view.status, "slides": view.slides}), 200
 
 
+def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, recreate_fn) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.access_guard.authorize_create(ctx)
+    deps.carousels.get(ctx, carousel_id)  # 404 before paid work / cross-org spend
+    if "OPENROUTER_API_KEY" not in os.environ:
+        raise SchemaUnavailable("OPENROUTER_API_KEY is required for carousel recreate")
+    if recreate_fn is None:
+        raise SchemaUnavailable("carousel recreate is not configured")
+    body = request.get_json(silent=True) or {}
+    note = body.get("note", "")
+    note = note if isinstance(note, str) else str(note)
+    try:
+        slide = recreate_fn(
+            ctx,
+            carousel_id,
+            slide_idx,
+            note,
+            provider=deps.control_plane,
+            storage=deps.storage,
+            guard=deps.carousels,
+        )
+    except HqRecreateCapError as exc:
+        raise Conflict(str(exc), code="hq_recreate_cap_exceeded") from exc
+    deps.carousels.replace_slide(
+        ctx,
+        carousel_id,
+        slide_idx,
+        slide.get("image_ref"),
+        slide.get("prompt") or slide.get("image_prompt"),
+        slide.get("status", "ok"),
+    )
+    return jsonify(slide), 200
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -421,7 +465,7 @@ def _not_found() -> tuple[Response, int]:
     return jsonify({"error": "not found", "code": "not_found"}), HTTP_NOT_FOUND
 
 
-def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
+def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Response, int]:
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
@@ -441,6 +485,9 @@ def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
     carousel_id = _carousel_id(method, subpath)
     if carousel_id is not None:
         return _handle_carousel_get(deps, carousel_id)
+    recreate = _carousel_recreate_target(method, subpath)
+    if recreate is not None:
+        return _handle_carousel_recreate(deps, *recreate, recreate_fn)
     slide = _slide_target(method, subpath)
     if slide is not None:
         return _handle_slide(deps, *slide)
@@ -543,7 +590,11 @@ def _configure_supertokens(app: Flask, deps: AppDeps) -> None:
 
 
 def create_app(
-    deps: AppDeps | None = None, *, enable_supertokens: bool = True, auth_decorator=None
+    deps: AppDeps | None = None,
+    *,
+    enable_supertokens: bool = True,
+    auth_decorator=None,
+    recreate_fn=None,
 ) -> Flask:
     deps = deps or default_deps()
     app = Flask(__name__, static_folder=None)
@@ -575,7 +626,7 @@ def create_app(
     )
     @auth(session_required=False)
     def api(subpath: str):
-        return _api_router(deps, subpath)
+        return _api_router(deps, subpath, recreate_fn=recreate_fn)
 
     @app.errorhandler(HttpError)
     def _on_http_error(err: HttpError):
