@@ -376,3 +376,62 @@ async def test_recreate_hq_cap_boundary_real_regen(tmp_path, monkeypatch):  # B6
     with pytest.raises(HqRecreateCapError):
         await one()
     assert guard.count("car1") == 2
+
+
+# ───── Hardening: review-warning coverage (APIs crop drift, Data-Models EV1 error) ─
+
+
+async def test_recreate_passes_crop_and_content_mode_through(tmp_path, monkeypatch):
+    """APIs warning — crop must reach regenerate_slide as 4:5 (carousel), NOT the reel 9:16
+    default; content_mode also propagates. Asserted on the injected _regenerate kwargs."""
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    seen = {}
+
+    async def _spy(**kw):
+        seen.update(kw)
+        return {"idx": kw["idx"], "image_prompt": kw["image_prompt"],
+                "image_ref": f"stub://{kw['run_id']}/{kw['idx']}", "status": "ok"}
+
+    # default crop is the carousel 4:5 (not the reel 9:16)
+    await recreate_slide(
+        carousel=_carousel(), idx=1, note="x", out_dir=str(tmp_path),
+        provider=make_fake_provider(image_data=square_png_bytes(300))(),
+        storage=_FakeStoragePort(), guard=_MemGuard(cap=5), acknowledge_premium=True,
+        _regenerate=_spy,
+    )
+    assert seen["crop"] == "4x5"
+    assert seen["content_mode"] == "general"
+    assert seen["model"] == "premium/hq-image-x"
+    assert seen["run_id"] == "run1" and seen["idx"] == 1
+
+    # explicit overrides propagate verbatim
+    seen.clear()
+    await recreate_slide(
+        carousel=_carousel(), idx=0, note="y", out_dir=str(tmp_path),
+        provider=make_fake_provider(image_data=square_png_bytes(300))(),
+        storage=_FakeStoragePort(), guard=_MemGuard(cap=5), acknowledge_premium=True,
+        content_mode="scientific", crop="9x16", _regenerate=_spy,
+    )
+    assert seen["crop"] == "9x16" and seen["content_mode"] == "scientific"
+
+
+async def test_recreate_preserves_failed_record_verbatim(tmp_path, monkeypatch):
+    """Data Models warning (EV1) — recreate_slide returns regenerate_slide's record
+    verbatim, so a failed record's `error` and `image_ref=None` survive (and charge no cap)."""
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    guard = _MemGuard(cap=5)
+
+    async def _fail_regen(**kw):
+        return {"idx": kw["idx"], "image_prompt": kw["image_prompt"],
+                "image_ref": None, "status": "failed", "error": "provider boom"}
+
+    record = await recreate_slide(
+        carousel=_carousel(), idx=1, note="x", out_dir=str(tmp_path),
+        provider=make_fake_provider(image_data=square_png_bytes(300))(),
+        storage=_FakeStoragePort(), guard=guard, acknowledge_premium=True,
+        _regenerate=_fail_regen,
+    )
+    assert record["status"] == "failed"
+    assert record["error"] == "provider boom"   # EV1 error key preserved through the policy layer
+    assert record["image_ref"] is None          # failed record carries no ref
+    assert guard.count("car1") == 0             # register-after-success: no charge
