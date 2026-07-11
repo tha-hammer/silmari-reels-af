@@ -28,6 +28,9 @@ from deps import (
 
 CREATE = "/api/v1/carousels"
 CID = "car_1"
+SEEDED_SLIDE_COUNT = 3
+RECREATE_SLIDE_IDX = 1
+OUT_OF_RANGE_SLIDE_IDX = 99
 TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
 
@@ -52,7 +55,7 @@ def _seed(repo, org=ORG_ID, cid=CID, status="draft"):
         status=status,
         slides=[
             {"idx": idx, "image_ref": f"ref-{idx}", "prompt": f"p{idx}", "status": "ok"}
-            for idx in range(3)
+            for idx in range(SEEDED_SLIDE_COUNT)
         ],
     )
 
@@ -162,7 +165,10 @@ def test_recreate_no_session_is_401_before_repo_or_spend():
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "x"},
+    )
 
     assert resp.status_code == 401
     assert calls == []
@@ -184,7 +190,10 @@ def test_recreate_viewer_is_403_before_repo_or_spend(monkeypatch):
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "x"},
+    )
 
     assert resp.status_code == 403
     assert calls == []
@@ -413,7 +422,12 @@ def test_recreate_replaces_only_that_slide(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     repo = FakeCarouselRepo()
     _seed(repo)
-    recreated = {"idx": 1, "image_ref": "ref-1-new", "prompt": "p1", "status": "ok"}
+    recreated = {
+        "idx": RECREATE_SLIDE_IDX,
+        "image_ref": "ref-1-new",
+        "prompt": "p1",
+        "status": "ok",
+    }
 
     def fake_recreate(ctx, cid, idx, note, **kwargs):
         assert kwargs["provider"] is not None
@@ -426,11 +440,14 @@ def test_recreate_replaces_only_that_slide(monkeypatch):
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "brighter"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "brighter"},
+    )
 
     assert resp.status_code == 200
     assert resp.get_json()["image_ref"] == "ref-1-new"
-    assert repo.replaced == [(ORG_ID, CID, 1)]
+    assert repo.replaced == [(ORG_ID, CID, RECREATE_SLIDE_IDX)]
 
 
 def test_cross_org_recreate_is_404(monkeypatch):
@@ -449,7 +466,10 @@ def test_cross_org_recreate_is_404(monkeypatch):
     client = server.create_app(
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "x"},
+    )
 
     assert resp.status_code == 404
     assert calls == []
@@ -470,7 +490,10 @@ def test_recreate_without_openrouter_key_is_503_no_spend(monkeypatch):
     client = server.create_app(
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "x"},
+    )
 
     assert resp.status_code == 503
     assert calls == []
@@ -488,7 +511,7 @@ def test_recreate_blank_note_is_400_before_provider_or_spend(monkeypatch):
 
     def fake_recreate(*args, **kwargs):
         calls.append((args, kwargs))
-        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+        return {"idx": RECREATE_SLIDE_IDX, "image_ref": "new", "prompt": "p1", "status": "ok"}
 
     monkeypatch.setattr(server, "_openrouter_provider", provider_should_not_resolve)
     deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
@@ -496,7 +519,10 @@ def test_recreate_blank_note_is_400_before_provider_or_spend(monkeypatch):
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "  "})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "  "},
+    )
 
     assert resp.status_code == 400
     assert resp.get_json()["code"] == "invalid_note"
@@ -515,7 +541,12 @@ def test_recreate_out_of_range_idx_is_404_before_provider_or_spend(monkeypatch):
 
     def fake_recreate(*args, **kwargs):
         calls.append((args, kwargs))
-        return {"idx": 99, "image_ref": "new", "prompt": "p99", "status": "ok"}
+        return {
+            "idx": OUT_OF_RANGE_SLIDE_IDX,
+            "image_ref": "new",
+            "prompt": "p99",
+            "status": "ok",
+        }
 
     monkeypatch.setattr(server, "_openrouter_provider", provider_should_not_resolve)
     deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
@@ -523,7 +554,10 @@ def test_recreate_out_of_range_idx_is_404_before_provider_or_spend(monkeypatch):
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/99/recreate", json={"note": "x"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{OUT_OF_RANGE_SLIDE_IDX}/recreate",
+        json={"note": "x"},
+    )
 
     assert resp.status_code == 404
     assert calls == []
@@ -553,7 +587,10 @@ def test_default_recreate_uses_plan2_with_resolved_deps(monkeypatch, tmp_path):
     deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
     client = _client(deps)
 
-    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "brighter"})
+    resp = client.post(
+        f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate",
+        json={"note": "brighter"},
+    )
 
     assert resp.status_code == 200
     assert calls
@@ -565,7 +602,7 @@ def test_default_recreate_uses_plan2_with_resolved_deps(monkeypatch, tmp_path):
     assert call["carousel"]["slides"][1]["image_prompt"] == "p1"
     assert call["note"] == "brighter"
     assert repo.hq_recreate_count(make_ctx(), CID) == 1
-    assert repo.replaced == [(ORG_ID, CID, 1)]
+    assert repo.replaced == [(ORG_ID, CID, RECREATE_SLIDE_IDX)]
 
 
 def test_hq_cap_persists_across_requests(monkeypatch):
@@ -583,9 +620,10 @@ def test_hq_cap_persists_across_requests(monkeypatch):
     ).test_client()
 
     body = {"note": "refresh"}
-    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body).status_code == 200
-    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body).status_code == 200
-    over = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body)
+    url = f"/api/v1/carousels/{CID}/slides/{RECREATE_SLIDE_IDX}/recreate"
+    assert client.post(url, json=body).status_code == 200
+    assert client.post(url, json=body).status_code == 200
+    over = client.post(url, json=body)
 
     assert over.status_code in (402, 409)
     assert repo.hq_recreate_count(make_ctx(), CID) == 2

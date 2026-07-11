@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import os
 import re
 import tempfile
@@ -51,6 +52,7 @@ from reel_jobs import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
+API_MESSAGES_PATH = os.path.join(HERE, "api_messages.json")
 
 # Named literals introduced by this plan (§10 CodeCleanup gate) — headers, the
 # idempotency-pending code, and the handful of HTTP statuses set directly here
@@ -74,6 +76,17 @@ _CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
 _CAROUSEL_FINALIZE_RE = re.compile(r"^v1/carousels/([^/]+)/finalize$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
+
+
+def _load_api_messages() -> dict[str, str]:
+    with open(API_MESSAGES_PATH, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, dict):
+        raise RuntimeError("api_messages.json must contain a flat object")
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+API_MESSAGES = _load_api_messages()
 
 
 def _is_carousel_create(method: str, sub: str) -> bool:
@@ -544,15 +557,19 @@ def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, r
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
     view = deps.carousels.get(ctx, carousel_id)  # 404 before paid work / cross-org spend
-    if "OPENROUTER_API_KEY" not in os.environ:
-        raise SchemaUnavailable("OPENROUTER_API_KEY is required for carousel recreate")
+    has_openrouter_key = "OPENROUTER_API_KEY" in os.environ
+    if not has_openrouter_key:
+        raise SchemaUnavailable(API_MESSAGES["CAROUSEL_RECREATE_OPENROUTER_REQUIRED"])
     body = request.get_json(silent=True) or {}
     note = body.get("note", "")
     note = note if isinstance(note, str) else str(note)
-    if not note.strip():
-        raise BadRequest("note is required", code="invalid_note")
-    if slide_idx < 0 or slide_idx >= len(view.slides):
-        raise NotFound("slide not found")
+    note_is_blank = not note.strip()
+    if note_is_blank:
+        raise BadRequest(API_MESSAGES["CAROUSEL_RECREATE_NOTE_REQUIRED"], code="invalid_note")
+    slide_count = len(view.slides)
+    slide_out_of_range = slide_idx < 0 or slide_idx >= slide_count
+    if slide_out_of_range:
+        raise NotFound(API_MESSAGES["CAROUSEL_SLIDE_NOT_FOUND"])
     provider = _openrouter_provider()
     guard = CarouselHqRecreateGuard(deps.carousels, ctx)
     carousel = _carousel_manifest(carousel_id, view)

@@ -1,0 +1,5 @@
+{
+  "CAROUSEL_RECREATE_OPENROUTER_REQUIRED": "OPENROUTER_API_KEY is required for carousel recreate",
+  "CAROUSEL_RECREATE_NOTE_REQUIRED": "note is required",
+  "CAROUSEL_SLIDE_NOT_FOUND": "slide not found"
+}
