@@ -17,11 +17,16 @@ disable SuperTokens). The module-level ``app`` uses ``default_deps()`` and does
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import os
 import re
+import tempfile
 import uuid
+from importlib import import_module
+from pathlib import Path
 
-from carousels import HqRecreateCapError, build_carousel_create
+from carousels import CarouselHqRecreateGuard, HqRecreateCapError, build_carousel_create
 from deps import (
     AppDeps,
     BadGateway,
@@ -58,6 +63,7 @@ HTTP_ACCEPTED = 202
 HTTP_CONFLICT = 409
 HTTP_NOT_FOUND = 404
 TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
+RECREATE_OUTPUT_DIR = "reel-af-carousel-recreate"
 
 # Pure route predicates — inspect method/subpath ONLY (no I/O, no body parse).
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
@@ -488,27 +494,94 @@ def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int
     return jsonify({"status": view.status, "slides": view.slides}), 200
 
 
+def _openrouter_provider():
+    import_module("reel_af.sdk_patches")
+    from agentfield.media_providers import OpenRouterProvider
+
+    return OpenRouterProvider()
+
+
+async def _call_plan2_recreate(
+    *,
+    carousel: dict,
+    idx: int,
+    note: str,
+    out_dir: str,
+    provider,
+    storage,
+    guard,
+) -> dict:
+    from reel_af.recreate import recreate_slide
+
+    return await recreate_slide(
+        carousel=carousel,
+        idx=idx,
+        note=note,
+        out_dir=out_dir,
+        provider=provider,
+        storage=storage,
+        guard=guard,
+        acknowledge_premium=True,
+    )
+
+
+def _recreate_out_dir() -> str:
+    root = Path(os.getenv("REEL_CAROUSEL_RECREATE_DIR", tempfile.gettempdir()))
+    return str(root / RECREATE_OUTPUT_DIR)
+
+
+def _carousel_manifest(carousel_id: str, view) -> dict:
+    slides = []
+    for slide in view.slides:
+        prompt = slide.get("image_prompt") or slide.get("prompt") or ""
+        slides.append({**slide, "image_prompt": prompt})
+    return {"carousel_id": carousel_id, "run_id": carousel_id, "slides": slides}
+
+
+def _resolve_recreate_result(result):
+    return asyncio.run(result) if inspect.isawaitable(result) else result
+
+
 def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, recreate_fn) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
-    deps.carousels.get(ctx, carousel_id)  # 404 before paid work / cross-org spend
+    view = deps.carousels.get(ctx, carousel_id)  # 404 before paid work / cross-org spend
     if "OPENROUTER_API_KEY" not in os.environ:
         raise SchemaUnavailable("OPENROUTER_API_KEY is required for carousel recreate")
-    if recreate_fn is None:
-        raise SchemaUnavailable("carousel recreate is not configured")
     body = request.get_json(silent=True) or {}
     note = body.get("note", "")
     note = note if isinstance(note, str) else str(note)
+    provider = _openrouter_provider()
+    guard = CarouselHqRecreateGuard(deps.carousels, ctx)
+    carousel = _carousel_manifest(carousel_id, view)
+    out_dir = _recreate_out_dir()
     try:
-        slide = recreate_fn(
-            ctx,
-            carousel_id,
-            slide_idx,
-            note,
-            provider=deps.control_plane,
-            storage=deps.storage,
-            guard=deps.carousels,
-        )
+        if recreate_fn is None:
+            slide = _resolve_recreate_result(
+                _call_plan2_recreate(
+                    carousel=carousel,
+                    idx=slide_idx,
+                    note=note,
+                    out_dir=out_dir,
+                    provider=provider,
+                    storage=deps.storage,
+                    guard=guard,
+                )
+            )
+        else:
+            slide = _resolve_recreate_result(
+                recreate_fn(
+                    ctx,
+                    carousel_id,
+                    slide_idx,
+                    note,
+                    provider=provider,
+                    storage=deps.storage,
+                    guard=guard,
+                    carousel=carousel,
+                    out_dir=out_dir,
+                )
+            )
     except HqRecreateCapError as exc:
         raise Conflict(str(exc), code="hq_recreate_cap_exceeded") from exc
     deps.carousels.replace_slide(

@@ -347,6 +347,44 @@ def test_recreate_without_openrouter_key_is_503_no_spend(monkeypatch):
     assert repo.replaced == []
 
 
+def test_default_recreate_uses_plan2_with_resolved_deps(monkeypatch, tmp_path):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    monkeypatch.setenv("REEL_CAROUSEL_RECREATE_DIR", str(tmp_path))
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    provider = object()
+    calls = []
+
+    async def fake_plan2_recreate(**kwargs):
+        calls.append(kwargs)
+        kwargs["guard"].register(kwargs["carousel"]["carousel_id"])
+        return {
+            "idx": kwargs["idx"],
+            "image_ref": "ref-1-default",
+            "image_prompt": "p1 with note",
+            "status": "ok",
+        }
+
+    monkeypatch.setattr(server, "_openrouter_provider", lambda: provider, raising=False)
+    monkeypatch.setattr(server, "_call_plan2_recreate", fake_plan2_recreate, raising=False)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = _client(deps)
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "brighter"})
+
+    assert resp.status_code == 200
+    assert calls
+    call = calls[0]
+    assert call["provider"] is provider
+    assert call["storage"] is deps.storage
+    assert call["carousel"]["carousel_id"] == CID
+    assert call["carousel"]["run_id"] == CID
+    assert call["carousel"]["slides"][1]["image_prompt"] == "p1"
+    assert call["note"] == "brighter"
+    assert repo.hq_recreate_count(make_ctx(), CID) == 1
+    assert repo.replaced == [(ORG_ID, CID, 1)]
+
+
 def test_hq_cap_persists_across_requests(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     repo = FakeCarouselRepo(hq_cap=2)

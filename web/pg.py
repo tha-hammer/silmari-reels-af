@@ -560,6 +560,13 @@ class PgCarouselRepo(_SharedSchema):
             raise NotFound("carousel not found")
         raise HqRecreateCapError(f"HQ recreate cap reached for {carousel_id}")
 
+    def hq_recreate_count(self, ctx, carousel_id) -> int:  # pragma: no cover
+        return self._one(
+            "select hq_recreate_count from deepresearch.carousel "
+            "where id = %s and org_id = %s",
+            (carousel_id, ctx.org_id),
+        )[0]
+
     def _one(self, sql: str, params: tuple):  # pragma: no cover - integration
         conn = _connect(_database_url())
         try:

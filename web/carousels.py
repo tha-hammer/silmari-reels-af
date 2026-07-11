@@ -63,3 +63,18 @@ class CarouselSlideRefResolver:
 
     def resolve(self, ctx, carousel_id: str, slide_idx: int) -> str:
         return self._repo.slide_ref(ctx, carousel_id, slide_idx)
+
+
+class CarouselHqRecreateGuard:
+    """Plan-2 HqRecreateGuard backed by the org-scoped carousel repo."""
+
+    def __init__(self, repo, ctx):
+        self._repo = repo
+        self._ctx = ctx
+
+    def register(self, carousel_id: str) -> None:
+        self._repo.register_hq_recreate(self._ctx, carousel_id)
+
+    def count(self, carousel_id: str) -> int:
+        count = getattr(self._repo, "hq_recreate_count", None)
+        return count(self._ctx, carousel_id) if count is not None else 0
