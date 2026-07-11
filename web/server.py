@@ -551,6 +551,10 @@ def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, r
     body = request.get_json(silent=True) or {}
     note = body.get("note", "")
     note = note if isinstance(note, str) else str(note)
+    if not note.strip():
+        raise BadRequest("note is required", code="invalid_note")
+    if slide_idx < 0 or slide_idx >= len(view.slides):
+        raise NotFound("slide not found")
     provider = _openrouter_provider()
     guard = CarouselHqRecreateGuard(deps.carousels, ctx)
     carousel = _carousel_manifest(carousel_id, view)

@@ -477,6 +477,59 @@ def test_recreate_without_openrouter_key_is_503_no_spend(monkeypatch):
     assert repo.replaced == []
 
 
+def test_recreate_blank_note_is_400_before_provider_or_spend(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    calls = []
+
+    def provider_should_not_resolve():
+        raise AssertionError("provider resolved for invalid recreate note")
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+
+    monkeypatch.setattr(server, "_openrouter_provider", provider_should_not_resolve)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "  "})
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_note"
+    assert calls == []
+    assert repo.replaced == []
+
+
+def test_recreate_out_of_range_idx_is_404_before_provider_or_spend(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    calls = []
+
+    def provider_should_not_resolve():
+        raise AssertionError("provider resolved for invalid recreate idx")
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 99, "image_ref": "new", "prompt": "p99", "status": "ok"}
+
+    monkeypatch.setattr(server, "_openrouter_provider", provider_should_not_resolve)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/99/recreate", json={"note": "x"})
+
+    assert resp.status_code == 404
+    assert calls == []
+    assert repo.replaced == []
+
+
 def test_default_recreate_uses_plan2_with_resolved_deps(monkeypatch, tmp_path):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
     monkeypatch.setenv("REEL_CAROUSEL_RECREATE_DIR", str(tmp_path))
@@ -529,9 +582,10 @@ def test_hq_cap_persists_across_requests(monkeypatch):
         deps, enable_supertokens=False, recreate_fn=fake_recreate
     ).test_client()
 
-    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={}).status_code == 200
-    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={}).status_code == 200
-    over = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={})
+    body = {"note": "refresh"}
+    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body).status_code == 200
+    assert client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body).status_code == 200
+    over = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json=body)
 
     assert over.status_code in (402, 409)
     assert repo.hq_recreate_count(make_ctx(), CID) == 2
