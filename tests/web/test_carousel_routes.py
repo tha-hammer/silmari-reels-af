@@ -57,6 +57,23 @@ def _seed(repo, org=ORG_ID, cid=CID, status="draft"):
     )
 
 
+class ExplodingCarouselRepo(FakeCarouselRepo):
+    """Raises if a handler touches carousel state before auth/authorization."""
+
+    def _boom(self, *_args, **_kwargs):
+        raise AssertionError("carousel repo touched before auth gate")
+
+    insert_or_get_draft = _boom
+    attach_execution_id = _boom
+    get = _boom
+    slide_ref = _boom
+    replace_slide = _boom
+    set_status = _boom
+    draft_slide_refs = _boom
+    register_hq_recreate = _boom
+    hq_recreate_count = _boom
+
+
 def test_repo_and_resolver_satisfy_ports():
     assert isinstance(FakeCarouselRepo(), CarouselRepoPort)
     assert isinstance(CarouselSlideRefResolver(FakeCarouselRepo()), SlideRefResolverPort)
@@ -117,6 +134,85 @@ def test_create_no_session_is_401_before_work():
     assert resp.status_code == 401
     assert repo.inserted == []
     assert cp.dispatch_calls == []
+
+
+def test_get_no_session_is_401_before_repo():
+    deps = make_deps(
+        identity=FakeIdentity(error=Unauthorized("no session")),
+        carousels=ExplodingCarouselRepo(),
+    )
+
+    resp = _client(deps).get(f"/api/v1/carousels/{CID}")
+
+    assert resp.status_code == 401
+
+
+def test_recreate_no_session_is_401_before_repo_or_spend():
+    calls = []
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+
+    deps = make_deps(
+        identity=FakeIdentity(error=Unauthorized("no session")),
+        carousels=ExplodingCarouselRepo(),
+    )
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+
+    assert resp.status_code == 401
+    assert calls == []
+
+
+def test_recreate_viewer_is_403_before_repo_or_spend(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+    calls = []
+
+    def fake_recreate(*args, **kwargs):
+        calls.append((args, kwargs))
+        return {"idx": 1, "image_ref": "new", "prompt": "p1", "status": "ok"}
+
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("viewer")),
+        carousels=ExplodingCarouselRepo(),
+    )
+    client = server.create_app(
+        deps, enable_supertokens=False, recreate_fn=fake_recreate
+    ).test_client()
+
+    resp = client.post(f"/api/v1/carousels/{CID}/slides/1/recreate", json={"note": "x"})
+
+    assert resp.status_code == 403
+    assert calls == []
+
+
+def test_cancel_no_session_is_401_before_repo_or_storage():
+    storage = make_deps().storage
+    deps = make_deps(
+        identity=FakeIdentity(error=Unauthorized("no session")),
+        carousels=ExplodingCarouselRepo(),
+        storage=storage,
+    )
+
+    resp = _client(deps).post(f"/api/v1/carousels/{CID}/cancel")
+
+    assert resp.status_code == 401
+    assert storage.deleted == []
+
+
+def test_finalize_no_session_is_401_before_repo():
+    deps = make_deps(
+        identity=FakeIdentity(error=Unauthorized("no session")),
+        carousels=ExplodingCarouselRepo(),
+    )
+
+    resp = _client(deps).post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert resp.status_code == 401
 
 
 def test_create_rejects_identity_field():
