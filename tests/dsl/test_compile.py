@@ -7,15 +7,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from reel_af.dsl.compile import compile_composite, load_words
 from reel_af.dsl.composite import read_composite
 from reel_af.dsl.models import (
-    BlackSegment,
     FootageReel,
     SourceRef,
-    SourceSegment,
     validate_renderable,
 )
 

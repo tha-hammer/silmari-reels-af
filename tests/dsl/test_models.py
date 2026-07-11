@@ -9,31 +9,29 @@ Tests import reel_af.dsl.models and validate:
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 import pytest
 from pydantic import ValidationError
 
-
 # ── Constants ──────────────────────────────────────────────────────
 
 def test_constants_exist():
     from reel_af.dsl.models import (
-        MATCH_QUALITY_FLOOR,
-        SNAP_TOLERANCE_S,
-        JOIN_GAP_LIMIT_S,
-        MAX_WORDS,
-        MAX_SEGMENTS,
-        MAX_REEL_DURATION_S,
-        MAX_FILTER_GRAPH_CHARS,
-        CANVAS_WIDTH,
-        CANVAS_HEIGHT,
-        FPS,
         AUDIO_SAMPLE_RATE,
-        FFPROBE_DURATION_EPSILON_S,
-        FFMPEG_TIMEOUT_S,
+        CANVAS_HEIGHT,
+        CANVAS_WIDTH,
         DOWNLOAD_TIMEOUT_S,
+        FFMPEG_TIMEOUT_S,
+        FFPROBE_DURATION_EPSILON_S,
+        FPS,
+        JOIN_GAP_LIMIT_S,
+        MATCH_QUALITY_FLOOR,
+        MAX_FILTER_GRAPH_CHARS,
+        MAX_REEL_DURATION_S,
+        MAX_SEGMENTS,
+        MAX_WORDS,
+        SNAP_TOLERANCE_S,
     )
     assert MATCH_QUALITY_FLOOR == 0.85
     assert SNAP_TOLERANCE_S == 1.0
@@ -355,7 +353,7 @@ def test_footage_reel_rejects_non_adjacent_transitions():
 
 
 def test_footage_reel_rejects_duration_exceeding_max():
-    from reel_af.dsl.models import FootageReel, MAX_REEL_DURATION_S
+    from reel_af.dsl.models import FootageReel
     with pytest.raises(ValidationError):
         FootageReel(
             source_url="https://example.com/video.mp4",
@@ -449,7 +447,7 @@ def test_validate_renderable_raises_renderability_error_not_assert():
 # ── Extra fields are forbidden ─────────────────────────────────────
 
 def test_extra_fields_forbidden():
-    from reel_af.dsl.models import DslWord, SourceSegment, BlackSegment
+    from reel_af.dsl.models import BlackSegment, DslWord, SourceSegment
     with pytest.raises(ValidationError):
         DslWord(w="hello", start=0.0, end=0.5, bogus=True)
     with pytest.raises(ValidationError):
@@ -486,6 +484,7 @@ def test_words_sidecar_schema_version():
 
 def test_downloaded_segment_path_accepts_path():
     from pathlib import Path
+
     from reel_af.dsl.models import DownloadedSegment
     ds = DownloadedSegment(
         segment_id="seg-001",
@@ -498,6 +497,7 @@ def test_downloaded_segment_path_accepts_path():
 
 def test_downloaded_segment_path_coerces_str_to_path():
     from pathlib import Path
+
     from reel_af.dsl.models import DownloadedSegment
     ds = DownloadedSegment(
         segment_id="seg-001",
@@ -510,6 +510,7 @@ def test_downloaded_segment_path_coerces_str_to_path():
 
 def test_segment_fetch_request_target_path_accepts_path():
     from pathlib import Path
+
     from reel_af.dsl.models import SegmentFetchRequest
     req = SegmentFetchRequest(
         segment_id="seg-001",
@@ -548,7 +549,7 @@ def test_diagnostic_source_accepts_source_locus():
 
 
 def test_hole_context_marker_accepts_marker():
-    from reel_af.dsl.ast import Insert, SourceLocus
+    from reel_af.dsl.ast import Insert
     from reel_af.dsl.models import HoleContext, HoleDomain
     marker = Insert(selector="relevant", duration_s=5.0)
     domain = HoleDomain(name="duration_s")

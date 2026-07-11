@@ -8,13 +8,9 @@ import pytest
 
 from reel_af.dsl.ast import Extend, Insert, Join, Trans
 from reel_af.dsl.composite import (
-    CompositeDoc,
-    CompositeSegment,
-    MarkerAttachment,
     read_composite,
     read_composite_file,
 )
-
 
 # ── Fixture text (matches tests/dsl/fixtures/v1_supported.ts.md) ──
 

@@ -5,11 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
-from reel_af.dsl.compile import compile_composite, load_words
+from reel_af.dsl.compile import compile_composite
 from reel_af.dsl.composite import read_composite
-from reel_af.dsl.models import DslWord, SourceRef, WordsSidecar
+from reel_af.dsl.models import SourceRef, WordsSidecar
 from reel_af.dsl.relevant import RelevantCandidate, RelevantRange
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"

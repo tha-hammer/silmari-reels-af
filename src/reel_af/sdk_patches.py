@@ -87,7 +87,6 @@ def _patch_openrouter_video_download() -> None:
         import time
 
         import aiohttp
-
         from agentfield.multimodal_response import (
             FileOutput,
             MultimodalResponse,
@@ -155,7 +154,7 @@ def _patch_openrouter_video_download() -> None:
             poll_url = f"{base_url}/videos/{job_id}"
             start_time = time.monotonic()
             poll_data: Dict[str, Any] = {}
-            MAX_POLL_RETRIES = 3
+            max_poll_retries = 3
             consecutive_errors = 0
             while True:
                 if time.monotonic() - start_time >= timeout:
@@ -167,11 +166,11 @@ def _patch_openrouter_video_download() -> None:
                     async with session.get(poll_url, headers=headers) as resp:
                         if resp.status in (502, 503, 504):
                             consecutive_errors += 1
-                            if consecutive_errors >= MAX_POLL_RETRIES:
+                            if consecutive_errors >= max_poll_retries:
                                 detail = await resp.text()
                                 raise RuntimeError(
                                     f"OpenRouter video poll failed after "
-                                    f"{MAX_POLL_RETRIES} retries: HTTP "
+                                    f"{max_poll_retries} retries: HTTP "
                                     f"{resp.status} — {detail[:500]}"
                                 )
                             await asyncio.sleep(poll_interval)
@@ -187,7 +186,7 @@ def _patch_openrouter_video_download() -> None:
                         poll_data = await resp.json()
                 except aiohttp.ClientError:
                     consecutive_errors += 1
-                    if consecutive_errors >= MAX_POLL_RETRIES:
+                    if consecutive_errors >= max_poll_retries:
                         raise
                     await asyncio.sleep(poll_interval)
                     continue

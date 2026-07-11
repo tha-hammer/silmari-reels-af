@@ -3,7 +3,7 @@ finish stage actually calls. These would have caught the image-only provider
 being handed to the text `.ai()` call (no live API — just interface checks).
 See thoughts/.../2026-07-07-reel-finish-test-construction-postmortem.md.
 """
-from reel_af.cli import _composite_text_provider, _composite_image_provider
+from reel_af.cli import _composite_image_provider, _composite_text_provider
 
 
 def test_text_provider_exposes_ai():

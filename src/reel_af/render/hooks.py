@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 CRISP_YTDLP_FORMAT = "137+140/137+bestaudio[ext=m4a]"
 GENERIC_YTDLP_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"

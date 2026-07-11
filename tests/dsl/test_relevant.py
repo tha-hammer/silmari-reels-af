@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from reel_af.dsl.models import DslWord, WordsSidecar
 from reel_af.dsl.relevant import (
     RelevantCandidate,

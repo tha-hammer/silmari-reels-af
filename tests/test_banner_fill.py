@@ -49,8 +49,8 @@ def _render_banner(hook: str, cfg: ReelFinishConfig) -> Path:
     out = td / "frame.png"
     subprocess.run(
         ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
-         "-i", f"color=c=0x2b2b2b:s={cfg.canvas_w}x{cfg.canvas_h}:d=1",
-         "-vf", f"ass={a}", "-frames:v", "1", str(out)],
+         "-i", f"color=c=0x2b2b2b:s={cfg.canvas_w}x{cfg.canvas_h}:d=2",
+         "-vf", f"ass={a}", "-ss", "1", "-frames:v", "1", str(out)],
         check=True, capture_output=True,
     )
     return out

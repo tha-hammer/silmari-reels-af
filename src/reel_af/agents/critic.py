@@ -11,7 +11,6 @@ from typing import Any
 
 from reel_af.models import CriticOutput, EssenceCandidate
 
-
 _SYSTEM = """You are a viral-content editor. You're picking the 3 most
 viral candidate claims from a list. Score each on these four dimensions:
 

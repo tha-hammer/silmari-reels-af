@@ -65,11 +65,16 @@ def _find_font() -> str:
 def _ass_font_name(font_path: str) -> str:
     """Best-effort family name from the font filename."""
     stem = Path(font_path).stem.lower()
-    if "montserrat" in stem: return "Montserrat"
-    if "arial" in stem:      return "Arial"
-    if "helvetica" in stem:  return "Helvetica"
-    if "dejavu" in stem:     return "DejaVu Sans"
-    if "liberation" in stem: return "Liberation Sans"
+    if "montserrat" in stem:
+        return "Montserrat"
+    if "arial" in stem:
+        return "Arial"
+    if "helvetica" in stem:
+        return "Helvetica"
+    if "dejavu" in stem:
+        return "DejaVu Sans"
+    if "liberation" in stem:
+        return "Liberation Sans"
     return "sans-serif"
 
 
