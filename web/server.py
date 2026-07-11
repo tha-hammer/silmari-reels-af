@@ -837,6 +837,11 @@ def create_app(
             return redirect("/login")
         return send_from_directory(HERE, "index.html")
 
+    @app.get("/carousel_ui_config.json")
+    @auth(session_required=False)
+    def carousel_ui_config():
+        return send_from_directory(HERE, "carousel_ui_config.json")
+
     @app.get("/login")
     @app.get("/login/reset-password")
     def login() -> Response:
