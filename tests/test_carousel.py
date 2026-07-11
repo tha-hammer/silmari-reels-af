@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from util import make_fake_provider, square_png_bytes
 
 from reel_af.render.images import generate_first_frame
@@ -21,3 +22,27 @@ async def test_generate_first_frame_uses_explicit_model(tmp_path: Path):
 
     image_calls = [kw for method, kw in fake.calls if method == "image"]
     assert image_calls and image_calls[0]["model"] == "premium/model-x"
+
+
+async def test_generate_first_frame_defaults_to_env_model(tmp_path: Path):
+    from reel_af.render import images
+
+    fake = make_fake_provider(image_data=square_png_bytes(256))
+    provider = fake()
+
+    await generate_first_frame(provider, "a lab bench", 0, tmp_path)
+
+    image_calls = [kw for method, kw in fake.calls if method == "image"]
+    assert image_calls[0]["model"] == images.IMAGE_MODEL
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
+    from reel_af.render import images
+
+    fake = make_fake_provider(image_data=square_png_bytes(256))
+
+    await generate_first_frame(fake(), "x", 0, tmp_path, model=blank)
+
+    image_calls = [kw for method, kw in fake.calls if method == "image"]
+    assert image_calls[0]["model"] == images.IMAGE_MODEL
