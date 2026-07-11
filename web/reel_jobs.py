@@ -91,7 +91,20 @@ class ReelJobRef:
     result_ref: str | None = None
     completed_at: datetime | None = None
     params: dict = field(default_factory=dict)
+    source_research_run_id: uuid.UUID | None = None  # provenance (Plan 4, ISC-25)
     created: bool = True  # False when insert_or_get_queued returned an existing row (idempotency)
+
+
+@dataclass(frozen=True)
+class ResearchRunRef:
+    """A recorded cross-node research run (Plan 4, ISC-24). Carries ``execution_id``
+    so the poll path (``get_research_by_execution``) can resolve a run by it."""
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    created_by: uuid.UUID
+    status: str
+    execution_id: str | None = None
 
 
 def _reject_forbidden_identity(payload: dict) -> None:
@@ -109,8 +122,14 @@ def _is_valid_url(value: str) -> bool:
 
 
 # Never forwarded to the control plane: identity fields + the idempotency key
-# (the key is ownership/dedup metadata, not reasoner input; plan B0.4).
-_CP_STRIP = FORBIDDEN_IDENTITY_FIELDS | {"client_request_id"}
+# (the key is ownership/dedup metadata, not reasoner input; plan B0.4) + the
+# research provenance reference under BOTH its wire-key and DB-column names
+# (a reference for ownership stamping, never reasoner input; Plan 4 cross-plan lock).
+_CP_STRIP = FORBIDDEN_IDENTITY_FIELDS | {
+    "client_request_id",
+    "research_run_id",
+    "source_research_run_id",
+}
 
 
 def _clean_input(raw_input: dict) -> dict:
@@ -126,12 +145,18 @@ def _sanitized_params(raw_input: dict, target: str, preset: str | None) -> dict:
     return params
 
 
-def build_submission(target: str, body: dict) -> ReelSubmission:
+def build_submission(
+    target: str, body: dict, source_research_run_id: uuid.UUID | None = None
+) -> ReelSubmission:
     """Validate + canonicalize a submit body into a ``ReelSubmission`` (plan §6).
 
     Raises ``BadRequest`` for unsupported target, invalid JSON shape, missing
     ``input``, empty topic, invalid URL, missing upload handle, or any forbidden
     identity field at top level or under ``input``.
+
+    ``source_research_run_id`` is the caller's research provenance reference,
+    already **validated to belong to the caller's org** by the route (Plan 4,
+    ISC-25). It is a *reference*, never trusted for ownership.
     """
     if not isinstance(body, dict):
         raise BadRequest("body must be a JSON object", code="invalid_json")
@@ -155,7 +180,7 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
             title=topic[:TITLE_MAX],
             source_url=None,
             topic=topic,
-            source_research_run_id=None,
+            source_research_run_id=source_research_run_id,
             params=_sanitized_params(raw_input, target, raw_input.get("preset")),
             cp_input={**_clean_input(raw_input), "topic": topic},
         )
