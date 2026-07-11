@@ -18,6 +18,7 @@
     "researchRunPath": "/api/v1/research/run",
     "researchPollPath": "/api/v1/research/{id}",
     "createFromTextPath": "/api/v1/research/create",
+    "carouselCreatePath": "/api/v1/carousels",
     "carouselPath": "/api/v1/carousels/{id}",
     "carouselSlidePath": "/api/v1/carousels/{id}/slides/{idx}",
     "carouselRecreatePath": "/api/v1/carousels/{id}/slides/{idx}/recreate",
@@ -48,6 +49,7 @@
     "carouselCancel": "CANCEL",
     "carouselCreate": "CREATE",
     "carouselRecreate": "RECREATE",
+    "carouselRecreating": "RECREATING",
     "carouselNotePlaceholder": "note for this image",
     "roll": "ROLL",
     "rolling": "ROLLING",
@@ -489,7 +491,7 @@
       </div>
     </div>
 
-    <section class="carousel-review" id="carouselReview" hidden>
+    <section class="carousel-review" id="carouselReview" hidden aria-label="Carousel review">
       <div class="carousel-top">
         <div class="carousel-title">CAROUSEL REVIEW</div>
         <div class="carousel-actions">
@@ -544,7 +546,9 @@
     researchMode: "automatic",
     researchRunId: null,
     researchExecId: null,
-    researchDoc: ""
+    researchDoc: "",
+    carouselId: null,
+    carouselView: null
   };
 
   /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
@@ -565,7 +569,15 @@
   $("researchQuery").placeholder = CFG.copy.researchQueryPlaceholder;
   $("researchDoc").placeholder = CFG.copy.researchDocPlaceholder;
   $("createFromResearchLabel").textContent = CFG.copy.researchCreate;
+  $("carouselCancel").textContent = CFG.copy.carouselCancel;
+  $("carouselFinalize").textContent = CFG.copy.carouselCreate;
   $("rollLabel").textContent = CFG.copy.roll;
+
+  const carouselSlideTemplate = document.querySelector("[data-carousel-slide-template]");
+  if (carouselSlideTemplate) {
+    carouselSlideTemplate.querySelector("textarea").placeholder = CFG.copy.carouselNotePlaceholder;
+    carouselSlideTemplate.querySelector("[data-carousel-action]").textContent = CFG.copy.carouselRecreate;
+  }
 
   /* ── presets ── */
   function renderPresets() {
@@ -637,6 +649,17 @@
     x.addEventListener("change", updateResearchModeUi);
   });
   $("createFromResearch").onclick = createFromResearchFlow;
+  $("carouselCancel").onclick = cancelCarousel;
+  $("carouselFinalize").onclick = finalizeCarousel;
+  $("carouselSlides").addEventListener("click", (ev) => {
+    const button = ev.target.closest("[data-carousel-action='recreate']");
+    if (!button || button.closest("[data-carousel-slide-template]")) return;
+    const idx = Number(button.dataset.idx);
+    if (!Number.isInteger(idx)) return;
+    const slide = button.closest(".carousel-slide");
+    const note = slide ? slide.querySelector("textarea").value : "";
+    recreateCarouselSlide(idx, note, button);
+  });
 
   function selectedResearchOutputs() {
     if (state.researchMode === "automatic") return ["video", "carousel"];
@@ -849,8 +872,15 @@
       if (!text.trim()) throw new Error("research document is empty");
       advanceTo("render");
       logLine(`creating: ${outputs.join(" + ")}`);
-      const jobs = await postCreateFromResearch(text, outputs, state.researchRunId, clientRequestId);
-      const labels = jobs.map((j) => `${j.output}:${j.execution_id || j.job_id}`);
+      const jobs = [];
+      const fanoutOutputs = outputs.filter((output) => output !== "carousel");
+      if (fanoutOutputs.length) {
+        jobs.push(...await postCreateFromResearch(text, fanoutOutputs, state.researchRunId, clientRequestId));
+      }
+      if (outputs.includes("carousel")) {
+        jobs.push(await createCarouselReview(text, state.researchRunId, clientRequestId));
+      }
+      const labels = jobs.map((j) => `${j.output}:${j.execution_id || j.carousel_id || j.job_id}`);
       $("jobId").textContent = labels.join(", ");
       $("resultPath").textContent = labels.join(" · ");
       const a = $("resultLink"); a.href = "#"; a.style.display = "none";
@@ -919,6 +949,138 @@
     return j.jobs;
   }
 
+  async function getJson(path, subs = {}) {
+    const r = await fetch(url(path, subs), { method: "GET" });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`request failed (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    return j;
+  }
+
+  async function postJson(path, body = {}, subs = {}, clientRequestId = "") {
+    const headers = { "Content-Type": "application/json" };
+    if (clientRequestId) headers["Idempotency-Key"] = clientRequestId;
+    const r = await fetch(url(path, subs), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`request failed (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    return j;
+  }
+
+  async function createCarouselReview(text, researchRunId, clientRequestId) {
+    const body = { source_text: text, preset: "carousel-default" };
+    if (researchRunId) body.research_run_id = researchRunId;
+    const created = await postJson(
+      CFG.api.carouselCreatePath,
+      body,
+      {},
+      `${clientRequestId}:carousel-review`,
+    );
+    const carouselId = created.carousel_id || created.id;
+    if (!carouselId) throw new Error("carousel create returned no carousel_id");
+    state.carouselId = carouselId;
+    $("jobId").textContent = created.execution_id || carouselId;
+    await loadCarousel(carouselId);
+    logLine(`carousel ${carouselId} ready for review`, "ok");
+    return {
+      output: "carousel",
+      carousel_id: carouselId,
+      execution_id: created.execution_id,
+      outcome: "review",
+    };
+  }
+
+  async function loadCarousel(carouselId) {
+    const view = await getJson(CFG.api.carouselPath, { id: carouselId });
+    state.carouselId = carouselId;
+    state.carouselView = view;
+    renderCarousel(view);
+    return view;
+  }
+
+  function renderCarousel(view) {
+    const slides = Array.isArray(view.slides) ? [...view.slides] : [];
+    slides.sort((a, b) => Number(a.idx) - Number(b.idx));
+    $("carouselSlides").replaceChildren();
+    for (const slide of slides) renderCarouselSlide(slide);
+    $("carouselReview").hidden = false;
+    const terminal = ["succeeded", "failed", "cancelled", "canceled"].includes(String(view.status || ""));
+    $("carouselCancel").disabled = state.busy || terminal;
+    $("carouselFinalize").disabled = state.busy || terminal || slides.length === 0;
+  }
+
+  function renderCarouselSlide(slide) {
+    const idx = Number(slide.idx);
+    const row = carouselSlideTemplate.cloneNode(true);
+    row.hidden = false;
+    row.removeAttribute("data-carousel-slide-template");
+    const img = row.querySelector("img");
+    img.src = url(CFG.api.carouselSlidePath, { id: state.carouselId, idx });
+    img.alt = `Slide ${pad(idx + 1)}`;
+    row.querySelector(".idx").textContent = `SLIDE ${pad(idx + 1)}`;
+    row.querySelector(".prompt").textContent = slide.prompt || slide.image_prompt || "";
+    row.querySelector("textarea").placeholder = CFG.copy.carouselNotePlaceholder;
+    const button = row.querySelector("[data-carousel-action]");
+    button.dataset.idx = String(idx);
+    button.textContent = CFG.copy.carouselRecreate;
+    button.disabled = state.busy || String(state.carouselView && state.carouselView.status) !== "draft";
+    $("carouselSlides").appendChild(row);
+  }
+
+  async function recreateCarouselSlide(idx, note, button) {
+    if (!state.carouselId || state.busy) return;
+    setBusy(true);
+    button.textContent = CFG.copy.carouselRecreating;
+    try {
+      await postJson(CFG.api.carouselRecreatePath, { note }, { id: state.carouselId, idx });
+      await loadCarousel(state.carouselId);
+      logLine(`slide ${pad(idx + 1)} recreated`, "ok");
+    } finally {
+      if (document.body.contains(button)) button.textContent = CFG.copy.carouselRecreate;
+      setBusy(false);
+    }
+  }
+
+  async function cancelCarousel() {
+    if (!state.carouselId || state.busy) return;
+    const carouselId = state.carouselId;
+    setBusy(true);
+    try {
+      await postJson(CFG.api.carouselCancelPath, {}, { id: carouselId });
+      state.carouselView = null;
+      state.carouselId = null;
+      $("carouselReview").hidden = true;
+      $("carouselSlides").replaceChildren();
+      logLine(`carousel ${carouselId} cancelled`, "ok");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finalizeCarousel() {
+    if (!state.carouselId || state.busy) return;
+    setBusy(true);
+    try {
+      const result = await postJson(CFG.api.carouselFinalizePath, {}, { id: state.carouselId });
+      const view = {
+        ...(state.carouselView || {}),
+        status: result.status || "succeeded",
+        slides: state.carouselView ? state.carouselView.slides : [],
+      };
+      state.carouselView = view;
+      renderCarousel(view);
+      logLine(`carousel ${state.carouselId} finalized`, "ok");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function poll(id) {
     const start = Date.now();
     let last = null;
@@ -974,6 +1136,14 @@
     $("roll").classList.toggle("busy", b);
     $("rollLabel").textContent = b ? CFG.copy.rolling : CFG.copy.roll;
     $("createFromResearch").classList.toggle("busy", b);
+    const carouselStatus = String(state.carouselView && state.carouselView.status || "");
+    const carouselTerminal = ["succeeded", "failed", "cancelled", "canceled"].includes(carouselStatus);
+    const carouselHasSlides = Boolean(state.carouselView && Array.isArray(state.carouselView.slides) && state.carouselView.slides.length);
+    $("carouselCancel").disabled = b || !state.carouselId || carouselTerminal;
+    $("carouselFinalize").disabled = b || !state.carouselId || carouselTerminal || !carouselHasSlides;
+    document.querySelectorAll("#carouselSlides [data-carousel-action]").forEach((x) => {
+      x.disabled = b || !state.carouselId || carouselTerminal;
+    });
     vp.classList.toggle("busy", b);
     updateResearchModeUi();
   }
