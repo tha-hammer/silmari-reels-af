@@ -376,8 +376,6 @@ def _handle_research_poll(deps: AppDeps, execution_id: str) -> tuple[Response, i
 
 # ─────────────── create-from-research fan-out (Plan 5, ISC-30/35) ───────────────
 
-_VALID_OUTPUTS = ("carousel", "video")
-
 
 class _DispatchOutcome:
     """Result of enqueuing one fan-out leg (no exception on CP failure — the caller
@@ -394,7 +392,7 @@ def _validate_outputs(body: dict) -> list[str]:
         raise BadRequest("outputs must be a non-empty list", code="invalid_outputs")
     outputs = sorted(set(raw))
     for output in outputs:
-        if output not in _VALID_OUTPUTS:
+        if output not in TEXT_TARGET_BY_OUTPUT:  # single source of truth for valid outputs
             raise BadRequest(f"unknown output type: {output}", code="unknown_output")
     return outputs
 
