@@ -79,6 +79,8 @@ def _fit_text_body(cleaned: str) -> str:
 
 def _prepare_text_body(text: str | None) -> str:
     cleaned = (text or "").strip()
+    if not cleaned:
+        raise ValueError("essence_from_text: text is empty or whitespace-only")
     return _fit_text_body(cleaned)
 
 

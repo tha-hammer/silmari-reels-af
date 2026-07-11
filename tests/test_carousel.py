@@ -104,6 +104,18 @@ async def test_essence_from_text_bypasses_fetch(monkeypatch):
     assert extract._SYSTEM == app.ai_calls[0]["system"]
 
 
+@pytest.mark.parametrize("bad", ["", "   ", "\n\t ", None])
+async def test_essence_from_text_rejects_empty(bad):
+    from reel_af.agents import extract
+
+    class _NeverApp:
+        async def ai(self, **_):
+            raise AssertionError("ai must not be called for empty text")
+
+    with pytest.raises(ValueError, match="text"):
+        await extract.essence_from_text(_NeverApp(), bad)
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images
