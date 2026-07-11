@@ -833,9 +833,18 @@ def create_app(
     def index():
         try:
             deps.identity.resolve(request)
+        except SchemaUnavailable:
+            # Shared user-data schema not ready — surface 503, never loop to /login
+            # (masking a schema 503 as a redirect is what caused the sign-in loop).
+            return jsonify({"error": "user-data schema unavailable"}), 503
         except HttpError:
             return redirect("/login")
         return send_from_directory(HERE, "index.html")
+
+    @app.get("/carousel_ui_config.json")
+    @auth(session_required=False)
+    def carousel_ui_config():
+        return send_from_directory(HERE, "carousel_ui_config.json")
 
     @app.get("/login")
     @app.get("/login/reset-password")

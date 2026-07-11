@@ -8,9 +8,10 @@
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
 
-<!-- ═══ CONFIG · all tunables + copy + backend contract live here (one jump) ═══ -->
+<!-- ═══ BOOT CONFIG · backend contract + config file entrypoints ═══ -->
 <script type="application/json" id="config">
 {
+  "carouselUiConfigPath": "/carousel_ui_config.json",
   "api": {
     "base": "",
     "executePath": "/api/v1/execute/async/{target}",
@@ -94,26 +95,6 @@
     "rolling": "ROLLING",
     "reset": "NEW TAKE"
   },
-  "carouselReviewTitle": "CAROUSEL REVIEW",
-  "carouselReviewAriaLabel": "Carousel review",
-  "carouselCancelLabel": "CANCEL",
-  "carouselCreateLabel": "CREATE",
-  "carouselRecreateLabel": "RECREATE",
-  "carouselRecreatingLabel": "RECREATING",
-  "carouselNotePlaceholder": "note for this image",
-  "carouselDefaultPreset": "carousel-default",
-  "carouselOutputKey": "carousel",
-  "carouselOutcomeReview": "review",
-  "carouselClientRequestSuffix": "carousel-review",
-  "carouselDraftStatus": "draft",
-  "carouselSucceededStatus": "succeeded",
-  "carouselTerminalStatuses": ["succeeded", "failed", "cancelled", "canceled"],
-  "carouselReadyLog": "carousel {id} ready for review",
-  "carouselRecreatedLog": "slide {idx} recreated",
-  "carouselCancelledLog": "carousel {id} cancelled",
-  "carouselFinalizedLog": "carousel {id} finalized",
-  "carouselSlideAlt": "Slide {idx}",
-  "carouselSlideLabel": "SLIDE {idx}",
   "stages": [
     { "key": "queued",     "label": "SLATE",      "note": "job on the bench" },
     { "key": "research",   "label": "RESEARCH",   "note": "briefing the room" },
@@ -636,9 +617,16 @@
   </div>
 
 <script>
-(() => {
+(async () => {
   "use strict";
-  const CFG = JSON.parse(document.getElementById("config").textContent);
+  const BOOT_CFG = JSON.parse(document.getElementById("config").textContent);
+  async function loadFlatConfig(path) {
+    const response = await fetch(path, { method: "GET" });
+    const loaded = response.ok;
+    if (!loaded) throw new Error(`config load failed (${response.status})`);
+    return response.json();
+  }
+  const CFG = { ...BOOT_CFG, ...(await loadFlatConfig(BOOT_CFG.carouselUiConfigPath)) };
   const $ = (id) => document.getElementById(id);
 
   // ── named constants (no bare literals for modes / kinds / statuses) ──
@@ -873,9 +861,11 @@
   $("carouselFinalize").onclick = finalizeCarousel;
   $("carouselSlides").addEventListener("click", (ev) => {
     const button = ev.target.closest("[data-carousel-action='recreate']");
-    if (!button || button.closest("[data-carousel-slide-template]")) return;
+    const templateButton = button ? button.closest("[data-carousel-slide-template]") : null;
+    if (!button || templateButton) return;
     const idx = Number(button.dataset.idx);
-    if (!Number.isInteger(idx)) return;
+    const idxIsInteger = Number.isInteger(idx);
+    if (!idxIsInteger) return;
     const slide = button.closest(".carousel-slide");
     const note = slide ? slide.querySelector("textarea").value : "";
     recreateCarouselSlide(idx, note, button);
@@ -1210,7 +1200,7 @@
       `${clientRequestId}:${CFG.carouselClientRequestSuffix}`,
     );
     const carouselId = created.carousel_id || created.id;
-    if (!carouselId) throw new Error("carousel create returned no carousel_id");
+    if (!carouselId) throw new Error(CFG.carouselCreateMissingIdError);
     state.carouselId = carouselId;
     $("jobId").textContent = created.execution_id || carouselId;
     await loadCarousel(carouselId);

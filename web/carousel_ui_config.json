@@ -1,0 +1,23 @@
+{
+  "carouselReviewTitle": "CAROUSEL REVIEW",
+  "carouselReviewAriaLabel": "Carousel review",
+  "carouselCancelLabel": "CANCEL",
+  "carouselCreateLabel": "CREATE",
+  "carouselRecreateLabel": "RECREATE",
+  "carouselRecreatingLabel": "RECREATING",
+  "carouselNotePlaceholder": "note for this image",
+  "carouselDefaultPreset": "carousel-default",
+  "carouselOutputKey": "carousel",
+  "carouselOutcomeReview": "review",
+  "carouselClientRequestSuffix": "carousel-review",
+  "carouselDraftStatus": "draft",
+  "carouselSucceededStatus": "succeeded",
+  "carouselTerminalStatuses": ["succeeded", "failed", "cancelled", "canceled"],
+  "carouselReadyLog": "carousel {id} ready for review",
+  "carouselRecreatedLog": "slide {idx} recreated",
+  "carouselCancelledLog": "carousel {id} cancelled",
+  "carouselFinalizedLog": "carousel {id} finalized",
+  "carouselSlideAlt": "Slide {idx}",
+  "carouselSlideLabel": "SLIDE {idx}",
+  "carouselCreateMissingIdError": "carousel create returned no carousel_id"
+}

@@ -166,3 +166,61 @@ def test_default_deps_identity_is_fail_closed():
     deps = default_deps()
     with pytest.raises(Unauthorized):
         deps.identity.resolve(object())
+
+
+# ── auth readiness must NOT gate on feature tables (regression: /login loop) ──
+class _FakeCursor:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def execute(self, *_a, **_k):
+        pass
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def cursor(self):
+        return _FakeCursor(self._rows)
+
+    def close(self):
+        pass
+
+
+def test_auth_readiness_ignores_missing_feature_tables():
+    """Prod repro (deployment 3244f3d2): auth tables applied, carousel/research_run
+    migrations still pending. The AUTH gate must PASS so sign-in works; the FEATURE
+    gate must FAIL. This is the regression guard for the /login loop — a missing
+    feature migration must never brick login."""
+    from pg import AUTH_SCHEMA, FEATURE_SCHEMA, _assert_schema
+
+    # Only the auth tables exist in the DB (mirrors prod through the current migrations).
+    present_rows = [(table, col) for table, cols in AUTH_SCHEMA.items() for col in cols]
+
+    _assert_schema(_FakeConn(present_rows), AUTH_SCHEMA)  # must NOT raise → login works
+
+    with pytest.raises(SchemaUnavailable):
+        _assert_schema(_FakeConn(present_rows), FEATURE_SCHEMA)
+
+
+def test_shared_schema_ensure_ready_uses_auth_schema_only(monkeypatch):
+    """The identity-path gate (_SharedSchema.ensure_ready) asserts AUTH_SCHEMA, not
+    the full feature schema — so it green-lights login on an auth-only database."""
+    import pg
+    from pg import AUTH_SCHEMA, PgMembershipReader
+
+    monkeypatch.setenv("DEEPRESEARCH_DATABASE_URL", "postgresql://stub")
+    present_rows = [(table, col) for table, cols in AUTH_SCHEMA.items() for col in cols]
+    monkeypatch.setattr(pg, "_connect", lambda _url: _FakeConn(present_rows))
+
+    PgMembershipReader().ensure_ready()  # auth-only DB → no raise (login works)

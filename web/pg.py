@@ -33,13 +33,22 @@ def _owner_emails() -> set[str]:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 # Required schema surface (plan B0.3): table -> required columns.
-REQUIRED_SCHEMA: dict[str, set[str]] = {
+# Auth-critical schema — the ONLY tables required to RESOLVE IDENTITY. The
+# login/identity readiness gate (ResolverIdentity.resolve → ensure_ready) checks
+# ONLY these, so a pending FEATURE migration can never brick login (no /login loop).
+AUTH_SCHEMA: dict[str, set[str]] = {
     "user": {"id", "supertokens_user_id", "status"},
     "organization": {"id", "status"},
     "membership": {"org_id", "user_id", "role", "status"},
     "role_definition": {"role", "permissions"},
-    # CI-1: insert_research_run writes 6 columns; fail closed at startup (503) if the
-    # root migration lacks execution_id/created_at rather than 500 on the first INSERT.
+}
+
+# Feature schema — required by the reel/research/carousel FEATURE routes, NOT by
+# login. Checked at the feature boundary (ensure_feature_ready), so a pending
+# feature migration yields a clean 503 on that feature — never a login loop.
+FEATURE_SCHEMA: dict[str, set[str]] = {
+    # CI-1: insert_research_run writes 6 columns; fail closed (503) if the root
+    # migration lacks execution_id/created_at rather than 500 on the first INSERT.
     "research_run": {"id", "org_id", "created_by", "execution_id", "status", "created_at"},
     "reel_job": {
         "id", "org_id", "created_by", "client_request_id", "title", "source_url", "topic",
@@ -52,6 +61,9 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
     },
     "carousel_slide": {"carousel_id", "org_id", "idx", "image_ref", "prompt", "status"},
 }
+
+# Full schema (migrations / docs / feature-readiness reference the union).
+REQUIRED_SCHEMA: dict[str, set[str]] = {**AUTH_SCHEMA, **FEATURE_SCHEMA}
 
 
 def _database_url() -> str:
@@ -72,7 +84,7 @@ def _connect(url: str):
         raise SchemaUnavailable(f"user-data DB unreachable: {exc}") from exc
 
 
-def _assert_schema(conn) -> None:
+def _assert_schema(conn, required: dict[str, set[str]]) -> None:
     with conn.cursor() as cur:
         cur.execute(
             "select table_name, column_name from information_schema.columns "
@@ -81,7 +93,7 @@ def _assert_schema(conn) -> None:
         present: dict[str, set[str]] = {}
         for table, column in cur.fetchall():
             present.setdefault(table, set()).add(column)
-    for table, columns in REQUIRED_SCHEMA.items():
+    for table, columns in required.items():
         have = present.get(table)
         if have is None:
             raise SchemaUnavailable(f"missing table deepresearch.{table}")
@@ -94,10 +106,23 @@ class _SharedSchema:
     """Readiness gate shared by the reader and the repo (checked once per call)."""
 
     def ensure_ready(self) -> None:
+        """Auth-path readiness: check ONLY AUTH_SCHEMA. Never gates login on the
+        feature tables, so a pending carousel/research migration cannot loop /login."""
         url = _database_url()
         conn = _connect(url)
         try:
-            _assert_schema(conn)
+            _assert_schema(conn, AUTH_SCHEMA)
+        finally:
+            conn.close()
+
+    def ensure_feature_ready(self) -> None:
+        """Feature-path readiness: check FEATURE_SCHEMA. A pending feature migration
+        yields a clean 503 on that feature route — not a login loop. Call at the
+        reel/research/carousel feature boundary."""
+        url = _database_url()
+        conn = _connect(url)
+        try:
+            _assert_schema(conn, FEATURE_SCHEMA)
         finally:
             conn.close()
 

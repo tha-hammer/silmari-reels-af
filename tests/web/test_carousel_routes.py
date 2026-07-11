@@ -33,6 +33,7 @@ RECREATE_SLIDE_IDX = 1
 OUT_OF_RANGE_SLIDE_IDX = 99
 TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+CAROUSEL_UI_CONFIG_PATH = WEB_ROOT / "carousel_ui_config.json"
 
 
 def _client(deps):
@@ -100,6 +101,7 @@ def test_index_has_carousel_review_ui_contract():
     assert config_match is not None
     config = json.loads(config_match.group(1))
 
+    assert config["carouselUiConfigPath"] == "/carousel_ui_config.json"
     assert config["api"]["carouselCreatePath"] == "/api/v1/carousels"
     assert config["api"]["carouselPath"] == "/api/v1/carousels/{id}"
     assert config["api"]["carouselSlidePath"] == "/api/v1/carousels/{id}/slides/{idx}"
@@ -118,6 +120,36 @@ def test_index_has_carousel_review_ui_contract():
     assert "async function recreateCarouselSlide" in html
     assert "async function cancelCarousel" in html
     assert "async function finalizeCarousel" in html
+
+
+def test_carousel_ui_config_is_external_flat_json():
+    html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+    config = json.loads(CAROUSEL_UI_CONFIG_PATH.read_text(encoding="utf-8"))
+
+    assert '"carouselReviewTitle"' not in html
+    assert config["carouselReviewTitle"] == "CAROUSEL REVIEW"
+    assert config["carouselDefaultPreset"] == "carousel-default"
+    assert config["carouselTerminalStatuses"] == [
+        "succeeded",
+        "failed",
+        "cancelled",
+        "canceled",
+    ]
+    assert all(not isinstance(value, dict) for value in config.values())
+
+
+def test_carousel_ui_config_route_serves_flat_json():
+    resp = _client(make_deps(identity=FakeIdentity(make_ctx()))).get(
+        "/carousel_ui_config.json"
+    )
+
+    assert resp.status_code == 200
+    body = json.loads(resp.get_data(as_text=True))
+    assert body["carouselRecreateLabel"] == "RECREATE"
+    assert body["carouselCreateMissingIdError"] == (
+        "carousel create returned no carousel_id"
+    )
+    assert all(not isinstance(value, dict) for value in body.values())
 
 
 def test_create_no_session_is_401_before_work():
