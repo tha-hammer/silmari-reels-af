@@ -41,10 +41,18 @@ HTTP_NOT_FOUND = 404
 # Pure route predicates — inspect method/subpath ONLY (no I/O, no body parse).
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
+_SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 
 
 def _is_upload(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/uploads"
+
+
+def _slide_target(method: str, sub: str) -> tuple[str, int] | None:
+    if method != "GET":
+        return None
+    m = _SLIDE_RE.match(sub)
+    return (m.group(1), int(m.group(2))) if m else None
 
 
 def _submit_target(method: str, sub: str) -> str | None:
@@ -193,6 +201,18 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     return jsonify(payload), status
 
 
+def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
+    """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
+    object exists → 302-redirect to a presigned object-storage URL. Concealment
+    (cross-org → 404) lives in ``deps.slides.resolve`` (Plan 6 real impl), not here."""
+    ctx = deps.identity.resolve(request)                       # 401 / 403 / 503 first
+    ref = deps.slides.resolve(ctx, carousel_id, slide_idx)     # 404 conceals cross-org/absent
+    if not deps.storage.exists(ref):
+        raise NotFound("slide image not found")                # 404, fail-closed (ISC-48)
+    url = deps.storage.presigned_url(ref)
+    return redirect(url), 302   # single 302: tuple status, matching sibling (Response,int) handlers
+
+
 def _handle_upload(deps: AppDeps) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
@@ -235,6 +255,9 @@ def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
     execution_id = _poll_id(method, subpath)
     if execution_id is not None:
         return _handle_poll(deps, execution_id)
+    slide = _slide_target(method, subpath)
+    if slide is not None:
+        return _handle_slide(deps, *slide)
     return _not_found()
 
 
