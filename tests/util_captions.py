@@ -108,6 +108,25 @@ def make_silent_reel(path: Path, *, seconds: float = 2.0, w: int = 1080, h: int 
     return path
 
 
+def make_no_audio_reel(path: Path, *, seconds: float = 2.0, w: int = 1080, h: int = 1920) -> Path:
+    """Render a real vertical mp4 with NO audio stream (video-only), like a silent
+    screen recording. Used to exercise the real T8 ``has_audio_stream`` probe."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-i", f"color=c=black:s={w}x{h}:d={seconds}:r=30",
+            "-t", str(seconds),
+            "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-an",  # no audio stream at all
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return path
+
+
 def fake_whisper_json(words: list[tuple[float, float, str]]) -> dict:
     """Build a whisper-ctranslate2-shaped JSON payload from word tuples."""
     return {

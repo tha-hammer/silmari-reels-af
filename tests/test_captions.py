@@ -9,9 +9,12 @@ real ffprobe/wav path runs under ffmpeg without needing a speech fixture.
 
 from __future__ import annotations
 
+import subprocess
+
 from util_captions import (
     StubFinishConfig,
     fake_whisper_json,
+    make_no_audio_reel,
     make_silent_reel,
     parse_dialogues,
     requires_ffmpeg,
@@ -201,3 +204,54 @@ def test_real_config_overrides_flow_through():
     style_line = next(ln for ln in ass.splitlines() if ln.startswith(f"Style: {captions.CAPTION_STYLE_NAME},"))
     assert "&H00FF00FF" in style_line  # British-spelled outline_colour flows through
     assert style_line.split(",")[2] == "72"  # fontsize override
+
+
+# ───── T8: has_audio_stream (audio-stream presence probe) ────────────
+class _AudioProbeProc:
+    # positional arg 2 stays stderr (compat with tests/test_ingest.py::_Proc).
+    def __init__(self, rc=0, err="", *, out=""):
+        self.returncode = rc
+        self.stderr = err
+        self.stdout = out
+
+
+def test_has_audio_stream_true_when_ffprobe_lists_stream():
+    assert captions.has_audio_stream("s.mp4", runner=lambda *a, **k: _AudioProbeProc(0, out="0\n")) is True
+
+
+def test_has_audio_stream_false_when_no_stream():
+    assert captions.has_audio_stream("s.mp4", runner=lambda *a, **k: _AudioProbeProc(0, out="")) is False
+
+
+def test_has_audio_stream_false_on_ffprobe_error():
+    assert captions.has_audio_stream("s.mp4", runner=lambda *a, **k: _AudioProbeProc(1, "boom", out="")) is False
+
+
+def test_has_audio_stream_true_for_multiple_streams():
+    assert captions.has_audio_stream("s.mp4", runner=lambda *a, **k: _AudioProbeProc(0, out="0\n1\n")) is True
+
+
+def test_has_audio_stream_passes_timeout():
+    seen = {}
+
+    def run(*_a, **kwargs):
+        seen["timeout"] = kwargs["timeout"]
+        return _AudioProbeProc(0, out="0\n")
+
+    assert captions.has_audio_stream("s.mp4", timeout_s=2.5, runner=run) is True
+    assert seen["timeout"] == 2.5
+
+
+def test_has_audio_stream_false_on_timeout():
+    def run(*_a, **_kwargs):
+        raise subprocess.TimeoutExpired("ffprobe", timeout=0.01)
+
+    assert captions.has_audio_stream("s.mp4", timeout_s=0.01, runner=run) is False
+
+
+@requires_ffmpeg
+def test_has_audio_stream_real_ffprobe_distinguishes_audio(tmp_path):
+    with_audio = make_silent_reel(tmp_path / "with.mp4", seconds=1.0)      # has an anullsrc audio track
+    no_audio = make_no_audio_reel(tmp_path / "without.mp4", seconds=1.0)   # video-only, like a screencast
+    assert captions.has_audio_stream(with_audio) is True
+    assert captions.has_audio_stream(no_audio) is False

@@ -62,6 +62,10 @@ import reel_af.sdk_patches  # noqa: E402, F401
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
     agentfield_server=os.getenv("AGENTFIELD_SERVER", "http://localhost:8080"),
+    # Control-plane API key (distinct from the LLM key in ai_config below). The
+    # SDK only sends the X-API-Key registration header when this is set; without
+    # it, an auth-enabled control plane rejects registration with HTTP 401.
+    api_key=os.getenv("AGENTFIELD_API_KEY"),
     version="1.0.0",
     description="URL or topic → vertical viral reel via a multi-reasoner DAG.",
     ai_config=AIConfig(
@@ -229,8 +233,10 @@ async def synthesize_audio(
     """
     from reel_af.render.tts import (
         strip_tts_tags,
-        synthesize_audio as _synth,
         voice_for_tone,
+    )
+    from reel_af.render.tts import (
+        synthesize_audio as _synth,
     )
 
     voice = voice_for_tone(voice_tone)
@@ -597,6 +603,127 @@ async def topic_to_reel(
         "run_id": run_id,
         "timings_s": timings,
     }
+
+
+# ════════════════════════════════════════════════════════════════════
+# ENTRY REASONER 3 — Video (URL) → Reel  (composite overlay pipeline)
+# ════════════════════════════════════════════════════════════════════
+
+SOURCE_NO_AUDIO_TRACK_CODE = "source_no_audio_track"
+SOURCE_NO_AUDIO_TRACK_MESSAGE = (
+    "source video has no audio track; the composite preset transcribes spoken audio "
+    "to build the overlay. Upload a clip that has an audio track."
+)
+
+
+def _run_composite_reels(
+    *, url: str, preset_name: str, count: int, out_path: Path, chrome: str | None,
+) -> dict:
+    """Blocking: download the source video, transcribe it, and cut ``count``
+    preset-length reels with a Remotion overlay. Reuses the exact building
+    blocks behind the ``reel-af reels`` CLI (no LLM / media API calls)."""
+    import shutil
+    import subprocess
+
+    from reel_af.render import lower_third, middle_third
+    from reel_af.render.captions import caption_words, has_audio_stream
+    from reel_af.render.hooks import download_crisp_source
+    from reel_af.render.presets import load_preset, preset_names
+
+    try:
+        cfg = load_preset(preset_name)
+    except KeyError:
+        return {"error": f"unknown preset {preset_name!r}; available: {preset_names()}"}
+    overlay_kind = cfg.get("overlay")
+    if overlay_kind not in {"middle_third", "lower_third"}:
+        return {"error": (f"preset {preset_name!r} (overlay={overlay_kind!r}) is not "
+                          "wired for video intake.")}
+
+    fps = int(cfg.get("fps", 30))
+    reel_s = float(cfg["reel_seconds"])
+    try:
+        src = download_crisp_source(url, out_path / "source.mp4")
+    except (RuntimeError, ValueError) as exc:
+        return {"error": str(exc)}
+    source_has_audio = has_audio_stream(src)
+    if not source_has_audio:
+        return {"error": SOURCE_NO_AUDIO_TRACK_MESSAGE, "code": SOURCE_NO_AUDIO_TRACK_CODE}
+    words = caption_words(src, workdir=out_path)
+    dur = float(subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
+        capture_output=True, text=True, check=True).stdout.strip())
+    n = int(dur // reel_s)
+    if n < 1:
+        return {"error": f"source is {dur:.0f}s — shorter than one {reel_s:.0f}s reel."}
+
+    reels: list[str] = []
+    for idx in range(1, min(max(1, count), n) + 1):
+        t0 = (idx - 1) * reel_s
+        d = out_path / f"reel{idx:02d}"
+        seq = d / "seq"
+        if overlay_kind == "middle_third":
+            segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
+            overlay = middle_third.render_overlay(segs, int(reel_s * fps), seq, cfg, chrome=chrome)
+            final = middle_third.composite_window(
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps
+            )
+        else:
+            title = lower_third.title_from_words(words, t0, t0 + reel_s, cfg)
+            overlay = lower_third.render_lower_third(
+                title,
+                seq,
+                accent=str(cfg.get("overlay_accent", "#7E22CE")),
+                chrome=chrome,
+                cfg=cfg,
+            )
+            final = lower_third.composite_window(
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps, cfg=cfg
+            )
+        shutil.rmtree(seq, ignore_errors=True)
+        reels.append(str(final))
+    return {"video_path": reels[0], "reels": reels, "reel_count": len(reels),
+            "source_seconds": round(dur, 1)}
+
+
+@reel.reasoner()
+async def composite_to_reel(
+    url: str,
+    preset: str = "middle-third-dynamic",
+    count: int = 1,
+    out_dir: str | None = None,
+) -> dict:
+    """Turn a source VIDEO (URL) into vertical reel(s) with a Remotion overlay.
+
+    Downloads the video, transcribes it, and cuts ``count`` preset-length reels
+    (default 1) each with a script-synced middle-third overlay — the same
+    pipeline as the ``reel-af reels`` CLI. Purely mechanical (ffmpeg + whisper +
+    Node/Remotion + Chromium); no LLM or media API keys required.
+
+    Example:
+      curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_composite_to_reel \\
+        -H 'Content-Type: application/json' \\
+        -d '{"input":{"url":"https://youtu.be/…","preset":"middle-third-dynamic"}}'
+    """
+    run_id = uuid.uuid4().hex[:8]
+    out_path = Path(out_dir) if out_dir else (Path.cwd() / "output" / f"composite-{run_id}")
+    out_path.mkdir(parents=True, exist_ok=True)
+    chrome = os.getenv("CHROMIUM_PATH") or None
+
+    app.note(f"reel-af composite: run {run_id} url={url!r} preset={preset!r}",
+             tags=["reel", "composite", "start"])
+    t_start = time.time()
+    result = await asyncio.to_thread(
+        _run_composite_reels, url=url, preset_name=preset,
+        count=max(1, int(count)), out_path=out_path, chrome=chrome)
+    took = round(time.time() - t_start, 1)
+    meta = {"source": "video", "url": url, "preset": preset, "run_id": run_id}
+    if "error" in result:
+        app.note(f"reel-af composite: run {run_id} failed — {result['error']}",
+                 tags=["reel", "composite", "error"])
+        return {**result, **meta}
+    app.note(f"reel-af composite: run {run_id} done → {result['video_path']} ({took}s)",
+             tags=["reel", "composite", "done"])
+    return {**result, **meta, "timings_s": {"total": took}}
 
 
 # ════════════════════════════════════════════════════════════════════

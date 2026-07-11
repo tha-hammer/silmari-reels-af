@@ -1,0 +1,12 @@
+# reel-af Cutting Room UI — public Railway service.
+# Set Root Directory = silmari-reels-af/web for this service.
+# Env: AGENTFIELD_SERVER=http://control-plane.railway.internal:8080
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+healthcheckPath = "/health"
+healthcheckTimeout = 60
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 3

@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>reel-af · the cutting room</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<!-- ═══ CONFIG · all tunables + copy + backend contract live here (one jump) ═══ -->
+<script type="application/json" id="config">
+{
+  "api": {
+    "base": "",
+    "executePath": "/api/v1/execute/async/{target}",
+    "pollPath": "/api/v1/executions/{id}",
+    "uploadPath": "/api/v1/uploads",
+    "healthPath": "/health",
+    "pollIntervalMs": 2500,
+    "timeoutMs": 1800000
+  },
+  "presets": [
+    { "id": "middle-third-dynamic", "label": "MIDDLE-THIRD", "sub": "vertical · script cards", "ratio": "9:16", "target": "reel-af.reel_composite_to_reel" },
+    { "id": "horizontal-youtube-lowerthird", "label": "LOWER-THIRD", "sub": "16:9 · yt title + zoom", "ratio": "16:9", "target": "reel-af.reel_composite_to_reel" },
+    { "id": "topic", "label": "TOPIC", "sub": "phrase → reel", "ratio": "9:16", "target": "reel-af.reel_topic_to_reel", "kind": "topic" }
+  ],
+  "copy": {
+    "mark": "REEL-AF",
+    "sub": "CUTTING ROOM",
+    "tagline": "Feed a talk. Cut a reel.",
+    "dropTitle": "MARK IN",
+    "dropHint": "Drop a video file — or paste a link below.",
+    "urlPlaceholder": "https://youtube.com/watch?v=…  ·  or any video URL",
+    "roll": "ROLL",
+    "rolling": "ROLLING",
+    "reset": "NEW TAKE"
+  },
+  "stages": [
+    { "key": "queued",     "label": "SLATE",      "note": "job on the bench" },
+    { "key": "ingest",     "label": "INGEST",     "note": "pulling the source" },
+    { "key": "transcribe", "label": "TRANSCRIBE", "note": "reading the words" },
+    { "key": "render",     "label": "RENDER",     "note": "printing overlays" },
+    { "key": "composite",  "label": "COMPOSITE",  "note": "splicing the cut" },
+    { "key": "done",       "label": "PRINT",      "note": "reel struck" }
+  ],
+  "ui": {
+    "loginPath": "/login",
+    "bytesPerMiB": 1048576,
+    "maxErrorBodyChars": 200,
+    "flashResetMs": 2600,
+    "healthProbeMs": 20000,
+    "idempotentPendingCode": "idempotent_request_pending",
+    "defaultRetryAfterMs": 3000,
+    "terminalFailureStatuses": ["failed", "cancelled", "canceled", "error"],
+    "statusStageByExecutionStatus": {
+      "queued": "queued", "pending": "queued",
+      "ingesting": "ingest", "transcribing": "transcribe",
+      "running": "render", "processing": "render", "rendering": "render",
+      "compositing": "composite", "succeeded": "done"
+    }
+  }
+}
+</script>
+
+<style>
+  :root {
+    --film:      #0c0b0a;
+    --film-2:    #131110;
+    --film-3:    #1b1815;
+    --print:     #ece3d4;
+    --print-dim: #96897a;
+    --print-fog: #5c5348;
+    --grease:    #ff3b1e;
+    --grease-2:  #ff6a4d;
+    --amber:     #f2a41c;
+    --sprocket:  rgba(236,227,212,0.13);
+    --line:      rgba(236,227,212,0.09);
+    --line-2:    rgba(236,227,212,0.16);
+    --panel:     rgba(20,18,16,0.72);
+    --disp: "Bricolage Grotesque", sans-serif;
+    --body: "Instrument Sans", sans-serif;
+    --mono: "JetBrains Mono", monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  html { -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility; }
+
+  body {
+    background: var(--film);
+    color: var(--print);
+    font-family: var(--body);
+    min-height: 100vh;
+    overflow-x: hidden;
+    position: relative;
+    background-image:
+      radial-gradient(120% 80% at 50% -10%, rgba(242,164,28,0.06), transparent 60%),
+      radial-gradient(100% 90% at 50% 120%, rgba(255,59,30,0.05), transparent 55%);
+  }
+
+  /* film grain + vignette overlays */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: 9998; pointer-events: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.85'/%3E%3C/svg%3E");
+    opacity: 0.05; mix-blend-mode: overlay; animation: grain 0.5s steps(2) infinite;
+  }
+  body::after {
+    content: ""; position: fixed; inset: 0; z-index: 9997; pointer-events: none;
+    box-shadow: inset 0 0 240px 40px rgba(0,0,0,0.75);
+  }
+  @keyframes grain { 0%{transform:translate(0,0)} 50%{transform:translate(-4px,3px)} 100%{transform:translate(3px,-2px)} }
+
+  .stage { position: relative; z-index: 1; max-width: 1180px; margin: 0 auto; padding: 0 28px 80px; }
+
+  /* ─── top bar ─── */
+  header {
+    display: flex; align-items: center; justify-content: space-between; gap: 20px;
+    padding: 26px 0 22px; border-bottom: 1px solid var(--line);
+    opacity: 0; animation: rise 0.7s 0.05s cubic-bezier(.2,.7,.2,1) forwards;
+  }
+  .brand { display: flex; align-items: baseline; gap: 14px; }
+  .brand .film-icon { width: 26px; height: 26px; flex: none; align-self: center; }
+  .brand .mark {
+    font-family: var(--disp); font-weight: 800; font-size: 22px; letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .brand .mark b { color: var(--grease); }
+  .brand .sub {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.34em; color: var(--print-fog);
+    text-transform: uppercase; padding-left: 12px; border-left: 1px solid var(--line-2);
+  }
+  .status { display: flex; align-items: center; gap: 22px; }
+  .tc {
+    font-family: var(--mono); font-size: 13px; letter-spacing: 0.06em; color: var(--amber);
+    font-variant-numeric: tabular-nums; text-shadow: 0 0 14px rgba(242,164,28,0.35);
+  }
+  .signal { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.24em; color: var(--print-dim); text-transform: uppercase; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--print-fog); box-shadow: 0 0 0 0 rgba(255,59,30,0); }
+  .signal.live .dot { background: var(--grease); animation: pulse 1.6s ease-out infinite; }
+  .signal.live { color: var(--grease-2); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(255,59,30,0.5)} 100%{box-shadow:0 0 0 9px rgba(255,59,30,0)} }
+
+  /* ─── hero line ─── */
+  .hero { padding: 60px 0 40px; }
+  .hero .kicker { font-family: var(--mono); font-size: 11px; letter-spacing: 0.4em; color: var(--grease); text-transform: uppercase; margin-bottom: 20px; opacity: 0; animation: rise 0.7s 0.12s cubic-bezier(.2,.7,.2,1) forwards; }
+  .hero h1 {
+    font-family: var(--disp); font-weight: 800; font-size: clamp(46px, 9vw, 108px);
+    line-height: 0.92; letter-spacing: -0.035em; max-width: 12ch;
+  }
+  .hero h1 .l { display: block; opacity: 0; transform: translateY(0.5em); animation: rise 0.85s cubic-bezier(.2,.7,.2,1) forwards; }
+  .hero h1 .l:nth-child(1){ animation-delay: 0.16s; }
+  .hero h1 .l:nth-child(2){ animation-delay: 0.24s; color: var(--print-dim); }
+  .hero h1 em { font-style: normal; color: var(--grease); position: relative; }
+  .hero h1 em::after { content:""; position:absolute; left:-2%; right:-2%; bottom:0.08em; height:0.5em; background: var(--grease); opacity:0.16; transform: skewX(-9deg); z-index:-1; }
+
+  /* ─── main grid ─── */
+  .bench { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(300px, 0.85fr); gap: 34px; align-items: start; margin-top: 24px; }
+  @media (max-width: 860px){ .bench { grid-template-columns: 1fr; } }
+
+  /* mode toggle */
+  .modes { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--line-2); border-radius: 2px; background: var(--film-2); margin-bottom: 18px; opacity: 0; animation: rise 0.7s 0.3s cubic-bezier(.2,.7,.2,1) forwards; }
+  .modes button {
+    font-family: var(--mono); font-size: 11px; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--print-dim); background: none; border: none; padding: 9px 16px; cursor: pointer; border-radius: 1px; transition: color .2s, background .2s;
+  }
+  .modes button[aria-selected="true"] { color: var(--film); background: var(--print); font-weight: 700; }
+
+  /* the 9:16 viewport — the signature surface */
+  .viewport-wrap { opacity: 0; animation: rise 0.8s 0.36s cubic-bezier(.2,.7,.2,1) forwards; }
+  .viewport {
+    position: relative; aspect-ratio: 9 / 16; max-height: 560px; margin: 0 auto;
+    background:
+      linear-gradient(180deg, var(--film-3), var(--film-2));
+    border: 1px solid var(--line-2);
+    display: grid; place-items: center; overflow: hidden;
+    transition: border-color .25s, box-shadow .25s, transform .25s;
+    cursor: crosshair;
+  }
+  .viewport.wide { aspect-ratio: 16 / 9; max-height: 320px; }
+  /* sprocket rails */
+  .viewport::before, .viewport::after {
+    content: ""; position: absolute; top: 0; bottom: 0; width: 26px;
+    background:
+      repeating-linear-gradient(180deg, transparent 0 14px, var(--sprocket) 14px 26px, transparent 26px 40px);
+    opacity: 0.9;
+  }
+  .viewport::before { left: 0; border-right: 1px solid var(--line); }
+  .viewport::after { right: 0; border-left: 1px solid var(--line); }
+  .viewport.drag { border-color: var(--grease); box-shadow: 0 0 0 1px var(--grease), 0 24px 80px -30px rgba(255,59,30,0.6); transform: translateY(-2px); }
+
+  /* grease-pencil corner marks */
+  .marks i { position: absolute; width: 30px; height: 30px; border: 2px solid var(--grease); opacity: 0; transition: opacity .25s; }
+  .marks i.tl { top: 34px; left: 34px; border-right: none; border-bottom: none; }
+  .marks i.tr { top: 34px; right: 34px; border-left: none; border-bottom: none; }
+  .marks i.bl { bottom: 34px; left: 34px; border-right: none; border-top: none; }
+  .marks i.br { bottom: 34px; right: 34px; border-left: none; border-top: none; }
+  .viewport.drag .marks i, .viewport.loaded .marks i { opacity: 0.9; }
+
+  .vp-inner { text-align: center; padding: 0 44px; z-index: 2; }
+  .vp-inner .glyph { width: 52px; height: 52px; margin: 0 auto 22px; color: var(--grease); }
+  .vp-inner .t { font-family: var(--disp); font-weight: 800; font-size: 22px; letter-spacing: 0.14em; }
+  .vp-inner .h { font-family: var(--body); font-size: 13px; color: var(--print-dim); margin-top: 10px; line-height: 1.5; max-width: 24ch; margin-inline: auto; }
+  .vp-inner .file { font-family: var(--mono); font-size: 12px; color: var(--amber); margin-top: 14px; word-break: break-all; }
+
+  /* film-gate scan line during processing */
+  .scan { position: absolute; left: 26px; right: 26px; height: 2px; background: linear-gradient(90deg, transparent, var(--grease), transparent); opacity: 0; box-shadow: 0 0 18px 2px rgba(255,59,30,0.6); }
+  .viewport.busy .scan { opacity: 1; animation: gate 1.4s linear infinite; }
+  @keyframes gate { 0%{top:6%} 100%{top:94%} }
+  .viewport.busy { cursor: progress; }
+
+  /* URL slate input */
+  .slate { display: none; margin-top: 16px; }
+  .slate.on { display: block; }
+  .slate .row { display: flex; border: 1px solid var(--line-2); background: var(--film-2); }
+  .slate .tick { font-family: var(--mono); font-size: 11px; color: var(--grease); padding: 0 14px; display: grid; place-items: center; border-right: 1px solid var(--line); letter-spacing: 0.1em; }
+  .slate input {
+    flex: 1; background: none; border: none; color: var(--print); font-family: var(--mono);
+    font-size: 14px; padding: 16px 14px; outline: none; letter-spacing: 0.01em;
+  }
+  .slate input::placeholder { color: var(--print-fog); }
+  .slate .row:focus-within { border-color: var(--grease); }
+  input#file { display: none; }
+
+  /* right column — controls */
+  .controls { opacity: 0; animation: rise 0.8s 0.44s cubic-bezier(.2,.7,.2,1) forwards; }
+  .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(4px); }
+  .panel + .panel { margin-top: 18px; }
+  .panel h3 { font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; text-transform: uppercase; color: var(--print-fog); padding: 16px 18px 0; }
+
+  .presets { padding: 14px 18px 18px; display: flex; flex-direction: column; gap: 8px; }
+  .preset {
+    display: flex; align-items: center; gap: 14px; padding: 12px 13px; border: 1px solid var(--line);
+    background: var(--film-2); cursor: pointer; transition: border-color .2s, background .2s, transform .15s; text-align: left;
+  }
+  .preset:hover { transform: translateX(3px); border-color: var(--line-2); }
+  .preset[aria-selected="true"] { border-color: var(--grease); background: linear-gradient(90deg, rgba(255,59,30,0.09), transparent); }
+  .preset .ratio { font-family: var(--mono); font-size: 10px; color: var(--film); background: var(--print-dim); padding: 4px 6px; border-radius: 1px; letter-spacing: 0.04em; flex: none; }
+  .preset[aria-selected="true"] .ratio { background: var(--grease); color: var(--film); }
+  .preset .meta .l { font-family: var(--disp); font-weight: 700; font-size: 14px; letter-spacing: 0.02em; }
+  .preset .meta .s { font-family: var(--body); font-size: 11px; color: var(--print-dim); margin-top: 2px; }
+
+  /* ROLL button */
+  .roll {
+    width: 100%; margin-top: 18px; font-family: var(--disp); font-weight: 800; font-size: 19px;
+    letter-spacing: 0.16em; color: var(--film); background: var(--grease); border: none; padding: 20px;
+    cursor: pointer; position: relative; overflow: hidden; transition: transform .15s, box-shadow .25s, background .2s;
+    box-shadow: 0 16px 44px -18px rgba(255,59,30,0.8);
+  }
+  .roll:hover:not(:disabled) { transform: translateY(-2px); box-shadow: 0 22px 56px -18px rgba(255,59,30,0.9); }
+  .roll:active:not(:disabled) { transform: translateY(0); }
+  .roll:disabled { background: var(--film-3); color: var(--print-fog); cursor: not-allowed; box-shadow: none; }
+  .roll .rec { display: inline-block; width: 11px; height: 11px; border-radius: 50%; background: var(--film); margin-right: 12px; vertical-align: middle; }
+  .roll.busy { background: var(--film-3); color: var(--grease-2); }
+  .roll.busy .rec { background: var(--grease); animation: pulse 1.1s ease-out infinite; }
+
+  .hint { font-family: var(--mono); font-size: 10px; color: var(--print-fog); text-align: center; margin-top: 12px; letter-spacing: 0.08em; }
+
+  /* ─── console / EDL ─── */
+  .console { margin-top: 40px; border: 1px solid var(--line); background: var(--film-2); display: none; }
+  .console.on { display: block; animation: rise 0.5s cubic-bezier(.2,.7,.2,1) forwards; }
+  .console .bar { display: flex; align-items: center; justify-content: space-between; padding: 13px 18px; border-bottom: 1px solid var(--line); }
+  .console .bar .t { font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; color: var(--print-fog); text-transform: uppercase; }
+  .track { display: flex; gap: 0; padding: 0; }
+  .track .st { flex: 1; padding: 16px 8px; text-align: center; border-right: 1px solid var(--line); position: relative; }
+  .track .st:last-child { border-right: none; }
+  .track .st .n { font-family: var(--mono); font-size: 9px; color: var(--print-fog); letter-spacing: 0.2em; }
+  .track .st .l { font-family: var(--disp); font-weight: 700; font-size: 13px; letter-spacing: 0.06em; color: var(--print-fog); margin-top: 5px; transition: color .3s; }
+  .track .st.active .l { color: var(--amber); }
+  .track .st.done .l { color: var(--print); }
+  .track .st.active::after { content:""; position:absolute; left:0; bottom:0; height:2px; width:100%; background: var(--amber); animation: fill 2s linear infinite; }
+  .track .st.done::after { content:""; position:absolute; left:0; bottom:0; height:2px; width:100%; background: var(--grease); }
+  @keyframes fill { 0%{opacity:0.3} 50%{opacity:1} 100%{opacity:0.3} }
+
+  .log { font-family: var(--mono); font-size: 12px; line-height: 1.7; padding: 16px 18px; max-height: 240px; overflow-y: auto; color: var(--print-dim); }
+  .log .ln { display: flex; gap: 14px; }
+  .log .ln .tc { color: var(--print-fog); flex: none; text-shadow: none; }
+  .log .ln .msg { color: var(--print-dim); }
+  .log .ln.err .msg { color: var(--grease-2); }
+  .log .ln.ok .msg { color: var(--amber); }
+
+  /* result */
+  .result { display: none; margin-top: 18px; border: 1px solid var(--grease); background: linear-gradient(90deg, rgba(255,59,30,0.07), transparent); padding: 20px; align-items: center; gap: 18px; }
+  .result.on { display: flex; }
+  .result .k { font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em; color: var(--grease); text-transform: uppercase; }
+  .result .p { font-family: var(--mono); font-size: 13px; color: var(--print); margin-top: 6px; word-break: break-all; }
+  .result a { margin-left: auto; font-family: var(--disp); font-weight: 700; letter-spacing: 0.1em; color: var(--film); background: var(--grease); padding: 12px 20px; text-decoration: none; flex: none; }
+
+  footer { margin-top: 60px; padding-top: 22px; border-top: 1px solid var(--line); display: flex; justify-content: space-between; font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; color: var(--print-fog); text-transform: uppercase; }
+
+  @keyframes rise { to { opacity: 1; transform: translateY(0); } }
+
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--line-2); }
+  ::selection { background: var(--grease); color: var(--film); }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <header>
+      <div class="brand">
+        <svg class="film-icon" viewBox="0 0 24 24" fill="none" stroke="var(--grease)" stroke-width="1.6"><rect x="2" y="4" width="20" height="16" rx="1"/><path d="M7 4v16M17 4v16M2 9h5M2 15h5M17 9h5M17 15h5" stroke="var(--print-fog)"/></svg>
+        <div>
+          <div class="mark">REEL<b>·</b>AF</div>
+        </div>
+        <span class="sub" id="brandSub">CUTTING ROOM</span>
+      </div>
+      <div class="status">
+        <span class="tc" id="tc">00:00:00:00</span>
+        <span class="signal" id="signal"><span class="dot"></span><span id="signalText">CONNECTING</span></span>
+      </div>
+    </header>
+
+    <section class="hero">
+      <div class="kicker" id="kicker">▸ VIDEO INTAKE</div>
+      <h1>
+        <span class="l">Feed a talk.</span>
+        <span class="l">Cut a <em>reel</em>.</span>
+      </h1>
+    </section>
+
+    <div class="bench">
+      <!-- left: the surface -->
+      <div>
+        <div class="modes" role="tablist">
+          <button role="tab" aria-selected="true" data-mode="file">DROP FILE</button>
+          <button role="tab" aria-selected="false" data-mode="url">FROM URL</button>
+        </div>
+
+        <div class="viewport-wrap">
+          <div class="viewport" id="viewport" role="button" tabindex="0" aria-label="Drop a video file">
+            <div class="marks"><i class="tl"></i><i class="tr"></i><i class="bl"></i><i class="br"></i></div>
+            <div class="scan"></div>
+            <div class="vp-inner" id="vpInner">
+              <svg class="glyph" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M12 16V4m0 0l-4 4m4-4l4 4" stroke-linecap="round" stroke-linejoin="round"/><path d="M4 16v3a1 1 0 001 1h14a1 1 0 001-1v-3" stroke-linecap="round"/></svg>
+              <div class="t" id="dropTitle">MARK IN</div>
+              <div class="h" id="dropHint">Drop a video file — or paste a link below.</div>
+              <div class="file" id="fileName"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="slate" id="slate">
+          <div class="row">
+            <span class="tick">URL▸</span>
+            <input type="text" id="url" spellcheck="false" autocomplete="off" placeholder="paste a video URL" />
+          </div>
+        </div>
+        <input type="file" id="file" accept="video/*" />
+      </div>
+
+      <!-- right: controls -->
+      <div class="controls">
+        <div class="panel">
+          <h3>Format</h3>
+          <div class="presets" id="presets"></div>
+        </div>
+        <button class="roll" id="roll"><span class="rec"></span><span id="rollLabel">ROLL</span></button>
+        <div class="hint" id="hint">select a source + format, then roll</div>
+      </div>
+    </div>
+
+    <!-- console -->
+    <div class="console" id="console">
+      <div class="bar"><span class="t">EDIT DECISION LIST</span><span class="t" id="jobId">—</span></div>
+      <div class="track" id="track"></div>
+      <div class="log" id="log"></div>
+    </div>
+
+    <div class="result" id="result">
+      <div>
+        <div class="k">PRINT STRUCK</div>
+        <div class="p" id="resultPath">—</div>
+      </div>
+      <a id="resultLink" href="#" download>DOWNLOAD ▸</a>
+    </div>
+
+    <footer>
+      <span>REEL-AF · CUTTING ROOM</span>
+      <span id="footRight">OPENROUTER ONLY · RAILWAY</span>
+    </footer>
+  </div>
+
+<script>
+(() => {
+  "use strict";
+  const CFG = JSON.parse(document.getElementById("config").textContent);
+  const $ = (id) => document.getElementById(id);
+  const state = { mode: "file", preset: CFG.presets[0], file: null, busy: false };
+
+  /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
+  const pad = (n, w = 2) => String(n).padStart(w, "0");
+  function tick() {
+    const d = new Date();
+    const ff = Math.floor((d.getMilliseconds() / 1000) * 24);
+    $("tc").textContent = `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}:${pad(ff)}`;
+    requestAnimationFrame(tick);
+  }
+  tick();
+
+  /* ── copy injection from config ── */
+  $("brandSub").textContent = CFG.copy.sub;
+  $("dropTitle").textContent = CFG.copy.dropTitle;
+  $("dropHint").textContent = CFG.copy.dropHint;
+  $("url").placeholder = CFG.copy.urlPlaceholder;
+  $("rollLabel").textContent = CFG.copy.roll;
+
+  /* ── presets ── */
+  function renderPresets() {
+    $("presets").innerHTML = "";
+    CFG.presets.forEach((p) => {
+      const el = document.createElement("button");
+      el.className = "preset";
+      el.setAttribute("aria-selected", p.id === state.preset.id);
+      el.innerHTML = `<span class="ratio">${p.ratio}</span><span class="meta"><span class="l">${p.label}</span><span class="s">${p.sub}</span></span>`;
+      el.onclick = () => { state.preset = p; renderPresets(); applyPresetShape(); };
+      $("presets").appendChild(el);
+    });
+  }
+  function applyPresetShape() {
+    $("viewport").classList.toggle("wide", state.preset.ratio === "16:9");
+  }
+
+  /* ── mode toggle ── */
+  document.querySelectorAll(".modes button").forEach((b) => {
+    b.onclick = () => {
+      state.mode = b.dataset.mode;
+      document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x === b));
+      $("slate").classList.toggle("on", state.mode === "url");
+      $("dropHint").textContent = state.mode === "url" ? "Paste a video link in the slate below." : CFG.copy.dropHint;
+    };
+  });
+
+  /* ── file drop ── */
+  const vp = $("viewport");
+  ["dragenter", "dragover"].forEach((e) => vp.addEventListener(e, (ev) => { ev.preventDefault(); if (!state.busy) vp.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach((e) => vp.addEventListener(e, (ev) => { ev.preventDefault(); vp.classList.remove("drag"); }));
+  vp.addEventListener("drop", (ev) => { if (state.busy) return; const f = ev.dataTransfer.files[0]; if (f) setFile(f); });
+  vp.addEventListener("click", () => { if (!state.busy && state.mode === "file") $("file").click(); });
+  vp.addEventListener("keydown", (e) => { if ((e.key === "Enter" || e.key === " ") && state.mode === "file") $("file").click(); });
+  $("file").addEventListener("change", (e) => { const f = e.target.files[0]; if (f) setFile(f); });
+  function setFile(f) {
+    state.file = f; state.mode = "file";
+    document.querySelector('.modes button[data-mode="file"]').click();
+    vp.classList.add("loaded");
+    $("dropTitle").textContent = "MARKED";
+    $("fileName").textContent = `${f.name} · ${(f.size / CFG.ui.bytesPerMiB).toFixed(1)} MB`;
+  }
+
+  /* ── backend health probe ── */
+  const url = (path, subs = {}) => {
+    let p = path; for (const k in subs) p = p.replace(`{${k}}`, subs[k]);
+    return (CFG.api.base || "") + p;
+  };
+  async function probe() {
+    try {
+      const r = await fetch(url(CFG.api.healthPath), { method: "GET" });
+      setSignal(r.ok);
+    } catch { setSignal(false); }
+  }
+  function setSignal(live) {
+    $("signal").classList.toggle("live", live);
+    $("signalText").textContent = live ? "SIGNAL LIVE" : "OFFLINE";
+  }
+
+  /* ── console log ── */
+  function tcNow() { return $("tc").textContent; }
+  function logLine(msg, cls = "") {
+    const ln = document.createElement("div");
+    ln.className = "ln " + cls;
+    ln.innerHTML = `<span class="tc">${tcNow()}</span><span class="msg">${msg}</span>`;
+    $("log").appendChild(ln); $("log").scrollTop = $("log").scrollHeight;
+  }
+  function renderTrack() {
+    $("track").innerHTML = "";
+    CFG.stages.forEach((s, i) => {
+      const el = document.createElement("div");
+      el.className = "st"; el.dataset.key = s.key;
+      el.innerHTML = `<div class="n">${pad(i + 1)}</div><div class="l">${s.label}</div>`;
+      $("track").appendChild(el);
+    });
+  }
+  function markStage(key, done) {
+    document.querySelectorAll(".track .st").forEach((el) => {
+      if (el.dataset.key === key) { el.classList.toggle("active", !done); el.classList.toggle("done", !!done); }
+    });
+  }
+  const STAGE_ORDER = CFG.stages.map((s) => s.key);
+  function advanceTo(key) {
+    const idx = STAGE_ORDER.indexOf(key);
+    STAGE_ORDER.forEach((k, i) => { if (i < idx) markStage(k, true); });
+    if (idx >= 0) markStage(key, key === "done");
+  }
+
+  /* ── submit / ROLL ── */
+  // One idempotency key per logical Roll action; reused across 409 retries so a
+  // retried submit is deduped by the server, never double-dispatched.
+  function newClientRequestId() {
+    return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `cr-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function buildInput(handle) {
+    if (state.preset.kind === "topic") return { topic: $("url").value.trim() };
+    if (state.mode === "file") return { source: handle, preset: state.preset.id };
+    const u = $("url").value.trim();
+    return { url: u, source: u, preset: state.preset.id };
+  }
+
+  function goToLogin() {
+    logLine("session expired — signing in", "err");
+    window.location.assign(CFG.ui.loginPath);
+  }
+
+  async function roll() {
+    if (state.busy) return;
+    const urlVal = $("url").value.trim();
+    if (state.mode === "url" && !urlVal) return flash("no source — paste a URL");
+    if (state.mode === "file" && !state.file) return flash("no source — drop a file");
+
+    setBusy(true);
+    $("console").classList.add("on");
+    $("result").classList.remove("on");
+    $("log").innerHTML = ""; renderTrack();
+    logLine(`slate: ${state.preset.label} · ${state.mode.toUpperCase()}`, "ok");
+
+    const clientRequestId = newClientRequestId();
+    try {
+      let handle = null;
+      if (state.mode === "file") {
+        advanceTo("ingest");
+        logLine(`uploading ${state.file.name}…`);
+        handle = await uploadFile(state.file);
+        logLine(`source registered → ${handle}`, "ok");
+      } else {
+        logLine(`source: ${urlVal}`);
+      }
+      advanceTo("ingest");
+      const execId = await execute(state.preset.target, buildInput(handle), clientRequestId);
+      $("jobId").textContent = execId;
+      logLine(`execution ${execId} accepted`, "ok");
+      await poll(execId);
+    } catch (err) {
+      if (err && err.code === "unauthenticated") return;  // already redirecting to login
+      logLine(String(err && err.message || err), "err");
+      advanceTo("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function uploadFile(f) {
+    const fd = new FormData();
+    fd.append("file", f, f.name);
+    const r = await fetch(url(CFG.api.uploadPath), { method: "POST", body: fd });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    if (!r.ok) throw new Error(`upload failed (${r.status}) — check size/format, or use FROM URL`);
+    const j = await r.json().catch(() => ({}));
+    return j.path || j.url || j.handle || j.source || f.name;
+  }
+
+  async function execute(target, input, clientRequestId) {
+    // Retry the SAME idempotency key on 409 pending (server-deduped, no double dispatch).
+    for (;;) {
+      const r = await fetch(url(CFG.api.executePath, { target }), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": clientRequestId },
+        body: JSON.stringify({ input }),
+      });
+      if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+      const body = await r.text();
+      const j = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+      if (r.status === 409 && j.code === CFG.ui.idempotentPendingCode) {
+        const retryMs = (Number(r.headers.get("Retry-After")) * 1000) || CFG.ui.defaultRetryAfterMs;
+        logLine(`submit pending — retrying in ${retryMs / 1000}s`);
+        await sleep(retryMs);
+        continue;
+      }
+      if (!r.ok) throw new Error(`${target} rejected (${r.status}): ${body.slice(0, CFG.ui.maxErrorBodyChars)}`);
+      const id = j.execution_id || j.id;
+      if (!id) throw new Error("no execution_id returned");
+      return id;
+    }
+  }
+
+  async function poll(id) {
+    const start = Date.now();
+    let last = null;
+    while (true) {
+      if (Date.now() - start > CFG.api.timeoutMs) throw new Error("timed out");
+      await sleep(CFG.api.pollIntervalMs);
+      let j;
+      try { j = await (await fetch(url(CFG.api.pollPath, { id }))).json(); }
+      catch { logLine("poll error — retrying"); continue; }
+      const status = String(j.status || "?");
+      if (status !== last) { last = status; mapStatus(status); logLine(`status → ${status}`); }
+      if (status === "succeeded") {
+        const errorMessage = resultErrorMessage(j.result) || resultErrorMessage(j);
+        if (errorMessage) throw new Error(`execution failed: ${errorMessage}`);
+        finish(j.result || {});
+        return;
+      }
+      if (CFG.ui.terminalFailureStatuses.includes(status)) {
+        throw new Error(`execution ${status}: ${JSON.stringify(j.error || j.result || "").slice(0, CFG.ui.maxErrorBodyChars)}`);
+      }
+    }
+  }
+
+  function mapStatus(status) {
+    advanceTo(CFG.ui.statusStageByExecutionStatus[status] || "render");
+  }
+
+  function finish(result) {
+    const resultError = resultErrorMessage(result);
+    if (resultError) throw new Error(`execution failed: ${resultError}`);
+    advanceTo("done");
+    const path = result.video_path || result.path || result.output || "(see server)";
+    $("resultPath").textContent = path;
+    const link = result.download_url || result.url || (typeof path === "string" && path.startsWith("http") ? path : "#");
+    const a = $("resultLink"); a.href = link;
+    if (link === "#") { a.style.display = "none"; } else { a.style.display = ""; }
+    $("result").classList.add("on");
+    logLine("reel struck — print ready", "ok");
+  }
+
+  function resultErrorMessage(result) {
+    if (!result || typeof result !== "object" || !result.error) return "";
+    if (typeof result.error === "string") return result.error.slice(0, CFG.ui.maxErrorBodyChars);
+    return JSON.stringify(result.error).slice(0, CFG.ui.maxErrorBodyChars);
+  }
+
+  /* ── ui helpers ── */
+  function setBusy(b) {
+    state.busy = b;
+    $("roll").disabled = b;
+    $("roll").classList.toggle("busy", b);
+    $("rollLabel").textContent = b ? CFG.copy.rolling : CFG.copy.roll;
+    vp.classList.toggle("busy", b);
+  }
+  let flashT;
+  function flash(msg) {
+    clearTimeout(flashT);
+    $("hint").textContent = msg; $("hint").style.color = "var(--grease-2)";
+    flashT = setTimeout(() => { $("hint").textContent = "select a source + format, then roll"; $("hint").style.color = ""; }, CFG.ui.flashResetMs);
+  }
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  $("roll").onclick = roll;
+
+  /* ── boot ── */
+  renderPresets(); applyPresetShape(); renderTrack();
+  probe(); setInterval(probe, CFG.ui.healthProbeMs);
+})();
+</script>
+</body>
+</html>

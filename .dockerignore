@@ -4,6 +4,7 @@ __pycache__
 .ruff_cache
 .env
 .venv
+**/node_modules
 *.log
 .git
 .DS_Store

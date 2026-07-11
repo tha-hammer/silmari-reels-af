@@ -1,4 +1,4 @@
-# Keep the Railway build context lean - the Dockerfile rebuilds these.
+# Keep the Railway build context lean — the Dockerfile rebuilds these.
 .git/
 .venv/
 **/node_modules/

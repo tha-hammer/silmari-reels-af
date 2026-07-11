@@ -127,6 +127,32 @@ def _center_x(cfg: Any) -> int:
 # ───── B2: caption timings from the final reel ───────────────────────
 
 
+FFPROBE_AUDIO_PROBE_TIMEOUT_S = 10.0
+
+
+def has_audio_stream(
+    media_path: str | Path,
+    *,
+    timeout_s: float = FFPROBE_AUDIO_PROBE_TIMEOUT_S,
+    runner: Any = subprocess.run,
+) -> bool:
+    """True iff ``media_path`` has >=1 probe-successful audio stream (T8).
+
+    Fail-safe: ffprobe error, timeout, exception, or empty result -> False, so a
+    silent/undecodable source yields a clear caller error instead of a raw ffmpeg
+    'Output file does not contain any stream' failure downstream in transcription.
+    """
+    try:
+        proc = runner(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0",
+             "-show_entries", "stream=index", "-of", "csv=p=0", str(media_path)],
+            capture_output=True, text=True, timeout=timeout_s,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return getattr(proc, "returncode", 1) == 0 and bool(str(getattr(proc, "stdout", "")).strip())
+
+
 def _reel_duration(reel_path: Path) -> float:
     """Container duration in seconds via ffprobe (fail-closed)."""
     proc = subprocess.run(
@@ -703,6 +729,8 @@ def write_ass(ass_text: str, out_path: Path) -> Path:
 
 __all__ = [
     "caption_words",
+    "has_audio_stream",
+    "FFPROBE_AUDIO_PROBE_TIMEOUT_S",
     "compute_divider_y",
     "compute_banner_fontsize",
     "balanced_wrap",

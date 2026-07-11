@@ -1,0 +1,11 @@
+flask>=3.0
+requests>=2.31
+gunicorn>=21.2
+# auth + ownership boundary (plan B0.2/B0.3): SuperTokens session verification,
+# CORS-with-credentials, and the psycopg reader/repo against the shared user-data DB.
+psycopg[binary]>=3.1
+supertokens-python>=0.24
+flask-cors>=4.0
+# T7 file-mode composites: write uploads to a shared S3-compatible bucket the
+# reel-af node can fetch, and presign time-limited GET URLs for dispatch.
+boto3>=1.34

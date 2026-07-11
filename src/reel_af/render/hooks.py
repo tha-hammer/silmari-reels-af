@@ -11,11 +11,31 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field
 
 CRISP_YTDLP_FORMAT = "137+140/137+bestaudio[ext=m4a]"
+GENERIC_YTDLP_FORMAT = "bestvideo[height<=1080]+bestaudio/best[height<=1080]/best"
 YTDLP_MERGE_OUTPUT_FORMAT = "mp4"
+
+# yt-dlp format ladders and the JS runtime are protocol selectors, not user
+# preferences — named module constants beside CRISP_YTDLP_FORMAT, never JSON.
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
+VIMEO_HOSTS = ("vimeo.com",)
+_SCHEMELESS_HOSTS = YOUTUBE_HOSTS + VIMEO_HOSTS
+_FORMAT_BY_HOST = {
+    "youtube": CRISP_YTDLP_FORMAT,
+    "vimeo": GENERIC_YTDLP_FORMAT,
+}
+YOUTUBE_JS_RUNTIME = "deno"
+
+# Environment/filesystem resolution lives in the wrapper, not the builder.
+YTDLP_COOKIES_FILE_ENV = "YTDLP_COOKIES_FILE"
+YTDLP_DOWNLOAD_TIMEOUT_S = 600.0
+YTDLP_ERROR_TAIL_CHARS = 1200
+_BOT_MARKERS = ("sign in to confirm", "not a bot", "--cookies")
+_JS_RUNTIME_MARKERS = ("no supported javascript runtime", "--js-runtimes")
 DEFAULT_HOOK_MAX_WORDS = 8
 DEFAULT_IMAGE_COUNT = 3
 DEFAULT_IMAGE_MOMENT_EDGE_S = 2.0
@@ -51,54 +71,153 @@ class ImageMoment(NamedTuple):
     image_prompt: str
 
 
+def _host_matches(host: str, candidates: tuple[str, ...]) -> bool:
+    """Exact-or-dot-boundary host match; never a bare ``endswith(candidate)``."""
+    return any(host == candidate or host.endswith("." + candidate) for candidate in candidates)
+
+
+def _normalize_source_url(source_url: str) -> str:
+    """Return a schemeful URL, upgrading scheme-less known hosts to ``https://``."""
+    raw = str(source_url).strip()
+    if not raw:
+        raise ValueError("source_url is required")
+
+    parsed = urlparse(raw)
+    if parsed.scheme:
+        if not parsed.hostname:
+            raise ValueError("source_url must include a host")
+        return raw
+
+    first_segment = raw.split("/", 1)[0].lower()
+    if _host_matches(first_segment, _SCHEMELESS_HOSTS):
+        return f"https://{raw}"
+
+    raise ValueError("source_url must include a scheme and host")
+
+
+def _classify_host(source_url: str) -> str:
+    """Classify a source URL as ``"youtube"``, ``"vimeo"``, or ``"generic"``."""
+    normalized = _normalize_source_url(source_url)
+    host = (urlparse(normalized).hostname or "").lower()
+    if _host_matches(host, YOUTUBE_HOSTS):
+        return "youtube"
+    if _host_matches(host, VIMEO_HOSTS):
+        return "vimeo"
+    return "generic"
+
+
+def _host_flags(host_kind: str, cookies_file: str | Path | None) -> list[str]:
+    """Assemble host-specific yt-dlp flags (JS runtime, cookies) in one place."""
+    flags: list[str] = []
+    if host_kind == "youtube":
+        flags.extend(["--js-runtimes", YOUTUBE_JS_RUNTIME])
+    if cookies_file is not None:
+        flags.extend(["--cookies", str(cookies_file)])
+    return flags
+
+
 def build_crisp_ytdlp_command(
     source_url: str,
     output_path: str | Path,
     *,
-    format_selector: str = CRISP_YTDLP_FORMAT,
+    format_selector: str | None = None,
     merge_output_format: str = YTDLP_MERGE_OUTPUT_FORMAT,
+    cookies_file: str | Path | None = None,
 ) -> list[str]:
     """Build the vertical-safe yt-dlp command used by the real-footage path."""
 
-    source_url = str(source_url).strip()
-    if not source_url:
-        raise ValueError("source_url is required")
-    output_path = Path(output_path)
+    normalized_url = _normalize_source_url(source_url)
+    host_kind = _classify_host(normalized_url)
+    selected_format = (
+        format_selector
+        if format_selector is not None
+        else _FORMAT_BY_HOST.get(host_kind, GENERIC_YTDLP_FORMAT)
+    )
+    target = Path(output_path)
     return [
         "yt-dlp",
         "-f",
-        format_selector,
+        selected_format,
         "--merge-output-format",
         merge_output_format,
+        *_host_flags(host_kind, cookies_file),
         "-o",
-        str(output_path),
-        source_url,
+        str(target),
+        normalized_url,
     ]
+
+
+def _resolve_cookies_file_from_env() -> Path | None:
+    """Resolve ``YTDLP_COOKIES_FILE`` to an existing file, or raise if configured-but-missing."""
+    configured = (os.getenv(YTDLP_COOKIES_FILE_ENV) or "").strip()
+    if not configured:
+        return None
+
+    cookies_path = Path(configured)
+    cookies_exists = cookies_path.is_file()
+    if not cookies_exists:
+        raise RuntimeError(f"{YTDLP_COOKIES_FILE_ENV} is set but not a file: {configured!r}")
+    return cookies_path
+
+
+def _download_failure_hint(stderr: str) -> str:
+    """Map a yt-dlp stderr tail to an actionable operator hint (or empty string)."""
+    lower = stderr.lower()
+    hints: list[str] = []
+    if any(marker in lower for marker in _BOT_MARKERS):
+        hints.append(
+            f"Set {YTDLP_COOKIES_FILE_ENV} to a valid Netscape-format cookies export."
+        )
+    if any(marker in lower for marker in _JS_RUNTIME_MARKERS):
+        hints.append("Install deno in the image and keep --js-runtimes deno enabled.")
+    if not hints:
+        return ""
+    return " " + " ".join(hints)
+
+
+def _remove_partial_outputs(target: Path) -> None:
+    """Delete the target and the known yt-dlp ``.part`` sibling if present."""
+    for candidate in (target, target.with_name(target.name + ".part")):
+        try:
+            candidate.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def download_crisp_source(
     source_url: str,
     output_path: str | Path,
     *,
-    timeout_s: float | None = None,
+    timeout_s: float | None = YTDLP_DOWNLOAD_TIMEOUT_S,
     runner: Any = subprocess.run,
 ) -> Path:
-    """Download a source video with the crisp vertical-safe selector."""
+    """Download a source video with the crisp vertical-safe selector.
+
+    Owns environment/file resolution (``YTDLP_COOKIES_FILE``), the bounded
+    default timeout, partial-output cleanup, and actionable error messages. The
+    subprocess timeout is the hard execution bound; thread-backed callers get
+    only best-effort cancellation.
+    """
 
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_crisp_ytdlp_command(source_url, target)
-    proc = runner(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout_s,
-    )
+    cookies_file = _resolve_cookies_file_from_env()
+    cmd = build_crisp_ytdlp_command(source_url, target, cookies_file=cookies_file)
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _remove_partial_outputs(target)
+        timeout_label = "the configured timeout" if timeout_s is None else f"{timeout_s:g}s"
+        raise RuntimeError(f"yt-dlp crisp download timed out after {timeout_label}") from exc
+
     if getattr(proc, "returncode", 0) != 0:
+        _remove_partial_outputs(target)
         stderr = str(getattr(proc, "stderr", ""))
+        tail = stderr[-YTDLP_ERROR_TAIL_CHARS:]
+        hint = _download_failure_hint(stderr)
         raise RuntimeError(
             "yt-dlp crisp download failed "
-            f"(exit {getattr(proc, 'returncode', 'unknown')}): {stderr[-1200:]}"
+            f"(exit {getattr(proc, 'returncode', 'unknown')}): {tail}{hint}"
         )
     return target
 
@@ -547,6 +666,9 @@ def _limit_chars(text: str, limit: int) -> str:
 
 __all__ = [
     "CRISP_YTDLP_FORMAT",
+    "GENERIC_YTDLP_FORMAT",
+    "YTDLP_COOKIES_FILE_ENV",
+    "YTDLP_DOWNLOAD_TIMEOUT_S",
     "YTDLP_MERGE_OUTPUT_FORMAT",
     "ImageMoment",
     "build_crisp_ytdlp_command",

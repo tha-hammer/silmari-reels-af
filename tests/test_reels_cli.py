@@ -30,14 +30,27 @@ def test_unknown_preset_errors_cleanly(tmp_path):
     assert "unknown preset" in result.output
 
 
-def test_unsupported_overlay_errors_cleanly(tmp_path):
-    # A real preset whose overlay is not yet wired into `reels`.
+def test_unsupported_overlay_errors_cleanly(monkeypatch, tmp_path):
+    from reel_af.render import presets
+
+    monkeypatch.setattr(
+        presets,
+        "load_preset",
+        lambda name: {
+            "canvas_w": 1920,
+            "canvas_h": 1080,
+            "reel_seconds": 120,
+            "overlay": "unknown_overlay",
+        },
+    )
+    monkeypatch.setattr(presets, "preset_names", lambda: ["unknown-overlay"])
+
     result = runner.invoke(
         cli_mod.app,
-        ["reels", str(tmp_path / "x.mp4"), "--preset", "horizontal-youtube-lowerthird"],
+        ["reels", str(tmp_path / "x.mp4"), "--preset", "unknown-overlay"],
     )
     assert result.exit_code != 0
-    assert "middle_third" in result.output
+    assert "unknown_overlay" in result.output
 
 
 def _patch_pipeline(monkeypatch, tmp_path, made: list, *, duration: float):
@@ -111,3 +124,58 @@ def test_source_shorter_than_one_reel_errors(monkeypatch, tmp_path):
     assert result.exit_code != 0
     assert "nothing to cut" in result.output
     assert made == []
+
+
+def test_lower_third_preset_renders(monkeypatch, tmp_path):
+    src = tmp_path / "source.mp4"
+    src.write_bytes(b"\x00")
+    made: list[str] = []
+    calls: dict[str, object] = {}
+
+    monkeypatch.setattr(cli_mod, "_resolve_source", lambda source, work: src)
+    monkeypatch.setattr(
+        cli_mod,
+        "_resolve_words",
+        lambda source, wj, work: [
+            (180.0, 180.5, "Second"),
+            (180.5, 181.0, "window"),
+            (181.0, 181.5, "title"),
+        ],
+    )
+    monkeypatch.setattr(cli_mod, "_ffprobe_duration", lambda source: 370.0)
+
+    import reel_af.render.lower_third as lt
+
+    def _render(title, seq, **kwargs):
+        calls["title"] = title
+        calls["render_kwargs"] = kwargs
+        return seq
+
+    def _composite(source, t0, dur_s, seq, out, **kwargs):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"\x00")
+        made.append(out.name)
+        calls["composite"] = (source, t0, dur_s, seq, out, kwargs)
+        return out
+
+    monkeypatch.setattr(lt, "render_lower_third", _render)
+    monkeypatch.setattr(lt, "composite_window", _composite)
+
+    out = tmp_path / "out"
+    result = runner.invoke(
+        cli_mod.app,
+        [
+            "reels",
+            "ignored",
+            "--preset",
+            "horizontal-youtube-lowerthird",
+            "--out",
+            str(out),
+            "--only",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert made == ["reel02.mp4"]
+    assert calls["title"] == "Second window title"

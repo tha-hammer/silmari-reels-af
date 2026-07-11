@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,10 +29,14 @@ _DEFAULT_PROJECT_DIR = Path(__file__).resolve().parents[3] / "remotion"
 _COMPOSITION_ID = "LowerThird"
 _ENTRY = "src/index.ts"
 _FRAME_GLOB = "element-*.png"
+_DEFAULT_TITLE_WORDS = 8
 
 
 def _cfg(cfg: Any, name: str, default: Any) -> Any:
-    val = getattr(cfg, name, None) if cfg is not None else None
+    if isinstance(cfg, Mapping):
+        val = cfg.get(name)
+    else:
+        val = getattr(cfg, name, None) if cfg is not None else None
     return default if val is None else val
 
 
@@ -83,7 +88,73 @@ def overlay_filter(in_label: str, out_label: str, lt_input_index: int, cfg: Any 
     """ffmpeg ``overlay`` filter compositing the lower-third over ``in_label`` for
     the first ``lower_third_duration_s`` seconds → ``out_label``."""
     dur = float(_cfg(cfg, "lower_third_duration_s", 6.0))
-    return f"[{in_label}][{lt_input_index}:v]overlay=0:0:enable='between(t,0,{dur})'[{out_label}]"
+    return (
+        f"[{in_label}][{lt_input_index}:v]"
+        f"overlay=0:0:eof_action=pass:enable='between(t,0,{dur})'[{out_label}]"
+    )
 
 
-__all__ = ["project_dir", "render_lower_third", "input_args", "overlay_filter"]
+def title_from_words(
+    words: Sequence[tuple[float, float, str]],
+    t0: float,
+    t1: float,
+    cfg: Any = None,
+) -> str:
+    """Build the lower-third title for a source window from preset/config or words."""
+    configured = str(_cfg(cfg, "lower_third_title", "")).strip()
+    if configured:
+        return configured
+
+    max_words = max(1, int(_cfg(cfg, "lower_third_title_words", _DEFAULT_TITLE_WORDS)))
+    window_words = [
+        text.strip()
+        for start, end, text in words
+        if start >= t0 and end <= t1 and text.strip()
+    ]
+    title = " ".join(window_words[:max_words]).strip()
+    return title or "Untitled reel"
+
+
+def composite_window(
+    source: Path,
+    t0: float,
+    dur_s: float,
+    seq_dir: Path,
+    out: Path,
+    *,
+    fps: int = 30,
+    cfg: Any = None,
+    runner: Any = subprocess.run,
+) -> Path:
+    """Composite a lower-third PNG sequence over a preset-sized source window."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    canvas_w = int(_cfg(cfg, "canvas_w", 1920))
+    canvas_h = int(_cfg(cfg, "canvas_h", 1080))
+    filter_complex = (
+        f"[0:v]scale={canvas_w}:{canvas_h}:force_original_aspect_ratio=increase,"
+        f"crop={canvas_w}:{canvas_h},setsar=1[base];"
+        f"{overlay_filter('base', 'v', 1, cfg)}"
+    )
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-ss", f"{t0}", "-t", f"{dur_s}", "-i", str(source),
+        *input_args(seq_dir, fps),
+        "-filter_complex", filter_complex,
+        "-map", "[v]", "-map", "0:a?",
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "160k",
+        "-movflags", "+faststart",
+        str(out),
+    ]
+    runner(cmd, check=True)
+    return out
+
+
+__all__ = [
+    "project_dir",
+    "render_lower_third",
+    "input_args",
+    "overlay_filter",
+    "title_from_words",
+    "composite_window",
+]

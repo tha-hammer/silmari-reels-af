@@ -7,17 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     CHROMIUM_PATH=/usr/bin/chromium \
     REMOTION_CHROME_EXECUTABLE=/usr/bin/chromium
 
-# deno -> yt-dlp JS runtime for the YouTube ingest path (--js-runtimes deno).
+# deno → yt-dlp JS runtime for the YouTube ingest path (--js-runtimes deno).
 # Pinned via build arg; installed into DENO_INSTALL/bin (on PATH via /usr/local/bin).
 ARG DENO_VERSION=2.4.0
 ENV DENO_INSTALL=/usr/local
 
 # System deps for the full render path:
-#   ffmpeg + fonts -> banner/caption burn + composite
-#   chromium       -> Remotion overlay rendering (passed via --browser-executable)
-#   nodejs (+npm)  -> Remotion CLI (overlay PNG-sequence render)
-#   curl/gnupg/ca-certificates -> NodeSource setup, healthcheck, TLS
-#   unzip          -> prerequisite for the Deno installer archive
+#   ffmpeg + fonts → banner/caption burn + composite
+#   chromium       → Remotion overlay rendering (passed via --browser-executable)
+#   nodejs (+npm)  → Remotion CLI (overlay PNG-sequence render)
+#   curl/gnupg/ca-certificates → NodeSource setup, healthcheck, TLS
+#   unzip          → prerequisite for the Deno installer archive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         fonts-montserrat \
@@ -38,8 +38,8 @@ WORKDIR /app
 # Python deps first so source-only changes don't reinstall everything.
 COPY pyproject.toml README.md ./
 COPY src/ /app/src/
-# yt-dlp  -> download_crisp_source (video ingest)
-# uv/uvx  -> caption_words runs `uvx whisper-ctranslate2` for word timestamps
+# yt-dlp  → download_crisp_source (video ingest)
+# uv/uvx  → caption_words runs `uvx whisper-ctranslate2` for word timestamps
 RUN pip install --upgrade pip && pip install . && pip install yt-dlp uv
 
 # Remotion project's node deps (overlay renderer) from the lockfile, in its own
