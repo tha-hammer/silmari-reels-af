@@ -178,7 +178,8 @@ class StoragePort(Protocol):
     def presigned_url(self, ref: str, ttl: int | None = None) -> str: ...
     # exists: True IFF the object is present; boundary errors collapse to False (never raise).
     def exists(self, ref: str) -> bool: ...
-    # NOTE: `delete(ref)` is intentionally absent — Plan 6 forward-extension (cleanup).
+    # delete: idempotently remove a stored ref; blank ref -> BadRequest, unconfigured -> 503.
+    def delete(self, ref: str) -> None: ...
 
 
 @runtime_checkable

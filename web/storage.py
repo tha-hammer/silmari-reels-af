@@ -4,7 +4,7 @@ env, lazy boto3 client, org-scoped keys, presigned GET URLs, fail-closed 503.
 The stored ref is the S3 Key itself — an org-prefixed, parseable ``<org_id>/<key>``
 (not opaque). The org prefix is a load-bearing invariant callers/observability may
 read. ``put`` is last-write-wins on a stable ref (same ``(org_id, key)`` → same Key).
-``delete`` is intentionally absent — Plan 6 forward-extension (object cleanup).
+``delete`` removes the same key namespace and is idempotent at the S3 boundary.
 """
 
 from __future__ import annotations
@@ -86,3 +86,9 @@ class ObjectStorage:
             return True
         except Exception:  # boundary: any head_object miss/error → absent
             return False
+
+    def delete(self, ref: str) -> None:
+        bucket = self._bucket()
+        if not isinstance(ref, str) or not ref.strip():
+            raise BadRequest("missing media ref", code="missing_ref")
+        self._client().delete_object(Bucket=bucket, Key=ref.strip())

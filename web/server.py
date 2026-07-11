@@ -62,6 +62,7 @@ _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
 _CAROUSEL_GET_RE = re.compile(r"^v1/carousels/([^/]+)$")
 _CAROUSEL_RECREATE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)/recreate$")
+_CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
 
@@ -111,6 +112,13 @@ def _carousel_recreate_target(method: str, sub: str) -> tuple[str, int] | None:
         return None
     m = _CAROUSEL_RECREATE_RE.match(sub)
     return (m.group(1), int(m.group(2))) if m else None
+
+
+def _carousel_cancel_id(method: str, sub: str) -> str | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_CANCEL_RE.match(sub)
+    return m.group(1) if m else None
 
 
 def _research_poll_id(method: str, sub: str) -> str | None:
@@ -421,6 +429,19 @@ def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, r
     return jsonify(slide), 200
 
 
+def _handle_carousel_cancel(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.carousels.get(ctx, carousel_id)  # 404 before any destructive work
+    refs = deps.carousels.draft_slide_refs(ctx, carousel_id)
+    for ref in refs:
+        try:
+            deps.storage.delete(ref)
+        except HttpError:
+            deps.logger.warning("carousel_cancel_delete_failed carousel_id=%s ref=%s", carousel_id, ref)
+    deps.carousels.set_status(ctx, carousel_id, "cancelled")
+    return jsonify({"status": "cancelled"}), 200
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -488,6 +509,9 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     recreate = _carousel_recreate_target(method, subpath)
     if recreate is not None:
         return _handle_carousel_recreate(deps, *recreate, recreate_fn)
+    cancel_id = _carousel_cancel_id(method, subpath)
+    if cancel_id is not None:
+        return _handle_carousel_cancel(deps, cancel_id)
     slide = _slide_target(method, subpath)
     if slide is not None:
         return _handle_slide(deps, *slide)

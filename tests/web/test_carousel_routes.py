@@ -368,3 +368,32 @@ def test_hq_cap_persists_across_requests(monkeypatch):
     assert over.status_code in (402, 409)
     assert repo.hq_recreate_count(make_ctx(), CID) == 2
 
+
+def test_cancel_sets_cancelled_and_deletes_objects():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    storage = make_deps().storage
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, storage=storage)
+    client = _client(deps)
+
+    resp = client.post(f"/api/v1/carousels/{CID}/cancel")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "cancelled"
+    assert client.get(f"/api/v1/carousels/{CID}").get_json()["status"] == "cancelled"
+    assert storage.deleted == ["ref-0", "ref-1", "ref-2"]
+
+
+def test_cross_org_cancel_is_404_no_delete():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    other = make_ctx()
+    object.__setattr__(other, "org_id", uuid.uuid4())
+    storage = make_deps().storage
+    deps = make_deps(identity=FakeIdentity(other), carousels=repo, storage=storage)
+
+    resp = _client(deps).post(f"/api/v1/carousels/{CID}/cancel")
+
+    assert resp.status_code == 404
+    assert storage.deleted == []
+    assert repo.get(make_ctx(), CID).status == "draft"

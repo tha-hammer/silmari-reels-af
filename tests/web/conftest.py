@@ -217,6 +217,7 @@ class FakeStorage:
     def __init__(self, objects: dict | None = None):
         self._objects = dict(objects or {})
         self.presign_calls: list = []
+        self.deleted: list = []
 
     def put(self, org_id, key, data) -> str:
         ref = f"{org_id}/{key.lstrip('/')}"
@@ -232,6 +233,10 @@ class FakeStorage:
 
     def exists(self, ref) -> bool:
         return ref in self._objects
+
+    def delete(self, ref) -> None:
+        self.deleted.append(ref)
+        self._objects.pop(ref, None)
 
 
 class FakeSlideRefResolver:

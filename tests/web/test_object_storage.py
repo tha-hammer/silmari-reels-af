@@ -29,6 +29,7 @@ class FakeS3:
     def __init__(self):
         self.objects: dict[tuple[str, str], bytes] = {}
         self.presign_calls: list = []
+        self.delete_calls: list = []
 
     def put_object(self, Bucket, Key, Body):  # noqa: N803 (boto3 kwarg names)
         self.objects[(Bucket, Key)] = Body if isinstance(Body, bytes) else Body.read()
@@ -43,6 +44,10 @@ class FakeS3:
         assert op == "get_object"
         self.presign_calls.append((Params["Key"], ExpiresIn))
         return f"https://s3.example/{Params['Bucket']}/{Params['Key']}?X-Amz-Expires={ExpiresIn}"
+
+    def delete_object(self, Bucket, Key):  # noqa: N803
+        self.delete_calls.append((Bucket, Key))
+        self.objects.pop((Bucket, Key), None)
 
 
 def _store(monkeypatch, s3, *, configured=True):
@@ -127,6 +132,20 @@ def test_presigned_url_empty_ref_is_400(monkeypatch):
     store = _store(monkeypatch, FakeS3())
     with pytest.raises(BadRequest):
         store.presigned_url("   ")
+
+
+# ─────────────────────────── Behavior 3: object delete ───────────────────────────
+
+
+def test_delete_removes_object(monkeypatch):
+    s3 = FakeS3()
+    store = _store(monkeypatch, s3)
+    ref = store.put(uuid.uuid4(), "c/s.jpg", b"x")
+
+    store.delete(ref)
+
+    assert s3.delete_calls == [(BUCKET, ref)]
+    assert store.exists(ref) is False
 
 
 # ─────────────────────────── Behavior 3: fail-closed 503 when unconfigured ───────────────────────────
