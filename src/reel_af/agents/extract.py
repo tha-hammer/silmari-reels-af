@@ -64,6 +64,24 @@ def _clean(html: str) -> tuple[str, str]:
     return title, text
 
 
+def _essence_user_prompt(*, final_url: str, title: str, body: str) -> str:
+    return (
+        f"SOURCE\n"
+        f"  url   : {final_url}\n"
+        f"  title : {title or '(no title)'}\n\n"
+        f"FULL BODY (cleaned, truncated to fit context):\n{body[:PROMPT_BODY_CHARS]}"
+    )
+
+
+def _fit_text_body(cleaned: str) -> str:
+    return cleaned
+
+
+def _prepare_text_body(text: str | None) -> str:
+    cleaned = (text or "").strip()
+    return _fit_text_body(cleaned)
+
+
 def _youtube_ref(url: str) -> tuple[str, float | None, float | None] | None:
     """Return (video_id, t_start, t_end) if `url` is a YouTube link, else None.
     t_start/t_end come from `?t=` and `?reel_end=` (seconds) when present."""
@@ -147,11 +165,22 @@ async def extract_essence(app: Any, url: str) -> Essence:
     if not body:
         raise RuntimeError(f"extract_essence: could not extract readable text from {url}")
 
-    user = (
-        f"SOURCE\n"
-        f"  url   : {final_url}\n"
-        f"  title : {title or '(no title)'}\n\n"
-        f"FULL BODY (cleaned, truncated to fit context):\n{body[:PROMPT_BODY_CHARS]}"
-    )
+    user = _essence_user_prompt(final_url=final_url, title=title, body=body)
 
+    return await app.ai(system=_SYSTEM, user=user, schema=Essence)
+
+
+async def essence_from_text(
+    app: Any,
+    text: str | None,
+    *,
+    title: str = "(provided text)",
+) -> Essence:
+    """Build an Essence from provided text without fetching a URL."""
+    body = _prepare_text_body(text)
+    user = _essence_user_prompt(
+        final_url="(none - provided text)",
+        title=title,
+        body=body,
+    )
     return await app.ai(system=_SYSTEM, user=user, schema=Essence)

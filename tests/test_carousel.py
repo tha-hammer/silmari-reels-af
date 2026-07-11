@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 from util import make_fake_provider, square_png_bytes
 
+from reel_af.models import Essence
 from reel_af.render.images import generate_first_frame
 
 
@@ -65,6 +66,42 @@ def test_carousel_default_preset_is_4x5_portrait():
     assert cfg["slide_count"] >= 1
     assert cfg["kind"] == "carousel"
     assert cfg.get("overlay") not in {"middle_third", "lower_third"}
+
+
+class _StubApp:
+    def __init__(self, essence: Essence):
+        self._essence = essence
+        self.ai_calls: list[dict] = []
+
+    async def ai(self, *, system, user, schema):
+        self.ai_calls.append({"system": system, "user": user, "schema": schema})
+        return self._essence
+
+
+async def test_essence_from_text_bypasses_fetch(monkeypatch):
+    from reel_af.agents import extract
+
+    async def _boom(url):
+        raise AssertionError("_fetch must not be called for text input")
+
+    monkeypatch.setattr(extract, "_fetch", _boom)
+    stub_essence = Essence(
+        core_claim="Sleep debt compounds.",
+        mechanism="Adenosine accrues.",
+        evidence=["8 hours"],
+        content_mode="general",
+        domain="health",
+    )
+    app = _StubApp(stub_essence)
+
+    result = await extract.essence_from_text(
+        app,
+        "A long research note about sleep and recovery.",
+    )
+
+    assert isinstance(result, Essence)
+    assert app.ai_calls and app.ai_calls[0]["schema"] is Essence
+    assert extract._SYSTEM == app.ai_calls[0]["system"]
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
