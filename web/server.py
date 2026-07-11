@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import re
 
+from carousels import build_carousel_create
 from deps import AppDeps, BadGateway, HttpError, NotFound, RepositoryUnavailable, default_deps
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from reel_jobs import (
@@ -48,6 +49,10 @@ HTTP_NOT_FOUND = 404
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
+
+
+def _is_carousel_create(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/carousels"
 
 
 def _is_upload(method: str, sub: str) -> bool:
@@ -224,6 +229,13 @@ def _handle_research_run(deps: AppDeps) -> tuple[Response, int]:
     return jsonify(cp_body), status
 
 
+def _handle_carousel_create(deps: AppDeps) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.access_guard.authorize_create(ctx)
+    build_carousel_create(request.get_json(silent=True))
+    return jsonify({"carousel_id": str(deps.uuid_factory()), "status": "draft"}), HTTP_ACCEPTED
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -272,6 +284,8 @@ def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
+    if _is_carousel_create(method, subpath):
+        return _handle_carousel_create(deps)
     if _is_research_run(method, subpath):
         return _handle_research_run(deps)
     target = _submit_target(method, subpath)
