@@ -6,7 +6,14 @@ import uuid
 
 import server
 from carousels import CarouselSlideRefResolver
-from conftest import FakeCarouselRepo, FakeControlPlane, FakeIdentity, make_ctx, make_deps
+from conftest import (
+    ORG_ID,
+    FakeCarouselRepo,
+    FakeControlPlane,
+    FakeIdentity,
+    make_ctx,
+    make_deps,
+)
 from deps import (
     AppDeps,
     CarouselRepoPort,
@@ -17,10 +24,20 @@ from deps import (
 )
 
 CREATE = "/api/v1/carousels"
+TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
 
 
 def _client(deps):
     return server.create_app(deps, enable_supertokens=False).test_client()
+
+
+def _post(client, key=None, json=None):
+    headers = {"Idempotency-Key": key} if key else {}
+    return client.post(
+        CREATE,
+        json=json or {"source_text": "doc", "preset": "carousel-default"},
+        headers=headers,
+    )
 
 
 def test_repo_and_resolver_satisfy_ports():
@@ -101,3 +118,124 @@ def test_create_missing_source_text_is_400_before_work():
     assert resp.get_json()["code"] == "invalid_source_text"
     assert repo.inserted == []
     assert cp.dispatch_calls == []
+
+
+def test_same_key_dispatches_research_to_carousel_once():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_1"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+    client = _client(deps)
+
+    first = _post(client, key="K1")
+    second = _post(client, key="K1")
+
+    assert first.status_code == 202
+    assert second.status_code == 202
+    assert len(cp.dispatch_calls) == 1
+    target, body = cp.dispatch_calls[0]
+    assert target == TARGET_CAROUSEL
+    assert "input" in body
+    assert not (set(body) & {"org_id", "created_by", "user_id"})
+
+
+def test_dispatch_body_is_identity_free():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_2"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+
+    _post(_client(deps), key="A")
+
+    _, body = cp.dispatch_calls[0]
+    flat = str(body)
+    assert "Cookie" not in flat
+    assert "Authorization" not in flat
+    assert str(ORG_ID) not in flat
+
+
+def test_research_run_id_wire_key_coerced_stripped_and_tenancy_checked():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_3"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+    research_run_id = deps.reel_jobs.seed_research_run(
+        execution_id="exec_r1",
+        org_id=make_ctx().org_id,
+        created_by=make_ctx().user_id,
+    )
+
+    resp = _post(
+        _client(deps),
+        key="RR",
+        json={
+            "source_text": "doc",
+            "preset": "carousel-default",
+            "research_run_id": str(research_run_id),
+        },
+    )
+
+    assert resp.status_code == 202
+    assert repo.inserted[0][1].source_research_run_id == research_run_id
+    _, body = cp.dispatch_calls[0]
+    flat = str(body)
+    assert str(research_run_id) not in flat
+    assert "research_run_id" not in flat
+    assert "source_research_run_id" not in flat
+
+
+def test_malformed_research_run_id_is_400():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_bad"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+
+    resp = _post(
+        _client(deps),
+        key="BAD",
+        json={
+            "source_text": "doc",
+            "preset": "carousel-default",
+            "research_run_id": "not-a-uuid",
+        },
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_research_run_id"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_cross_org_research_run_id_is_404():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_cross"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+    research_run_id = deps.reel_jobs.seed_research_run(
+        execution_id="exec_foreign",
+        org_id=uuid.uuid4(),
+        created_by=uuid.uuid4(),
+    )
+
+    resp = _post(
+        _client(deps),
+        key="CROSS",
+        json={
+            "source_text": "doc",
+            "preset": "carousel-default",
+            "research_run_id": str(research_run_id),
+        },
+    )
+
+    assert resp.status_code == 404
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_idempotent_replay_returns_carousel_id_not_job_id():
+    repo = FakeCarouselRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_4"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo, control_plane=cp)
+    client = _client(deps)
+
+    first = _post(client, key="R1")
+    second = _post(client, key="R1")
+
+    assert "carousel_id" in second.get_json()
+    assert "job_id" not in second.get_json()
+    assert first.get_json()["carousel_id"] == second.get_json()["carousel_id"]

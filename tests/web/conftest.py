@@ -26,7 +26,7 @@ from deps import (  # noqa: E402
     NotFound,
     RoleAccessGuard,
 )
-from reel_jobs import ReelJobRef  # noqa: E402
+from reel_jobs import ReelJobRef, ResearchRunRef  # noqa: E402
 
 FIXED_JOB_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
 ORG_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
@@ -63,6 +63,11 @@ class FakeReelJobRepo:
         self._get_error = get_error
         self._by_key: dict = {}          # (org_id, created_by, crid) -> ReelJobRef (idempotency)
         self._attach_error: Exception | None = None
+        # Plan 4 (CI-2): research_run store + execution_id-keyed job index so the
+        # provenance read-back (get_by_execution) genuinely threads the column.
+        self.research_runs: dict = {}    # research_run_id -> ResearchRunRef
+        self._runs_by_exec: dict = {}    # execution_id -> research_run_id
+        self._jobs_by_exec: dict = {}    # execution_id -> ReelJobRef
 
     def ensure_ready(self) -> None:
         pass
@@ -73,10 +78,14 @@ class FakeReelJobRepo:
             existing = self._by_key[key]
             return ReelJobRef(
                 job_id=existing.job_id, org_id=existing.org_id, created_by=existing.created_by,
-                status=existing.status, execution_id=existing.execution_id, created=False,
+                status=existing.status, execution_id=existing.execution_id,
+                source_research_run_id=existing.source_research_run_id, created=False,
             )
         self.inserted.append((ctx, submission, job_id, now, client_request_id))
-        ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="queued")
+        # Thread provenance from the submission (Plan 4) so read-back surfaces it.
+        srr = getattr(submission, "source_research_run_id", None)
+        ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
+                         status="queued", source_research_run_id=srr)
         self._by_key[key] = ref
         return ref
 
@@ -87,21 +96,28 @@ class FakeReelJobRepo:
         if self._attach_error is not None:
             raise self._attach_error
         self.attached.append((ctx, job_id, execution_id))
+        attached_ref = None
         for k, ref in list(self._by_key.items()):
             if ref.job_id == job_id:
-                self._by_key[k] = ReelJobRef(
+                attached_ref = ReelJobRef(
                     job_id=ref.job_id, org_id=ref.org_id, created_by=ref.created_by,
-                    status=ref.status, execution_id=execution_id, created=False,
+                    status=ref.status, execution_id=execution_id,
+                    source_research_run_id=ref.source_research_run_id, created=False,
                 )
-        return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
-                          status="queued", execution_id=execution_id)
+                self._by_key[k] = attached_ref
+        if attached_ref is None:
+            attached_ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
+                                      status="queued", execution_id=execution_id)
+        self._jobs_by_exec[execution_id] = attached_ref  # exec-keyed read path (Plan 4)
+        return attached_ref
 
     def get_by_execution(self, ctx, execution_id):
         if self._get_error is not None:
             raise self._get_error
-        if self._job is None:
+        job = self._jobs_by_exec.get(execution_id) or self._job
+        if job is None or job.org_id != ctx.org_id:
             raise NotFound("job not found")
-        return self._job
+        return job                                          # carries source_research_run_id
 
     def mark_failed(self, ctx, job_id, reason, completed_at) -> None:
         self.failed.append((ctx, job_id, reason))
@@ -112,6 +128,56 @@ class FakeReelJobRepo:
 
     def mark_stale_queued(self, now) -> int:
         return 0
+
+    # ─────────── research_run store (Plan 4, ISC-24; mirrors PgReelJobRepo) ───────────
+
+    def _record_event(self, name: str) -> None:
+        events = getattr(self, "events", None)
+        if events is not None:
+            events.append(name)
+
+    def seed_research_run(self, execution_id, org_id, created_by, status="succeeded"):
+        rid = uuid.uuid4()
+        self.research_runs[rid] = ResearchRunRef(
+            id=rid, org_id=org_id, created_by=created_by, status=status,
+            execution_id=execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = rid
+        return rid                                          # tests OBSERVE via this id
+
+    def insert_research_run(self, ctx, run_id, execution_id, status, now):
+        self._record_event("insert_research_run")
+        self.research_runs[run_id] = ResearchRunRef(
+            id=run_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            status=status, execution_id=execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = run_id
+
+    def update_research_status(self, ctx, run_id, status=None, execution_id=None):
+        self._record_event("update_research_status")
+        r = self.research_runs.get(run_id)
+        if r is None or r.org_id != ctx.org_id:
+            return
+        if r.status in ("succeeded", "failed", "cancelled"):   # terminal monotonicity
+            return
+        self.research_runs[run_id] = ResearchRunRef(
+            id=r.id, org_id=r.org_id, created_by=r.created_by,
+            status=status or r.status, execution_id=execution_id or r.execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = run_id
+
+    def get_research_run(self, ctx, run_id):
+        r = self.research_runs.get(run_id)
+        if r is None or r.org_id != ctx.org_id:
+            raise NotFound("research run not found")        # conceal cross-org
+        return r
+
+    def get_research_by_execution(self, ctx, execution_id):
+        rid = self._runs_by_exec.get(execution_id)
+        r = self.research_runs.get(rid) if rid else None
+        if r is None or r.org_id != ctx.org_id:
+            raise NotFound("research run not found")        # conceal foreign/absent
+        return r
 
 
 class FakeUploadStore:

@@ -13,17 +13,24 @@ tests/web/integration/test_pg_research_run.py.
 
 from __future__ import annotations
 
+import uuid
+
 import pytest
 import server
 from conftest import FakeControlPlane, FakeIdentity, make_ctx, make_deps
-from deps import BadRequest
+from deps import AuthContext, BadRequest
 from reel_jobs import (
     RESEARCH_DEFAULTS,
+    TARGET_COMPOSITE,
     TARGET_RESEARCH,
     build_research_dispatch,
+    build_submission,
 )
 
 RESEARCH_URL = "/api/v1/research/run"
+COMPOSITE_URL = f"/api/v1/execute/async/{TARGET_COMPOSITE}"
+OTHER_ORG = uuid.UUID("33333333-3333-3333-3333-333333333333")
+OTHER_USER = uuid.UUID("44444444-4444-4444-4444-444444444444")
 
 _DEFAULTS_KEYSET = {
     "research_focus",
@@ -109,3 +116,198 @@ def test_mode_override_and_empty_query_rejected():
     )
     assert cp.dispatch_calls[-1][1]["input"]["mode"] == "bear"
     assert _client(deps).post(RESEARCH_URL, json={"query": "   "}).status_code == 400
+
+
+class RecordingControlPlane(FakeControlPlane):
+    def __init__(self, *, events: list[str] | None = None, dispatch_response=None, poll_response=None):
+        super().__init__(response=dispatch_response or (202, {"execution_id": "exec_r1"}, {}))
+        self.events = events
+        self._poll_response = poll_response or (200, {"status": "succeeded"}, {})
+
+    def dispatch_async(self, target, body):
+        if self.events is not None:
+            self.events.append("dispatch")
+        return super().dispatch_async(target, body)
+
+    def get_execution(self, execution_id):
+        self.get_calls.append(execution_id)
+        return self._poll_response
+
+
+# ─────────────────────── Behavior 2 (ISC-23) ───────────────────────
+
+
+def test_research_poll_reconciles_and_returns_document():
+    cp = RecordingControlPlane(
+        poll_response=(
+            200,
+            {
+                "status": "succeeded",
+                "result": {
+                    "markdown": "# R",
+                    "html": "<h1>R</h1>",
+                    "sources": [{"title": "S"}],
+                },
+            },
+            {},
+        )
+    )
+    deps = make_deps(control_plane=cp)
+    deps.reel_jobs.seed_research_run(
+        execution_id="exec_r1",
+        org_id=make_ctx().org_id,
+        created_by=make_ctx().user_id,
+    )
+
+    resp = _client(deps).get("/api/v1/research/exec_r1")
+
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "succeeded"
+    assert body["markdown"] == "# R"
+    assert body["html"] == "<h1>R</h1>"
+    assert body["sources"] == [{"title": "S"}]
+    assert cp.get_calls == ["exec_r1"]
+
+
+def test_research_poll_foreign_run_is_404():
+    foreign = AuthContext(
+        user_id=OTHER_USER,
+        org_id=OTHER_ORG,
+        role="member",
+        supertokens_user_id="st-2",
+    )
+    cp = RecordingControlPlane(poll_response=(200, {"status": "running"}, {}))
+    deps = make_deps(identity=FakeIdentity(foreign), control_plane=cp)
+    deps.reel_jobs.seed_research_run(
+        execution_id="exec_r1",
+        org_id=make_ctx().org_id,
+        created_by=make_ctx().user_id,
+    )
+
+    resp = _client(deps).get("/api/v1/research/exec_r1")
+
+    assert resp.status_code == 404
+    assert cp.get_calls == []
+
+
+# ─────────────────────── Behavior 3 (ISC-24) ───────────────────────
+
+
+def test_research_run_records_owned_row_and_returns_ids_row_first():
+    events: list[str] = []
+    cp = RecordingControlPlane(events=events, dispatch_response=(202, {"execution_id": "exec_r9"}, {}))
+    deps = make_deps(control_plane=cp)
+    deps.reel_jobs.events = events
+
+    resp = _client(deps).post(RESEARCH_URL, json={"query": "grid storage"})
+
+    assert resp.status_code == 202
+    body = resp.get_json()
+    assert body["research_run_id"] == str(uuid.UUID(body["research_run_id"]))
+    assert body["execution_id"] == "exec_r9"
+    run = deps.reel_jobs.get_research_run(make_ctx(), uuid.UUID(body["research_run_id"]))
+    assert run.org_id == make_ctx().org_id
+    assert run.created_by == make_ctx().user_id
+    assert run.execution_id == "exec_r9"
+    assert events[:3] == ["insert_research_run", "dispatch", "update_research_status"]
+
+
+def test_research_run_cp_failure_marks_row_failed():
+    cp = RecordingControlPlane(dispatch_response=(202, {"status": "accepted_without_execution"}, {}))
+    deps = make_deps(control_plane=cp)
+
+    resp = _client(deps).post(RESEARCH_URL, json={"query": "grid storage"})
+
+    assert resp.status_code == 502
+    assert len(deps.reel_jobs.research_runs) == 1
+    run = next(iter(deps.reel_jobs.research_runs.values()))
+    assert run.status == "failed"
+
+
+# ─────────────────────── Behavior 4 (ISC-25) ───────────────────────
+
+
+def test_research_provenance_keys_do_not_leak_to_reasoner_input():
+    rid = uuid.uuid4()
+    sub = build_submission(
+        TARGET_COMPOSITE,
+        {
+            "input": {
+                "url": "https://x.test/a",
+                "preset": "carousel-default",
+                "research_run_id": str(rid),
+                "source_research_run_id": str(rid),
+            }
+        },
+        source_research_run_id=rid,
+    )
+
+    assert sub.source_research_run_id == rid
+    assert "research_run_id" not in sub.cp_input
+    assert "source_research_run_id" not in sub.cp_input
+    assert "research_run_id" not in sub.params
+    assert "source_research_run_id" not in sub.params
+
+
+def test_create_from_research_stamps_and_reads_back_provenance():
+    cp = RecordingControlPlane(
+        dispatch_response=(202, {"execution_id": "exec_c1"}, {}),
+        poll_response=(200, {"status": "succeeded"}, {}),
+    )
+    deps = make_deps(control_plane=cp)
+    rid = deps.reel_jobs.seed_research_run(
+        execution_id="exec_r1",
+        org_id=make_ctx().org_id,
+        created_by=make_ctx().user_id,
+    )
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={
+            "research_run_id": str(rid),
+            "input": {"url": "https://x.test/a", "preset": "carousel-default"},
+        },
+    )
+
+    assert resp.status_code == 202
+    read = _client(deps).get("/api/v1/executions/exec_c1").get_json()
+    assert read["source_research_run_id"] == str(rid)
+
+
+def test_cross_org_research_run_is_not_stamped():
+    cp = RecordingControlPlane(dispatch_response=(202, {"execution_id": "exec_c2"}, {}))
+    deps = make_deps(control_plane=cp)
+    rid = deps.reel_jobs.seed_research_run(
+        execution_id="exec_rx",
+        org_id=OTHER_ORG,
+        created_by=OTHER_USER,
+    )
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={
+            "research_run_id": str(rid),
+            "input": {"url": "https://x.test/a", "preset": "carousel-default"},
+        },
+    )
+
+    assert resp.status_code == 404
+    assert cp.dispatch_calls == []
+
+
+def test_malformed_research_run_id_is_400_no_work():
+    cp = RecordingControlPlane(dispatch_response=(202, {"execution_id": "exec_bad"}, {}))
+    deps = make_deps(control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={
+            "research_run_id": "not-a-uuid",
+            "input": {"url": "https://x.test/a", "preset": "carousel-default"},
+        },
+    )
+
+    assert resp.status_code == 400
+    assert deps.reel_jobs.inserted == []
+    assert cp.dispatch_calls == []

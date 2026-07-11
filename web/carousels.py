@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass
 
 from deps import BadRequest
@@ -16,13 +17,20 @@ class HqRecreateCapError(Exception):
 class CarouselCreate:
     source_text: str
     preset: str
-    source_research_run_id: object | None = None
+    source_research_run_id: uuid.UUID | None = None
 
     def cp_input(self) -> dict:
         return {
             "source_text": self.source_text,
             "preset": self.preset,
         }
+
+
+def _coerce_research_run_id(value) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError) as exc:
+        raise BadRequest("research_run_id must be a UUID", code="invalid_research_run_id") from exc
 
 
 def build_carousel_create(body: dict | None) -> CarouselCreate:
@@ -37,9 +45,13 @@ def build_carousel_create(body: dict | None) -> CarouselCreate:
     if not source_text:
         raise BadRequest("source_text must be non-empty", code="invalid_source_text")
     preset = body.get("preset")
+    research_run_id = body.get("research_run_id")
     return CarouselCreate(
         source_text=source_text,
         preset=preset.strip() if isinstance(preset, str) and preset.strip() else "carousel-default",
+        source_research_run_id=(
+            _coerce_research_run_id(research_run_id) if research_run_id else None
+        ),
     )
 
 
