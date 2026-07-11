@@ -609,6 +609,12 @@ async def topic_to_reel(
 # ENTRY REASONER 3 — Video (URL) → Reel  (composite overlay pipeline)
 # ════════════════════════════════════════════════════════════════════
 
+SOURCE_NO_AUDIO_TRACK_CODE = "source_no_audio_track"
+SOURCE_NO_AUDIO_TRACK_MESSAGE = (
+    "source video has no audio track; the composite preset transcribes spoken audio "
+    "to build the overlay. Upload a clip that has an audio track."
+)
+
 
 def _run_composite_reels(
     *, url: str, preset_name: str, count: int, out_path: Path, chrome: str | None,
@@ -620,7 +626,7 @@ def _run_composite_reels(
     import subprocess
 
     from reel_af.render import lower_third, middle_third
-    from reel_af.render.captions import caption_words
+    from reel_af.render.captions import caption_words, has_audio_stream
     from reel_af.render.hooks import download_crisp_source
     from reel_af.render.presets import load_preset, preset_names
 
@@ -639,6 +645,9 @@ def _run_composite_reels(
         src = download_crisp_source(url, out_path / "source.mp4")
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
+    source_has_audio = has_audio_stream(src)
+    if not source_has_audio:
+        return {"error": SOURCE_NO_AUDIO_TRACK_MESSAGE, "code": SOURCE_NO_AUDIO_TRACK_CODE}
     words = caption_words(src, workdir=out_path)
     dur = float(subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],

@@ -139,7 +139,7 @@ class ReelJobRepoPort(Protocol):
 class UploadStorePort(Protocol):
     def ensure_ready(self) -> None: ...
     def store(self, ctx: AuthContext, file_storage) -> dict: ...
-    def presign(self, handle: str) -> str: ...  # opaque handle → fetchable URL for the node (T7)
+    def presign(self, ctx: AuthContext, handle: str) -> str: ...  # ctx-owned handle → fetchable url (T7/Phase0)
 
 
 @runtime_checkable

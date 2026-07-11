@@ -135,8 +135,8 @@ class FakeUploadStore:
             raise self._error
         return self._handle
 
-    def presign(self, handle: str) -> str:
-        self.presign_calls.append(handle)
+    def presign(self, ctx, handle: str) -> str:
+        self.presign_calls.append((ctx.org_id, handle))
         if self._presign_error is not None:
             raise self._presign_error
         return self._presigned

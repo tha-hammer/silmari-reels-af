@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import server
 from conftest import (
     ORG_ID,
@@ -95,13 +97,14 @@ def test_composite_file_submit_presigns_and_injects_url():
     deps = make_deps(
         identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
     )
-    body = {"input": {"source": "11111111.../abc-clip.mp4", "preset": "middle-third-dynamic"}}
+    handle = f"{ORG_ID}/abc-clip.mp4"                     # ctx-owned key (Phase 0)
+    body = {"input": {"source": handle, "preset": "middle-third-dynamic"}}
 
     resp = _client(deps).post(COMPOSITE_URL, json=body)
 
     assert resp.status_code == 202
-    # handle presigned exactly once, using the client-supplied opaque key
-    assert uploads.presign_calls == ["11111111.../abc-clip.mp4"]
+    # handle presigned exactly once, with the caller's ctx, using the ctx-owned key
+    assert uploads.presign_calls == [(ORG_ID, handle)]
     # dispatched body carries the presigned url + preset, and NOT the raw handle
     assert len(cp.dispatch_calls) == 1
     _target, dispatched = cp.dispatch_calls[0]
@@ -117,13 +120,32 @@ def test_composite_file_submit_presign_unconfigured_is_503_no_row_no_cp():
     deps = make_deps(
         identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
     )
-    body = {"input": {"source": "org/abc-clip.mp4", "preset": "middle-third-dynamic"}}
+    body = {"input": {"source": f"{ORG_ID}/abc-clip.mp4", "preset": "middle-third-dynamic"}}
 
     resp = _client(deps).post(COMPOSITE_URL, json=body)
 
     assert resp.status_code == 503
     assert repo.inserted == []
     assert cp.dispatch_calls == []
+
+
+# Phase 0 / S1 - a file-mode handle not under the caller's org is concealed as 404
+# BEFORE any DB row, presign, or CP dispatch (server-level ownership guard).
+def test_composite_file_submit_rejects_foreign_handle_before_row_presign_cp():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    uploads = FakeUploadStore()
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
+    )
+    foreign = f"{uuid.uuid4()}/abc-clip.mp4"             # a different org's key
+    resp = _client(deps).post(
+        COMPOSITE_URL, json={"input": {"source": foreign, "preset": "middle-third-dynamic"}}
+    )
+
+    assert resp.status_code == 404
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+    assert uploads.presign_calls == []                   # never presigned a foreign key
 
 
 # B7 - forged identity fields are rejected (top level and under input): 400, no row, no CP.

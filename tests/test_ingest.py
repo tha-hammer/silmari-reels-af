@@ -264,6 +264,7 @@ def test_app_lower_third_video_preset_is_wired(monkeypatch, tmp_path):
     calls: dict[str, object] = {}
 
     monkeypatch.setattr("reel_af.render.hooks.download_crisp_source", lambda url, out: src)
+    monkeypatch.setattr("reel_af.render.captions.has_audio_stream", lambda *a, **k: True)  # T8 B2: audio present
     monkeypatch.setattr(
         "reel_af.render.captions.caption_words",
         lambda source, workdir: [
@@ -304,3 +305,30 @@ def test_app_lower_third_video_preset_is_wired(monkeypatch, tmp_path):
     assert result["reel_count"] == 1
     assert calls["title"] == "Railway lower third works"
     assert result["reels"] == [str(tmp_path / "reel01" / "reel01.mp4")]
+
+
+# T8 B1b: a source with no audio stream returns a clear error and skips transcription.
+def test_composite_no_audio_source_returns_clear_error(tmp_path, monkeypatch):
+    from reel_af import app as app_module
+
+    monkeypatch.setattr("reel_af.render.hooks.download_crisp_source", lambda url, out, **k: out)
+    called = {"caption": False}
+
+    def _caption(*_a, **_k):
+        called["caption"] = True
+        return []
+
+    monkeypatch.setattr("reel_af.render.captions.caption_words", _caption)
+    monkeypatch.setattr("reel_af.render.captions.has_audio_stream", lambda *a, **k: False)
+
+    result = app_module._run_composite_reels(
+        url="https://bucket/x.mp4",
+        preset_name="middle-third-dynamic",
+        count=1,
+        out_path=tmp_path,
+        chrome=None,
+    )
+
+    assert "no audio track" in result["error"]
+    assert result["code"] == "source_no_audio_track"
+    assert called["caption"] is False  # transcription short-circuited before caption_words

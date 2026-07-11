@@ -16,7 +16,7 @@ import os
 import re
 import uuid
 
-from deps import BadRequest, PayloadTooLarge, SchemaUnavailable
+from deps import BadRequest, NotFound, PayloadTooLarge, SchemaUnavailable
 
 _DEFAULT_MAX_MIB = 512
 _DEFAULT_PRESIGN_TTL_S = 3600  # signed GET URL lifetime handed to the reel-af node (T7)
@@ -47,6 +47,11 @@ def _object_key(ctx, filename: str) -> str:
     return f"{ctx.org_id}/{uuid.uuid4().hex}-{_safe_filename(filename)}"
 
 
+def _belongs_to_org(ctx, handle: str) -> bool:
+    """True iff the upload key is under the caller's org prefix (Phase 0 ownership)."""
+    return isinstance(handle, str) and handle.strip().startswith(f"{ctx.org_id}/")
+
+
 class LocalUploadStore:
     """Writes uploads under ``REEL_UPLOAD_DIR/<org_id>/<uuid>-<name>``."""
 
@@ -73,7 +78,7 @@ class LocalUploadStore:
         file_storage.save(dest)
         return {"path": key}
 
-    def presign(self, handle: str) -> str:
+    def presign(self, ctx, handle: str) -> str:
         # A local-volume file is not reachable by the separate reel-af node; file
         # mode requires shared object storage (BucketUploadStore). Fail closed so
         # the caller returns 503 rather than dispatching an unfetchable path (T7).
@@ -135,10 +140,14 @@ class BucketUploadStore:
         self._client().upload_fileobj(file_storage.stream, bucket, key)
         return {"path": key}
 
-    def presign(self, handle: str) -> str:
+    def presign(self, ctx, handle: str) -> str:
         bucket = self._bucket()
         if not isinstance(handle, str) or not handle.strip():
             raise BadRequest("missing upload handle", code="missing_source")
+        # Ownership boundary (Phase 0): only presign keys under the caller's org.
+        # Defense-in-depth behind the server-level guard; conceal foreign keys as 404.
+        if not _belongs_to_org(ctx, handle):
+            raise NotFound("upload handle not found", code="upload_not_found")
         return self._client().generate_presigned_url(
             "get_object",
             Params={"Bucket": bucket, "Key": handle.strip()},

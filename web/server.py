@@ -20,7 +20,7 @@ from __future__ import annotations
 import os
 import re
 
-from deps import AppDeps, BadGateway, HttpError, RepositoryUnavailable, default_deps
+from deps import AppDeps, BadGateway, HttpError, NotFound, RepositoryUnavailable, default_deps
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from reel_jobs import TERMINAL_STATUSES, ReelJobStatus, build_submission, normalize_reel_status
 
@@ -132,16 +132,24 @@ def _poll_response_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
     return payload
 
 
-def _resolve_cp_input(deps: AppDeps, submission) -> dict:
+def _belongs_to_org(ctx, handle: str) -> bool:
+    """True iff the upload key is under the caller's org prefix (Phase 0 ownership)."""
+    return isinstance(handle, str) and handle.strip().startswith(f"{ctx.org_id}/")
+
+
+def _resolve_cp_input(deps: AppDeps, ctx, submission) -> dict:
     """The dispatched, identity-free input. For file-mode composites, resolve the
-    opaque upload handle to a fresh presigned URL the reel-af node can fetch and
-    drop the raw handle — the node consumes ``url`` (T7). Presigning here, before
-    the DB insert, fails closed (503) with no orphan row when the store is
-    unconfigured, and keeps the ephemeral signed URL out of the persisted input."""
+    ctx-owned upload handle to a fresh presigned URL the reel-af node can fetch and
+    drop the raw handle — the node consumes ``url`` (T7). A handle not under the
+    caller's org is concealed as 404 BEFORE presign/insert/CP (Phase 0 ownership).
+    Presigning here, before the DB insert, fails closed (503) with no orphan row
+    when the store is unconfigured, and keeps the ephemeral signed URL unpersisted."""
     cp_input = dict(submission.cp_input)
     if submission.source_handle:
+        if not _belongs_to_org(ctx, submission.source_handle):
+            raise NotFound("upload handle not found", code="upload_not_found")  # no presign, no row, no CP
         cp_input.pop("source", None)
-        cp_input["url"] = deps.uploads.presign(submission.source_handle)  # 503 if store unconfigured
+        cp_input["url"] = deps.uploads.presign(ctx, submission.source_handle)  # 503 if store unconfigured
     return cp_input
 
 
@@ -150,7 +158,7 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
     body = request.get_json(silent=True)
     submission = build_submission(target, body)     # 400 (incl. forbidden identity fields)
-    cp_input = _resolve_cp_input(deps, submission)  # file-mode: handle → presigned url (503 if unset)
+    cp_input = _resolve_cp_input(deps, ctx, submission)  # file-mode: ctx-owned handle → url (404/503)
 
     job_id = deps.uuid_factory()
     now = deps.clock.now()
@@ -196,8 +204,16 @@ def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)                       # 401 / 403 / 503
     job = deps.reel_jobs.get_by_execution(ctx, execution_id)   # 404 if absent/foreign
     deps.access_guard.authorize_reel_read(ctx, job)            # 403 / 404
-    status, cp_body, _headers = deps.control_plane.get_execution(execution_id)
-    normalized = _normalize_execution_status(cp_body)
+    status, cp_body, headers = deps.control_plane.get_execution(execution_id)
+    if status >= 400:
+        # Transient CP backpressure/outage (429/5xx) is NOT terminal — pass it through
+        # without a durable reel_job reconcile; preserve Retry-After (Phase 0 / S2).
+        resp = jsonify(cp_body)
+        retry_after = headers.get(HEADER_RETRY_AFTER) if headers else None
+        if retry_after:
+            resp.headers[HEADER_RETRY_AFTER] = retry_after
+        return resp, status
+    normalized = _normalize_execution_status(cp_body)          # 2xx only: reconcile (T6)
     result_ref = _resolve_result_ref(execution_id, cp_body) if normalized == "succeeded" else None
     completed_at = deps.clock.now() if normalized in TERMINAL_STATUSES else None
     deps.reel_jobs.update_from_execution(ctx, execution_id, normalized, result_ref, completed_at)

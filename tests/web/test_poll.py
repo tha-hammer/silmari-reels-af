@@ -99,6 +99,29 @@ def test_poll_failure_sets_no_success_result_ref():
     assert status == "failed" and result_ref is None and completed_at is not None
 
 
+# ── Phase 0 / S2: transient CP non-2xx is not terminal ──
+def test_poll_cp_429_is_not_terminal_and_preserves_retry_after():
+    repo = FakeReelJobRepo(job=_owned_job())
+    cp = FakeControlPlane(response=(429, {"error": "backpressure"}, {"Retry-After": "4"}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+    resp = _client(deps).get(POLL_URL)
+
+    assert resp.status_code == 429
+    assert resp.get_json()["error"] == "backpressure"
+    assert resp.headers.get("Retry-After") == "4"
+    assert repo.updates == []                            # no durable terminal reconcile
+
+
+def test_poll_cp_503_is_not_terminal():
+    repo = FakeReelJobRepo(job=_owned_job())
+    cp = FakeControlPlane(response=(503, {"error": "cp down"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+    resp = _client(deps).get(POLL_URL)
+
+    assert resp.status_code == 503
+    assert repo.updates == []
+
+
 def test_poll_succeeded_with_error_result_reconciles_as_failure():
     repo = FakeReelJobRepo(job=_owned_job())
     cp = FakeControlPlane(
