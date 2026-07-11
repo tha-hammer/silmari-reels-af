@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 
 from deps import NotFound, RepositoryUnavailable, SchemaUnavailable
-from reel_jobs import ReelJobRef, ReelJobStatus
+from reel_jobs import ReelJobRef, ReelJobStatus, ResearchRunRef
 
 _VALID_ROLES = ("owner", "admin", "member", "viewer")
 
@@ -303,6 +303,54 @@ class PgReelJobRepo(_SharedSchema):
         finally:
             conn.close()
         return affected
+
+    # ─────────────── research_run persistence (Plan 4, ISC-24) ───────────────
+
+    def insert_research_run(self, ctx, run_id, execution_id, status, now):  # pragma: no cover - integration
+        # ROW-FIRST (CI-3): execution_id may be None at insert (dispatch not yet
+        # attempted); the route attaches it via update_research_status after dispatch.
+        self._update(
+            "insert into deepresearch.research_run "
+            "(id, org_id, created_by, execution_id, status, created_at) "
+            "values (%s,%s,%s,%s,%s,%s)",
+            (run_id, ctx.org_id, ctx.user_id, execution_id, status, now),
+        )
+
+    def update_research_status(self, ctx, run_id, status=None, execution_id=None):  # pragma: no cover - integration
+        # Terminal monotonicity: never downgrade a terminal run (mirrors
+        # update_from_execution). Attach execution_id only when supplied. Org-scoped.
+        self._update(
+            "update deepresearch.research_run set "
+            "status = coalesce(%s, status), "
+            "execution_id = coalesce(%s, execution_id) "
+            "where id = %s and org_id = %s "
+            "and status not in ('succeeded','failed','cancelled')",
+            (status, execution_id, run_id, ctx.org_id),
+        )
+
+    def get_research_run(self, ctx, run_id):  # pragma: no cover - integration
+        return self._research_run_one("where id = %s and org_id = %s", (run_id, ctx.org_id))
+
+    def get_research_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
+        return self._research_run_one(
+            "where execution_id = %s and org_id = %s", (execution_id, ctx.org_id)
+        )
+
+    def _research_run_one(self, where: str, params: tuple):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id "
+                    "from deepresearch.research_run " + where,
+                    params,
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("research run not found")  # conceal cross-org / absent
+        return ResearchRunRef(*row)
 
     def _update(self, sql: str, params: tuple):  # pragma: no cover - integration
         conn = _connect(_database_url())
