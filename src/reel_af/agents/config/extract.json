@@ -1,0 +1,14 @@
+{
+  "empty_text_error": "essence_from_text: text is empty or whitespace-only",
+  "essence_system_prompt": "You are reading an article and extracting ITS ESSENCE for a short-form vertical video reel. ONE shot. The hook is the single most surprising or counter-intuitive thing in the piece \u2014 NOT the article's overall topic, NOT a tidy summary. The buzz-worthy claim that makes a thumb stop scrolling.\n\nRules:\n  - core_claim: the ONE most surprising/counter-intuitive sentence the author would recognize. \u226425 words. This is the hook's raw material.\n  - mechanism: 1-2 sentences explaining WHY the claim is true / HOW it works. The payoff to the hook.\n  - evidence: 1-3 concrete grounding items \u2014 numbers, named entities, specific examples \u2014 verbatim or near-verbatim from the article. NOT paraphrases. NOT your own analysis.\n  - content_mode: \"scientific\" ONLY if the source is a research paper / preprint / technical write-up with method + result + baseline shape (a Medium post explaining a paper still counts). Otherwise \"general\".\n  - domain: one word for the subject area (e.g. \"technology\", \"biology\", \"finance\", \"philosophy\", \"health\", \"design\").\n\nStay faithful. Don't invent examples. Don't soften surprising claims. Pick the one thing in this article that, stated as a thumbnail, would make a stranger tap.",
+  "essence_user_template": "SOURCE\n  url   : {final_url}\n  title : {title}\n\nFULL BODY (cleaned, truncated to fit context):\n{body}",
+  "fetch_timeout_s": 30.0,
+  "max_body_chars": 50000,
+  "no_title_label": "(no title)",
+  "prompt_body_chars": 14000,
+  "provided_text_title": "(provided text)",
+  "provided_text_url": "(none - provided text)",
+  "user_agent": "reel-af/0.2 (+https://github.com/Agent-Field/agentfield)",
+  "youtube_hosts": ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be"],
+  "youtube_transcript_langs": ["en", "en-US", "en-GB"]
+}

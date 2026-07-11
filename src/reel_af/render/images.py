@@ -11,7 +11,9 @@ like a perfume ad.
 from __future__ import annotations
 
 import base64
+import json
 import os
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -20,27 +22,37 @@ from PIL import Image
 
 import reel_af.sdk_patches  # noqa: F401
 
+_CONFIG_PATH = Path(__file__).parent / "config" / "images.json"
+
+
+@lru_cache(maxsize=1)
+def _image_config() -> dict[str, Any]:
+    return json.loads(_CONFIG_PATH.read_text())
+
+
+_IMAGE_CFG = _image_config()
+CROP_9X16 = str(_IMAGE_CFG["crop_9x16"])
+CROP_4X5 = str(_IMAGE_CFG["crop_4x5"])
+_DEFAULT_CROP = str(_IMAGE_CFG["default_crop"])
+_CROP_9X16_TARGET_W = int(_IMAGE_CFG["crop_9x16_target_w"])
+_CROP_4X5_TARGET_W = int(_IMAGE_CFG["crop_4x5_target_w"])
+_CROP_9X16_RATIO_W = int(_IMAGE_CFG["crop_9x16_ratio_w"])
+_CROP_9X16_RATIO_H = int(_IMAGE_CFG["crop_9x16_ratio_h"])
+_CROP_4X5_RATIO_W = int(_IMAGE_CFG["crop_4x5_ratio_w"])
+_CROP_4X5_RATIO_H = int(_IMAGE_CFG["crop_4x5_ratio_h"])
+_JPEG_QUALITY = int(_IMAGE_CFG["jpeg_quality"])
+_PROVIDER_IMAGE_COUNT = int(_IMAGE_CFG["provider_image_count"])
+_NO_IMAGE_ERROR_TEMPLATE = str(_IMAGE_CFG["no_image_error_template"])
+_CROP_9X16_RATIO = _CROP_9X16_RATIO_W / _CROP_9X16_RATIO_H
+_CROP_4X5_RATIO = _CROP_4X5_RATIO_W / _CROP_4X5_RATIO_H
+
 IMAGE_MODEL = os.getenv(
-    "REEL_AF_IMAGE_MODEL", "openrouter/google/gemini-2.5-flash-image"
+    "REEL_AF_IMAGE_MODEL", str(_IMAGE_CFG["default_image_model"])
 )
 
 # Style notes appended to every image prompt. Picked by content_mode.
-_GENERAL_STYLE_NOTE = (
-    "cinematic documentary still, warm natural light, shallow depth of field, "
-    "35mm film grain, VERTICAL portrait composition (taller than wide, the "
-    "subject occupies the upper-middle two-thirds), fills the frame, no text "
-    "or letters"
-)
-
-_SCIENTIFIC_STYLE_NOTE = (
-    "documentary photograph from a working research lab, sharp focus throughout, "
-    "neutral white-balanced lighting (overhead fluorescent or a single bright "
-    "desk lamp, no warm filters), realistic colors, no shallow depth-of-field "
-    "blur, no film grain, no lens flares; VERTICAL portrait composition with "
-    "the artifact (plot / paper / interface / instrument) occupying the upper "
-    "two-thirds; the frame should look like a phone snapshot of an actual "
-    "research workspace, not a movie still; no text or letters in frame"
-)
+_GENERAL_STYLE_NOTE = str(_IMAGE_CFG["general_style_note"])
+_SCIENTIFIC_STYLE_NOTE = str(_IMAGE_CFG["scientific_style_note"])
 
 
 def _style_note(content_mode: str) -> str:
@@ -85,11 +97,11 @@ def _crop_to_ratio(
         img = img.crop((0, top, w, top + new_h))
     img = img.resize((target_w, target_h), Image.LANCZOS)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    img.save(str(dest), format="JPEG", quality=92)
+    img.save(str(dest), format="JPEG", quality=_JPEG_QUALITY)
     return dest
 
 
-def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
+def _crop_to_9x16(src: Path, dest: Path, target_w: int = _CROP_9X16_TARGET_W) -> Path:
     """Center-crop the still to 9:16 vertical for Veo i2v input.
 
     Gemini returns roughly square (1024x1024); Veo expects vertical 9:16.
@@ -98,26 +110,26 @@ def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
     return _crop_to_ratio(
         src,
         dest,
-        ratio=9 / 16,
+        ratio=_CROP_9X16_RATIO,
         target_w=target_w,
-        target_h=target_w * 16 // 9,
+        target_h=target_w * _CROP_9X16_RATIO_H // _CROP_9X16_RATIO_W,
     )
 
 
-def _crop_to_4x5(src: Path, dest: Path, target_w: int = 1080) -> Path:
+def _crop_to_4x5(src: Path, dest: Path, target_w: int = _CROP_4X5_TARGET_W) -> Path:
     """Center-crop to 4:5 Instagram portrait, 1080x1350 by default."""
     return _crop_to_ratio(
         src,
         dest,
-        ratio=4 / 5,
+        ratio=_CROP_4X5_RATIO,
         target_w=target_w,
-        target_h=target_w * 5 // 4,
+        target_h=target_w * _CROP_4X5_RATIO_H // _CROP_4X5_RATIO_W,
     )
 
 
 _CROP_TARGETS = {
-    "9x16": _crop_to_9x16,
-    "4x5": _crop_to_4x5,
+    CROP_9X16: _crop_to_9x16,
+    CROP_4X5: _crop_to_4x5,
 }
 
 
@@ -129,7 +141,7 @@ async def generate_first_frame(
     content_mode: str = "general",
     *,
     model: str | None = None,
-    crop: str = "9x16",
+    crop: str = _DEFAULT_CROP,
 ) -> Path:
     """Generate one 720×1280 first frame for a beat.
 
@@ -146,16 +158,14 @@ async def generate_first_frame(
     resp = await provider.generate_image(
         prompt=augmented,
         model=selected_model,
-        n=1,
+        n=_PROVIDER_IMAGE_COUNT,
     )
     # generate_image returns a MultimodalResponse; its .images are
     # ImageOutput(url, b64_json, ...) rather than PIL images. Persist the
     # first one's bytes to raw_path.
     images = _response_images(resp)
     if not images:
-        raise RuntimeError(
-            f"generate_first_frame: image gen returned no images for beat {idx}"
-        )
+        raise RuntimeError(_NO_IMAGE_ERROR_TEMPLATE.format(idx=idx))
     await _save_image_output(images[0], raw_path)
     cropper = _CROP_TARGETS.get(crop, _crop_to_9x16)
     return cropper(raw_path, final_path)
@@ -168,7 +178,8 @@ async def _save_image_output(image, dest: Path) -> None:
     if b64:
         dest.write_bytes(base64.b64decode(b64))
         return
-    if url and url.startswith("data:"):
+    is_data_url = bool(url and url.startswith("data:"))
+    if is_data_url:
         dest.write_bytes(base64.b64decode(url.split(",", 1)[1]))
         return
     if url:
@@ -180,7 +191,8 @@ async def _save_image_output(image, dest: Path) -> None:
                 dest.write_bytes(await r.read())
         return
     save = getattr(image, "save", None)
-    if callable(save):
+    can_save = callable(save)
+    if can_save:
         dest.parent.mkdir(parents=True, exist_ok=True)
         save(dest)
         return
@@ -191,6 +203,8 @@ def _response_images(resp: Any) -> Sequence[Any]:
     images = getattr(resp, "images", None)
     if images is not None:
         return images
-    if isinstance(resp, Sequence) and not isinstance(resp, (str, bytes, bytearray)):
+    is_sequence_response = isinstance(resp, Sequence)
+    is_bytes_like = isinstance(resp, (str, bytes, bytearray))
+    if is_sequence_response and not is_bytes_like:
         return resp
     return []
