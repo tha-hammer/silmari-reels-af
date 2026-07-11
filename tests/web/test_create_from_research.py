@@ -211,6 +211,53 @@ def test_zero_enqueued_cp_failure_is_502():
     assert resp.status_code == 502
 
 
+class _FailNthControlPlane:
+    """Succeeds on every dispatch except the Nth (1-indexed), which returns 503 —
+    to exercise the partial-failure contract (review C2)."""
+
+    def __init__(self, fail_on: int):
+        self.dispatch_calls: list = []
+        self._fail_on = fail_on
+
+    def dispatch_async(self, target, body):
+        self.dispatch_calls.append((target, body))
+        n = len(self.dispatch_calls)
+        if n == self._fail_on:
+            return (503, {"error": "leg down"}, {})
+        return (202, {"execution_id": f"exec_{n}"}, {})
+
+    def get_execution(self, execution_id):
+        return (200, {}, {})
+
+
+def test_partial_failure_later_leg_is_2xx_with_disposition():
+    # sorted outputs → carousel (leg 1, ok), video (leg 2, fails). One leg enqueued →
+    # 2xx (NOT 502), per-leg disposition reported, no cross-output rollback (review C2).
+    repo = FakeReelJobRepo()
+    cp = _FailNthControlPlane(fail_on=2)
+    deps = make_deps(reel_jobs=repo, control_plane=cp, uuid_factory=_counting_uuid_factory())
+    resp = _client(deps).post(CREATE_URL, json={"text": "T", "outputs": ["video", "carousel"]})
+    assert resp.status_code in (200, 202)                 # not 502 — one leg stood up
+    outcomes = {j["output"]: j["outcome"] for j in resp.get_json()["jobs"]}
+    assert outcomes["carousel"] == "enqueued"
+    assert outcomes["video"] == "cp_error"
+    assert len(repo.inserted) == 2                        # both rows created, no rollback
+    assert any(f[2] == "cp_status_503" for f in repo.failed)  # failed leg marked failed (ctx,job,reason)
+
+
+def test_create_forwards_text_verbatim_including_whitespace():
+    # ISC-35 / review normalization note: NO trim beyond the non-empty check — the
+    # user's exact bytes (leading/trailing whitespace, newline) ride through byte-exact.
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "e"}, {}))
+    deps = make_deps(reel_jobs=repo, control_plane=cp)
+    padded = "  leading + trailing kept  \n"
+    resp = _client(deps).post(CREATE_URL, json={"text": padded, "outputs": ["carousel"]})
+    assert resp.status_code in (200, 202)
+    _t, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"]["text"] == padded          # verbatim, not stripped
+
+
 # ─────────────────────── HTML contract (presence, not behavior) ───────────────────────
 
 
