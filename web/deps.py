@@ -136,6 +136,19 @@ class ReelJobRepoPort(Protocol):
 
 
 @runtime_checkable
+class CarouselRepoPort(Protocol):
+    def ensure_ready(self) -> None: ...
+    def insert_or_get_draft(self, ctx, create, carousel_id, now, client_request_id): ...
+    def attach_execution_id(self, ctx, carousel_id, execution_id): ...
+    def get(self, ctx, carousel_id): ...
+    def slide_ref(self, ctx, carousel_id, slide_idx) -> str: ...
+    def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status): ...
+    def set_status(self, ctx, carousel_id, status): ...
+    def draft_slide_refs(self, ctx, carousel_id) -> list[str]: ...
+    def register_hq_recreate(self, ctx, carousel_id) -> int: ...
+
+
+@runtime_checkable
 class UploadStorePort(Protocol):
     def ensure_ready(self) -> None: ...
     def store(self, ctx: AuthContext, file_storage) -> dict: ...
@@ -228,6 +241,7 @@ class AppDeps:
     identity: IdentityProvider
     access_guard: AccessGuardPort
     reel_jobs: ReelJobRepoPort
+    carousels: CarouselRepoPort
     uploads: UploadStorePort
     control_plane: ControlPlanePort
     storage: StoragePort
@@ -247,8 +261,9 @@ def default_deps() -> AppDeps:
     SuperTokens recipe is wired. Upload storage stays unconfigured until B8.
     """
     # Lazy imports avoid an import cycle (pg/auth/control_plane import this module).
+    from carousels import CarouselSlideRefResolver
     from control_plane import HttpControlPlane
-    from pg import PgReelJobRepo, build_identity
+    from pg import PgCarouselRepo, PgReelJobRepo, build_identity
     from storage import ObjectStorage
     from uploads import BucketUploadStore, LocalUploadStore
 
@@ -257,14 +272,16 @@ def default_deps() -> AppDeps:
     # bucket is configured; else fall back to the local volume store (dev). Both
     # fail closed (503) until their backing store is configured.
     uploads = BucketUploadStore() if os.getenv("REEL_BUCKET_NAME") else LocalUploadStore()
+    carousels = PgCarouselRepo()
     return AppDeps(
         identity=build_identity(),                 # SuperTokens session (fail-closed) + DB reader
         access_guard=RoleAccessGuard(),
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
+        carousels=carousels,                        # carousel read-model; 503 until applied
         uploads=uploads,                            # bucket (prod) or local volume (dev); 503 until configured
         control_plane=HttpControlPlane(),
         storage=ObjectStorage(),                    # media object store; 503 until REEL_BUCKET_NAME configured
-        slides=_Unconfigured(SchemaUnavailable, "slide resolver not configured (Plan 6)"),
+        slides=CarouselSlideRefResolver(carousels),
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,

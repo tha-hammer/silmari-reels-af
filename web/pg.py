@@ -309,6 +309,41 @@ class PgReelJobRepo(_SharedSchema):
             conn.close()
 
 
+class PgCarouselRepo(_SharedSchema):
+    """Carousel read-model repository.
+
+    The concrete SQL behavior lands with the route slices; construction stays
+    import-safe and performs no I/O so ``default_deps`` can wire the real slide
+    resolver without contacting Postgres.
+    """
+
+    def insert_or_get_draft(
+        self, ctx, create, carousel_id, now, client_request_id
+    ):  # pragma: no cover - implemented with route behavior
+        raise NotImplementedError
+
+    def attach_execution_id(self, ctx, carousel_id, execution_id):  # pragma: no cover
+        raise NotImplementedError
+
+    def get(self, ctx, carousel_id):  # pragma: no cover
+        raise NotImplementedError
+
+    def slide_ref(self, ctx, carousel_id, slide_idx) -> str:  # pragma: no cover
+        raise NotImplementedError
+
+    def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status):  # pragma: no cover
+        raise NotImplementedError
+
+    def set_status(self, ctx, carousel_id, status):  # pragma: no cover
+        raise NotImplementedError
+
+    def draft_slide_refs(self, ctx, carousel_id) -> list[str]:  # pragma: no cover
+        raise NotImplementedError
+
+    def register_hq_recreate(self, ctx, carousel_id) -> int:  # pragma: no cover
+        raise NotImplementedError
+
+
 def build_identity(reader: PgMembershipReader | None = None):
     """Wire the production identity resolver: real SuperTokens session provider
     (reads the verified session off Flask ``g``) + the DB membership reader with

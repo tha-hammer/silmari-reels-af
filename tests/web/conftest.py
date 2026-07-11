@@ -178,6 +178,105 @@ class FakeSlideRefResolver:
         return ref
 
 
+class FakeCarouselRepo:
+    """In-memory CarouselRepoPort. Org-scoped; absent/foreign rows are concealed."""
+
+    def __init__(self):
+        self._rows: dict = {}
+        self.inserted: list = []
+        self.replaced: list = []
+        self._by_key: dict = {}
+
+    def ensure_ready(self) -> None:
+        pass
+
+    def seed(self, org, cid, *, status="draft", slides=None):
+        self._rows[(org, cid)] = {
+            "status": status,
+            "slides": list(slides or []),
+            "execution_id": None,
+            "hq_recreate_count": 0,
+        }
+
+    def _own(self, ctx, cid):
+        row = self._rows.get((ctx.org_id, cid))
+        if row is None:
+            raise NotFound("carousel not found")
+        return row
+
+    def insert_or_get_draft(self, ctx, create, carousel_id, now, client_request_id):
+        key = (ctx.org_id, ctx.user_id, client_request_id)
+        if key in self._by_key:
+            cid = self._by_key[key]
+            row = self._rows[(ctx.org_id, cid)]
+            return ReelJobRef(
+                job_id=cid,
+                org_id=ctx.org_id,
+                created_by=ctx.user_id,
+                status=row["status"],
+                execution_id=row["execution_id"],
+                created=False,
+            )
+        self.inserted.append((ctx, create, carousel_id, now, client_request_id))
+        self.seed(ctx.org_id, carousel_id)
+        self._by_key[key] = carousel_id
+        return ReelJobRef(
+            job_id=carousel_id,
+            org_id=ctx.org_id,
+            created_by=ctx.user_id,
+            status="draft",
+            created=True,
+        )
+
+    def attach_execution_id(self, ctx, carousel_id, execution_id):
+        row = self._own(ctx, carousel_id)
+        row["execution_id"] = execution_id
+        return ReelJobRef(
+            job_id=carousel_id,
+            org_id=ctx.org_id,
+            created_by=ctx.user_id,
+            status=row["status"],
+            execution_id=execution_id,
+        )
+
+    def get(self, ctx, carousel_id):
+        from types import SimpleNamespace
+
+        row = self._own(ctx, carousel_id)
+        return SimpleNamespace(status=row["status"], slides=list(row["slides"]))
+
+    def slide_ref(self, ctx, carousel_id, slide_idx) -> str:
+        row = self._own(ctx, carousel_id)
+        for slide in row["slides"]:
+            if slide.get("idx") == slide_idx and slide.get("image_ref"):
+                return slide["image_ref"]
+        raise NotFound("slide not found")
+
+    def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status):
+        row = self._own(ctx, carousel_id)
+        row["slides"] = [
+            {"idx": slide_idx, "image_ref": ref, "prompt": prompt, "status": status}
+            if slide.get("idx") == slide_idx
+            else slide
+            for slide in row["slides"]
+        ]
+        self.replaced.append((ctx.org_id, carousel_id, slide_idx))
+
+    def set_status(self, ctx, carousel_id, status):
+        row = self._own(ctx, carousel_id)
+        if row["status"] not in ("succeeded", "failed", "cancelled"):
+            row["status"] = status
+
+    def draft_slide_refs(self, ctx, carousel_id) -> list[str]:
+        row = self._own(ctx, carousel_id)
+        return [slide["image_ref"] for slide in row["slides"] if slide.get("image_ref")]
+
+    def register_hq_recreate(self, ctx, carousel_id) -> int:
+        row = self._own(ctx, carousel_id)
+        row["hq_recreate_count"] += 1
+        return row["hq_recreate_count"]
+
+
 class FakeControlPlane:
     def __init__(self, response=(202, {"execution_id": "exec_123"}, {}), error=None):
         self._response, self._error = response, error
@@ -206,6 +305,7 @@ def make_deps(
     reel_jobs: FakeReelJobRepo | None = None,
     uploads: FakeUploadStore | None = None,
     control_plane: FakeControlPlane | None = None,
+    carousels: FakeCarouselRepo | None = None,
     storage: FakeStorage | None = None,
     slides: FakeSlideRefResolver | None = None,
 ) -> AppDeps:
@@ -213,6 +313,7 @@ def make_deps(
         identity=identity or FakeIdentity(make_ctx()),
         access_guard=RoleAccessGuard(),
         reel_jobs=reel_jobs or FakeReelJobRepo(),
+        carousels=carousels or FakeCarouselRepo(),
         uploads=uploads or FakeUploadStore(),
         control_plane=control_plane or FakeControlPlane(),
         storage=storage or FakeStorage(),
