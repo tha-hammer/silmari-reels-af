@@ -87,6 +87,7 @@ def test_index_has_carousel_review_ui_contract():
     )
     assert config["api"]["carouselFinalizePath"] == "/api/v1/carousels/{id}/finalize"
     assert config["api"]["carouselCancelPath"] == "/api/v1/carousels/{id}/cancel"
+    assert html.count('id="carouselReview"') == 1
     assert 'id="carouselReview"' in html
     assert 'id="carouselSlides"' in html
     assert 'id="carouselCancel"' in html
