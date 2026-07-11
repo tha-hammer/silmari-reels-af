@@ -22,11 +22,17 @@ from typing import Protocol
 
 from reel_af.render.images import IMAGE_MODEL
 
+# Structural literals named in code (not tunables/UI — those live in JSON config below).
+_HQ_MODEL_ENV = "REEL_AF_IMAGE_MODEL_HQ"  # operator knob: premium image model id
+_HQ_CAP_ENV = "REEL_AF_HQ_RECREATE_CAP"   # operator knob: per-carousel HQ cap
+_PROMPT_NOTE_SEPARATOR = "\n\n"           # joins the original prompt and the note (ISC-18)
+_STATUS_OK = "ok"                          # Plan 1 slide-record success status (shared enum)
+
 # Per-carousel HQ-recreate cap. Read once via the app.py:63-81 getenv-tunable
 # convention — configurable, one jump, no literal scattered at call sites. The
 # real cross-request persistence of the count is Plan 6 (repo-backed guard);
 # HQ_RECREATE_CAP is the shared default both the in-memory and repo guards use.
-HQ_RECREATE_CAP = int(os.getenv("REEL_AF_HQ_RECREATE_CAP", "5"))
+HQ_RECREATE_CAP = int(os.getenv(_HQ_CAP_ENV, "5"))
 
 
 class PremiumNotAcknowledgedError(RuntimeError):
@@ -91,7 +97,7 @@ def compose_recreate_prompt(original_prompt: str, note: str) -> str:
     # Compose with the RAW note (validate on the stripped value only): ISC-18 requires
     # the note to survive verbatim as a substring, so leading/trailing whitespace the
     # user typed is preserved rather than trimmed out of the model prompt.
-    return f"{original_prompt}\n\n{note}"
+    return f"{original_prompt}{_PROMPT_NOTE_SEPARATOR}{note}"
 
 
 def resolve_hq_model() -> str:
@@ -102,7 +108,7 @@ def resolve_hq_model() -> str:
     Deliberately differs from IMAGE_MODEL's read-once-at-import: the HQ tier is a
     per-call policy an operator can change without a restart (and tests can setenv).
     """
-    return (os.getenv("REEL_AF_IMAGE_MODEL_HQ") or "").strip() or IMAGE_MODEL
+    return (os.getenv(_HQ_MODEL_ENV) or "").strip() or IMAGE_MODEL
 
 
 def _find_slide(carousel: dict, idx: int) -> dict:
@@ -188,6 +194,6 @@ async def recreate_slide(
 
     # register-after-success: only successful premium spend consumes a cap slot.
     status = record.get("status")
-    if status == "ok":
+    if status == _STATUS_OK:
         guard.register(carousel_id)
     return record
