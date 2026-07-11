@@ -63,6 +63,7 @@ _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
 _CAROUSEL_GET_RE = re.compile(r"^v1/carousels/([^/]+)$")
 _CAROUSEL_RECREATE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)/recreate$")
 _CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
+_CAROUSEL_FINALIZE_RE = re.compile(r"^v1/carousels/([^/]+)/finalize$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
 
@@ -118,6 +119,13 @@ def _carousel_cancel_id(method: str, sub: str) -> str | None:
     if method != "POST":
         return None
     m = _CAROUSEL_CANCEL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _carousel_finalize_id(method: str, sub: str) -> str | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_FINALIZE_RE.match(sub)
     return m.group(1) if m else None
 
 
@@ -442,6 +450,14 @@ def _handle_carousel_cancel(deps: AppDeps, carousel_id: str) -> tuple[Response, 
     return jsonify({"status": "cancelled"}), 200
 
 
+def _handle_carousel_finalize(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.carousels.get(ctx, carousel_id)  # 404 conceals absent/foreign rows before write
+    deps.carousels.set_status(ctx, carousel_id, "succeeded")
+    view = deps.carousels.get(ctx, carousel_id)
+    return jsonify({"status": view.status}), 200
+
+
 def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
     """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
     object exists → 302-redirect to a presigned object-storage URL. Concealment
@@ -509,6 +525,9 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     recreate = _carousel_recreate_target(method, subpath)
     if recreate is not None:
         return _handle_carousel_recreate(deps, *recreate, recreate_fn)
+    finalize_id = _carousel_finalize_id(method, subpath)
+    if finalize_id is not None:
+        return _handle_carousel_finalize(deps, finalize_id)
     cancel_id = _carousel_cancel_id(method, subpath)
     if cancel_id is not None:
         return _handle_carousel_cancel(deps, cancel_id)

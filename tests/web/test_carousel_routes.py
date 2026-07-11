@@ -397,3 +397,83 @@ def test_cross_org_cancel_is_404_no_delete():
     assert resp.status_code == 404
     assert storage.deleted == []
     assert repo.get(make_ctx(), CID).status == "draft"
+
+
+def test_finalize_makes_succeeded_and_is_idempotent():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = _client(deps)
+
+    first = client.post(f"/api/v1/carousels/{CID}/finalize")
+    second = client.post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert client.get(f"/api/v1/carousels/{CID}").get_json()["status"] == "succeeded"
+
+
+def test_cancelled_cannot_be_finalized():
+    repo = FakeCarouselRepo()
+    _seed(repo, status="cancelled")
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = _client(deps)
+
+    resp = client.post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert resp.status_code == 200
+    assert client.get(f"/api/v1/carousels/{CID}").get_json()["status"] == "cancelled"
+
+
+def test_cross_org_finalize_is_404():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    other = make_ctx()
+    object.__setattr__(other, "org_id", uuid.uuid4())
+    deps = make_deps(identity=FakeIdentity(other), carousels=repo)
+
+    resp = _client(deps).post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert resp.status_code == 404
+    assert repo.get(make_ctx(), CID).status == "draft"
+
+
+def test_finalize_sets_succeeded_and_is_idempotent():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = _client(deps)
+
+    first = client.post(f"/api/v1/carousels/{CID}/finalize")
+    second = client.post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.get_json()["status"] == "succeeded"
+    assert client.get(f"/api/v1/carousels/{CID}").get_json()["status"] == "succeeded"
+
+
+def test_cancelled_carousel_cannot_be_finalized():
+    repo = FakeCarouselRepo()
+    _seed(repo, status="cancelled")
+    deps = make_deps(identity=FakeIdentity(make_ctx()), carousels=repo)
+    client = _client(deps)
+
+    resp = client.post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "cancelled"
+    assert client.get(f"/api/v1/carousels/{CID}").get_json()["status"] == "cancelled"
+
+
+def test_cross_org_finalize_is_404_no_change():
+    repo = FakeCarouselRepo()
+    _seed(repo)
+    other = make_ctx()
+    object.__setattr__(other, "org_id", uuid.uuid4())
+    deps = make_deps(identity=FakeIdentity(other), carousels=repo)
+
+    resp = _client(deps).post(f"/api/v1/carousels/{CID}/finalize")
+
+    assert resp.status_code == 404
+    assert repo.get(make_ctx(), CID).status == "draft"
