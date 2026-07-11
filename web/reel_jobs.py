@@ -202,7 +202,7 @@ def build_submission(
             title=(preset or host)[:TITLE_MAX],
             source_url=normalized,
             topic=None,
-            source_research_run_id=None,
+            source_research_run_id=source_research_run_id,
             params=_sanitized_params(raw_input, target, preset),
             cp_input={**_clean_input(raw_input), "url": normalized},
         )
@@ -216,7 +216,7 @@ def build_submission(
         title=preset[:TITLE_MAX],
         source_url=None,
         topic=None,
-        source_research_run_id=None,
+        source_research_run_id=source_research_run_id,
         params=_sanitized_params(raw_input, target, preset),
         cp_input=_clean_input(raw_input),
         source_handle=handle,

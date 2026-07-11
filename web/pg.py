@@ -17,7 +17,7 @@ import os
 import uuid
 from datetime import datetime
 
-from deps import RepositoryUnavailable, SchemaUnavailable
+from deps import NotFound, RepositoryUnavailable, SchemaUnavailable
 from reel_jobs import ReelJobRef, ReelJobStatus
 
 _VALID_ROLES = ("owner", "admin", "member", "viewer")
@@ -37,7 +37,9 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
     "organization": {"id", "status"},
     "membership": {"org_id", "user_id", "role", "status"},
     "role_definition": {"role", "permissions"},
-    "research_run": {"id", "org_id", "created_by", "status"},
+    # CI-1: insert_research_run writes 6 columns; fail closed at startup (503) if the
+    # root migration lacks execution_id/created_at rather than 500 on the first INSERT.
+    "research_run": {"id", "org_id", "created_by", "execution_id", "status", "created_at"},
     "reel_job": {
         "id", "org_id", "created_by", "client_request_id", "title", "source_url", "topic",
         "source_research_run_id", "params", "status", "result_ref",
@@ -248,13 +250,15 @@ class PgReelJobRepo(_SharedSchema):
         return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="failed")
 
     def get_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
-        from deps import NotFound
-
         conn = _connect(_database_url())
         try:
             with conn.cursor() as cur:
+                # ISC-25 (GAP1): SELECT source_research_run_id — the writer binds it
+                # (insert_or_get_queued) but this reader used to omit it, so provenance
+                # was silently null on read. Surfacing it here closes the seam.
                 cur.execute(
-                    "select id, org_id, created_by, status, execution_id, result_ref, completed_at "
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
                     "from deepresearch.reel_job where execution_id = %s and org_id = %s",
                     (execution_id, ctx.org_id),
                 )
@@ -266,6 +270,7 @@ class PgReelJobRepo(_SharedSchema):
         return ReelJobRef(
             job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
             execution_id=row[4], result_ref=row[5], completed_at=row[6],
+            source_research_run_id=row[7],
         )
 
     def update_from_execution(
