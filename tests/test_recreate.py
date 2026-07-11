@@ -298,11 +298,81 @@ async def test_missing_carousel_id_raises_typed_before_cap(tmp_path, monkeypatch
         )
 
 
-# ───── DEFERRED (Plan 1 seam) ─────────────────────────────────────────
-# These four assert on the REAL reel_af.app.regenerate_slide path (fake provider +
-# fake StoragePort) and are added the moment SapphireDune lands Behavior 12:
-#   - test_recreate_uses_hq_model            (B2: provider.calls[0]["model"] == HQ id)
-#   - test_recreate_returns_one_replaced_slide_with_fresh_ref  (B3: fresh ref, only idx stored)
-#   - test_recreate_leaves_siblings_untouched (B4/ISC-A1: siblings byte-identical, one put/one image)
-#   - test_hq_cap_boundary / _is_per_carousel real-regen variants (B6 integration)
-# The cap SEMANTICS (ISC-54) are already covered above via the injected _ok_regen spy.
+# ───── Real-provider end-to-end (Plan 1 regenerate_slide, app.py:922) ─
+# Drive recreate_slide through the REAL reel_af.app.regenerate_slide (no _regenerate
+# injection) with a fake provider + fake StoragePort — the seam landed in 89f9174.
+
+
+async def test_recreate_uses_hq_model(tmp_path, monkeypatch):  # B2 / ISC-19
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+    provider = fake()
+
+    await recreate_slide(
+        carousel=_carousel(), idx=1, note="brighter",
+        out_dir=str(tmp_path), provider=provider, storage=_FakeStoragePort(),
+        guard=_MemGuard(cap=5), acknowledge_premium=True,
+    )
+
+    image_calls = [kw for m, kw in fake.calls if m == "image"]
+    assert image_calls and image_calls[0]["model"] == "premium/hq-image-x"
+
+
+async def test_recreate_returns_one_replaced_slide_with_fresh_ref(tmp_path, monkeypatch):  # B3
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    storage = _FakeStoragePort()
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    record = await recreate_slide(
+        carousel=_carousel(run_id="runZ"), idx=1, note="brighter",
+        out_dir=str(tmp_path), provider=fake(), storage=storage,
+        guard=_MemGuard(cap=5), acknowledge_premium=True,
+    )
+
+    assert record["idx"] == 1
+    assert record["image_ref"] == "stub://runZ/1"  # fresh ref for in-place UI update
+    assert "brighter" in record["image_prompt"] and "p1" in record["image_prompt"]
+    assert record["status"] == "ok"
+    assert [s[1] for s in storage.saved] == [1]  # only slide 1 stored
+
+
+@pytest.mark.parametrize("target", [0, 1, 2])
+async def test_recreate_leaves_siblings_untouched(tmp_path, target, monkeypatch):  # B4 / ISC-A1
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    carousel = _carousel(run_id="runS")
+    before = copy.deepcopy(carousel["slides"])
+    storage = _FakeStoragePort()
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    record = await recreate_slide(
+        carousel=carousel, idx=target, note="tweak",
+        out_dir=str(tmp_path), provider=fake(), storage=storage,
+        guard=_MemGuard(cap=5), acknowledge_premium=True,
+    )
+
+    assert [s[1] for s in storage.saved] == [target]  # target index stored, exactly once
+    assert sum(1 for m, _ in fake.calls if m == "image") == 1  # one image generated
+    for i in (0, 1, 2):
+        if i != target:
+            assert carousel["slides"][i] == before[i]  # siblings unchanged (no in-place mutation)
+    assert record["idx"] == target
+
+
+async def test_recreate_hq_cap_boundary_real_regen(tmp_path, monkeypatch):  # B6 integration
+    """Cap boundary over the REAL regenerate path (spy variants cover cap ∈ {0,1,3,5})."""
+    monkeypatch.setenv("REEL_AF_IMAGE_MODEL_HQ", "premium/hq-image-x")
+    guard = _MemGuard(cap=2)
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    async def one():
+        return await recreate_slide(
+            carousel=_carousel(), idx=1, note="x", out_dir=str(tmp_path),
+            provider=fake(), storage=_FakeStoragePort(), guard=guard,
+            acknowledge_premium=True,
+        )
+
+    await one()
+    await one()
+    with pytest.raises(HqRecreateCapError):
+        await one()
+    assert guard.count("car1") == 2
