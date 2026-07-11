@@ -149,6 +149,31 @@ class ControlPlanePort(Protocol):
 
 
 @runtime_checkable
+class StoragePort(Protocol):
+    """Object-storage media seam (P0). Real adapter is ``storage.ObjectStorage``;
+    tests inject an in-memory ``FakeStorage``. Plans 1/6 consume this port."""
+
+    # put: idempotent-addressed — same (org_id, key) always returns the same
+    #   org-prefixed ref (``<org_id>/<key>``). last-write-wins on bytes.
+    def put(self, org_id, key: str, data) -> str: ...
+    # presigned_url: ttl None -> REEL_PRESIGN_TTL_S (default 3600). blank ref -> BadRequest(400).
+    def presigned_url(self, ref: str, ttl: int | None = None) -> str: ...
+    # exists: True IFF the object is present; boundary errors collapse to False (never raise).
+    def exists(self, ref: str) -> bool: ...
+    # NOTE: `delete(ref)` is intentionally absent — Plan 6 forward-extension (cleanup).
+
+
+@runtime_checkable
+class SlideRefResolverPort(Protocol):
+    """Resolves a carousel slide to its stored media ref, org-scoped. Plan 6 provides
+    the real (carousel-backed) resolver; here it is a port + fake. Returns the stored
+    ref for ``(carousel_id, slide_idx)`` IFF it belongs to ``ctx.org_id``; raises
+    ``NotFound`` (404) to conceal cross-org / absent, mirroring ``authorize_reel_read``."""
+
+    def resolve(self, ctx: AuthContext, carousel_id: str, slide_idx: int) -> str: ...
+
+
+@runtime_checkable
 class Clock(Protocol):
     def now(self) -> datetime: ...
 
@@ -205,6 +230,8 @@ class AppDeps:
     reel_jobs: ReelJobRepoPort
     uploads: UploadStorePort
     control_plane: ControlPlanePort
+    storage: StoragePort
+    slides: SlideRefResolverPort
     clock: Clock
     uuid_factory: UuidFactory
     logger: logging.Logger
@@ -222,6 +249,7 @@ def default_deps() -> AppDeps:
     # Lazy imports avoid an import cycle (pg/auth/control_plane import this module).
     from control_plane import HttpControlPlane
     from pg import PgReelJobRepo, build_identity
+    from storage import ObjectStorage
     from uploads import BucketUploadStore, LocalUploadStore
 
     logger = logging.getLogger("reel_af_ui")
@@ -235,6 +263,8 @@ def default_deps() -> AppDeps:
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
         uploads=uploads,                            # bucket (prod) or local volume (dev); 503 until configured
         control_plane=HttpControlPlane(),
+        storage=ObjectStorage(),                    # media object store; 503 until REEL_BUCKET_NAME configured
+        slides=_Unconfigured(SchemaUnavailable, "slide resolver not configured (Plan 6)"),
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,

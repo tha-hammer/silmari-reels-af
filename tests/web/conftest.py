@@ -142,6 +142,42 @@ class FakeUploadStore:
         return self._presigned
 
 
+class FakeStorage:
+    """In-memory StoragePort for unit tests. Plans 1 and 6 reuse this in their tests."""
+
+    def __init__(self, objects: dict | None = None):
+        self._objects = dict(objects or {})
+        self.presign_calls: list = []
+
+    def put(self, org_id, key, data) -> str:
+        ref = f"{org_id}/{key.lstrip('/')}"
+        self._objects[ref] = data if isinstance(data, (bytes, bytearray)) else data.read()
+        return ref
+
+    def presigned_url(self, ref, ttl=None) -> str:
+        self.presign_calls.append((ref, ttl))
+        return self.presigned_for(ref)
+
+    def presigned_for(self, ref) -> str:
+        return f"https://fake-store/{ref}?sig=test"
+
+    def exists(self, ref) -> bool:
+        return ref in self._objects
+
+
+class FakeSlideRefResolver:
+    """Stub SlideRefResolverPort; real impl is Plan 6's carousel-backed resolver."""
+
+    def __init__(self, refs: dict | None = None):  # {(org_id, cid, idx): ref}
+        self._refs = dict(refs or {})
+
+    def resolve(self, ctx, carousel_id, slide_idx) -> str:
+        ref = self._refs.get((ctx.org_id, carousel_id, slide_idx))
+        if ref is None:
+            raise NotFound("slide not found")  # conceal cross-org + absent (404)
+        return ref
+
+
 class FakeControlPlane:
     def __init__(self, response=(202, {"execution_id": "exec_123"}, {}), error=None):
         self._response, self._error = response, error
@@ -170,6 +206,8 @@ def make_deps(
     reel_jobs: FakeReelJobRepo | None = None,
     uploads: FakeUploadStore | None = None,
     control_plane: FakeControlPlane | None = None,
+    storage: FakeStorage | None = None,
+    slides: FakeSlideRefResolver | None = None,
 ) -> AppDeps:
     return AppDeps(
         identity=identity or FakeIdentity(make_ctx()),
@@ -177,6 +215,8 @@ def make_deps(
         reel_jobs=reel_jobs or FakeReelJobRepo(),
         uploads=uploads or FakeUploadStore(),
         control_plane=control_plane or FakeControlPlane(),
+        storage=storage or FakeStorage(),
+        slides=slides or FakeSlideRefResolver(),
         clock=FixedClock(),
         uuid_factory=lambda: FIXED_JOB_ID,
         logger=logging.getLogger("test.reel_af_ui"),

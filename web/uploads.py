@@ -113,17 +113,10 @@ class BucketUploadStore:
         return name
 
     def _client(self):
-        if self._client_factory is not None:
-            return self._client_factory()
-        import boto3  # lazy: only pulled in when a request actually touches the store
+        # Shared boto3-client builder (single construction point, no copy-paste).
+        from storage import _s3_client_from_env
 
-        return boto3.client(
-            "s3",
-            endpoint_url=os.getenv("REEL_BUCKET_ENDPOINT") or None,
-            aws_access_key_id=os.getenv("REEL_BUCKET_ACCESS_KEY_ID") or None,
-            aws_secret_access_key=os.getenv("REEL_BUCKET_SECRET_ACCESS_KEY") or None,
-            region_name=os.getenv("REEL_BUCKET_REGION", "auto"),
-        )
+        return _s3_client_from_env(self._client_factory)
 
     def ensure_ready(self) -> None:
         self._bucket()
