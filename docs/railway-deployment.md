@@ -136,10 +136,11 @@ Two equivalent paths. **Always confirm `SUCCESS`** before calling it done — a 
 git push) only confirms the build *started*.
 
 ### A. git push (auto-deploy)
-`reel-af` and `reel-af-ui` auto-deploy on push to their watched branch (currently
-`feat/reel-intake-ui`), building from their respective root dirs (`/` and `web/`). Push, then poll:
+`reel-af` and `reel-af-ui` auto-deploy on push to their watched branch (`main` as of the
+2026-07-11 untangle; both services were repointed from `feat/reel-intake-ui` to `main`), building
+from their respective root dirs (`/` and `web/`). Push, then poll:
 ```bash
-git push origin feat/reel-intake-ui
+git push origin main
 railway deployment list --service reel-af-ui --json | python3 -c 'import sys,json;print(json.load(sys.stdin)[0]["status"])'
 ```
 
