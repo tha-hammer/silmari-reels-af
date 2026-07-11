@@ -54,6 +54,7 @@ class ReelSubmission:
     source_research_run_id: uuid.UUID | None
     params: dict
     cp_input: dict  # canonical, identity-free input dispatched to the control plane
+    source_handle: str | None = None  # file-mode upload key; presigned to a URL at dispatch (T7)
 
 
 @dataclass(frozen=True)
@@ -158,8 +159,9 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
         )
 
     handle = raw_input.get("source")
-    if handle is None or (isinstance(handle, str) and not handle.strip()):
+    if not isinstance(handle, str) or not handle.strip():
         raise BadRequest("file submit requires an upload handle", code="missing_source")
+    handle = handle.strip()
     return ReelSubmission(
         target=target,
         title=preset[:TITLE_MAX],
@@ -168,6 +170,7 @@ def build_submission(target: str, body: dict) -> ReelSubmission:
         source_research_run_id=None,
         params=_sanitized_params(raw_input, target, preset),
         cp_input=_clean_input(raw_input),
+        source_handle=handle,
     )
 
 

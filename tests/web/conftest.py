@@ -112,10 +112,19 @@ class FakeReelJobRepo:
 
 
 class FakeUploadStore:
-    def __init__(self, handle: dict | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        handle: dict | None = None,
+        error: Exception | None = None,
+        presigned: str = "https://bucket.example/signed/object.mp4?sig=abc",
+        presign_error: Exception | None = None,
+    ):
         self._handle = handle or {"path": "uploads/fake.mp4"}
         self._error = error
+        self._presigned = presigned
+        self._presign_error = presign_error
         self.calls = 0
+        self.presign_calls: list = []
 
     def ensure_ready(self) -> None:
         pass
@@ -125,6 +134,12 @@ class FakeUploadStore:
         if self._error is not None:
             raise self._error
         return self._handle
+
+    def presign(self, handle: str) -> str:
+        self.presign_calls.append(handle)
+        if self._presign_error is not None:
+            raise self._presign_error
+        return self._presigned
 
 
 class FakeControlPlane:

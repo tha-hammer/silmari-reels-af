@@ -9,10 +9,11 @@ from conftest import (
     FakeControlPlane,
     FakeIdentity,
     FakeReelJobRepo,
+    FakeUploadStore,
     make_ctx,
     make_deps,
 )
-from deps import Unauthorized
+from deps import SchemaUnavailable, Unauthorized
 
 TOPIC_URL = "/api/v1/execute/async/reel-af.reel_topic_to_reel"
 COMPOSITE_URL = "/api/v1/execute/async/reel-af.reel_composite_to_reel"
@@ -84,6 +85,45 @@ def test_composite_url_submit_maps_source_url():
     _ctx, submission, _job, _now, _crid = repo.inserted[0]
     assert submission.source_url == "https://youtube.com/watch?v=abc"
     assert submission.topic is None
+
+
+# T7 - composite FILE submit presigns the upload handle → node-fetchable url, drops the raw handle.
+def test_composite_file_submit_presigns_and_injects_url():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_file"}, {}))
+    uploads = FakeUploadStore(presigned="https://bucket.example/signed/clip.mp4?sig=xyz")
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
+    )
+    body = {"input": {"source": "11111111.../abc-clip.mp4", "preset": "middle-third-dynamic"}}
+
+    resp = _client(deps).post(COMPOSITE_URL, json=body)
+
+    assert resp.status_code == 202
+    # handle presigned exactly once, using the client-supplied opaque key
+    assert uploads.presign_calls == ["11111111.../abc-clip.mp4"]
+    # dispatched body carries the presigned url + preset, and NOT the raw handle
+    assert len(cp.dispatch_calls) == 1
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"]["url"] == "https://bucket.example/signed/clip.mp4?sig=xyz"
+    assert dispatched["input"]["preset"] == "middle-third-dynamic"
+    assert "source" not in dispatched["input"]
+
+
+# T7 - unconfigured object store fails closed BEFORE any row or CP call (presign precedes insert).
+def test_composite_file_submit_presign_unconfigured_is_503_no_row_no_cp():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    uploads = FakeUploadStore(presign_error=SchemaUnavailable("bucket not configured"))
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
+    )
+    body = {"input": {"source": "org/abc-clip.mp4", "preset": "middle-third-dynamic"}}
+
+    resp = _client(deps).post(COMPOSITE_URL, json=body)
+
+    assert resp.status_code == 503
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
 
 
 # B7 - forged identity fields are rejected (top level and under input): 400, no row, no CP.

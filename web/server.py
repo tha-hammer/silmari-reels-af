@@ -22,7 +22,7 @@ import re
 
 from deps import AppDeps, BadGateway, HttpError, RepositoryUnavailable, default_deps
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
-from reel_jobs import TERMINAL_STATUSES, build_submission, normalize_reel_status
+from reel_jobs import TERMINAL_STATUSES, ReelJobStatus, build_submission, normalize_reel_status
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
@@ -103,11 +103,54 @@ def _resolve_result_ref(execution_id: str, cp_body: dict) -> str | None:
     return None
 
 
+def _execution_error(cp_body: dict) -> object | None:
+    error = cp_body.get("error")
+    if error:
+        return error
+    result = cp_body.get("result")
+    if isinstance(result, dict):
+        error = result.get("error")
+        if error:
+            return error
+    return None
+
+
+def _normalize_execution_status(cp_body: dict) -> ReelJobStatus:
+    normalized = normalize_reel_status(cp_body.get("status"))
+    if normalized == "succeeded" and _execution_error(cp_body) is not None:
+        return "failed"
+    return normalized
+
+
+def _poll_response_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
+    payload = dict(cp_body)
+    payload["status"] = normalized
+    if normalized == "failed" and "error" not in payload:
+        error = _execution_error(cp_body)
+        if error is not None:
+            payload["error"] = error
+    return payload
+
+
+def _resolve_cp_input(deps: AppDeps, submission) -> dict:
+    """The dispatched, identity-free input. For file-mode composites, resolve the
+    opaque upload handle to a fresh presigned URL the reel-af node can fetch and
+    drop the raw handle — the node consumes ``url`` (T7). Presigning here, before
+    the DB insert, fails closed (503) with no orphan row when the store is
+    unconfigured, and keeps the ephemeral signed URL out of the persisted input."""
+    cp_input = dict(submission.cp_input)
+    if submission.source_handle:
+        cp_input.pop("source", None)
+        cp_input["url"] = deps.uploads.presign(submission.source_handle)  # 503 if store unconfigured
+    return cp_input
+
+
 def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)            # 401 / 403 / 503, before any CP call
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
     body = request.get_json(silent=True)
     submission = build_submission(target, body)     # 400 (incl. forbidden identity fields)
+    cp_input = _resolve_cp_input(deps, submission)  # file-mode: handle → presigned url (503 if unset)
 
     job_id = deps.uuid_factory()
     now = deps.clock.now()
@@ -116,7 +159,7 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     if not ref.created:
         return _idempotent_response(ref)            # returning key → no second CP dispatch
 
-    cp_body_out = {"input": submission.cp_input}     # canonical, identity-free
+    cp_body_out = {"input": cp_input}                # canonical, identity-free
     try:
         status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
     except HttpError:
@@ -154,11 +197,11 @@ def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
     job = deps.reel_jobs.get_by_execution(ctx, execution_id)   # 404 if absent/foreign
     deps.access_guard.authorize_reel_read(ctx, job)            # 403 / 404
     status, cp_body, _headers = deps.control_plane.get_execution(execution_id)
-    normalized = normalize_reel_status(cp_body.get("status"))
+    normalized = _normalize_execution_status(cp_body)
     result_ref = _resolve_result_ref(execution_id, cp_body) if normalized == "succeeded" else None
     completed_at = deps.clock.now() if normalized in TERMINAL_STATUSES else None
     deps.reel_jobs.update_from_execution(ctx, execution_id, normalized, result_ref, completed_at)
-    return jsonify(cp_body), status
+    return jsonify(_poll_response_body(cp_body, normalized)), status
 
 
 def _not_found() -> tuple[Response, int]:

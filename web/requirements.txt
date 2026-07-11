@@ -6,3 +6,6 @@ gunicorn>=21.2
 psycopg[binary]>=3.1
 supertokens-python>=0.24
 flask-cors>=4.0
+# T7 file-mode composites: write uploads to a shared S3-compatible bucket the
+# reel-af node can fetch, and presign time-limited GET URLs for dispatch.
+boto3>=1.34

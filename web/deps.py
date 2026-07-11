@@ -139,6 +139,7 @@ class ReelJobRepoPort(Protocol):
 class UploadStorePort(Protocol):
     def ensure_ready(self) -> None: ...
     def store(self, ctx: AuthContext, file_storage) -> dict: ...
+    def presign(self, handle: str) -> str: ...  # opaque handle → fetchable URL for the node (T7)
 
 
 @runtime_checkable
@@ -221,14 +222,18 @@ def default_deps() -> AppDeps:
     # Lazy imports avoid an import cycle (pg/auth/control_plane import this module).
     from control_plane import HttpControlPlane
     from pg import PgReelJobRepo, build_identity
-    from uploads import LocalUploadStore
+    from uploads import BucketUploadStore, LocalUploadStore
 
     logger = logging.getLogger("reel_af_ui")
+    # T7: prefer shared object storage (reachable by the reel-af node) when a
+    # bucket is configured; else fall back to the local volume store (dev). Both
+    # fail closed (503) until their backing store is configured.
+    uploads = BucketUploadStore() if os.getenv("REEL_BUCKET_NAME") else LocalUploadStore()
     return AppDeps(
         identity=build_identity(),                 # SuperTokens session (fail-closed) + DB reader
         access_guard=RoleAccessGuard(),
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
-        uploads=LocalUploadStore(),                 # fail-closed 503 until REEL_UPLOAD_DIR set
+        uploads=uploads,                            # bucket (prod) or local volume (dev); 503 until configured
         control_plane=HttpControlPlane(),
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),

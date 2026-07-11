@@ -66,6 +66,7 @@ def test_poll_allowed_reconciles_and_returns_cp_shape():
     resp = _client(deps).get(POLL_URL)
 
     assert resp.status_code == 200
+    assert resp.get_json()["status"] == "succeeded"
     assert resp.get_json()["result"]["video_path"] == "/out/x.mp4"
     assert cp.get_calls == [EXEC]
     # B13: reconciled with normalized status + cp-execution result_ref + completed_at
@@ -94,5 +95,20 @@ def test_poll_failure_sets_no_success_result_ref():
     cp = FakeControlPlane(response=(200, {"status": "error", "error": "boom"}, {}))
     deps = make_deps(identity=FakeIdentity(make_ctx("owner")), reel_jobs=repo, control_plane=cp)
     _client(deps).get(POLL_URL)
+    _e, status, result_ref, completed_at = repo.updates[0]
+    assert status == "failed" and result_ref is None and completed_at is not None
+
+
+def test_poll_succeeded_with_error_result_reconciles_as_failure():
+    repo = FakeReelJobRepo(job=_owned_job())
+    cp = FakeControlPlane(
+        response=(200, {"status": "succeeded", "result": {"error": "private video"}}, {})
+    )
+    deps = make_deps(identity=FakeIdentity(make_ctx("owner")), reel_jobs=repo, control_plane=cp)
+    resp = _client(deps).get(POLL_URL)
+
+    assert resp.status_code == 200
+    assert resp.get_json()["status"] == "failed"
+    assert resp.get_json()["error"] == "private video"
     _e, status, result_ref, completed_at = repo.updates[0]
     assert status == "failed" and result_ref is None and completed_at is not None

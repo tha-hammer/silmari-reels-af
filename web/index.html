@@ -594,7 +594,12 @@
       catch { logLine("poll error — retrying"); continue; }
       const status = String(j.status || "?");
       if (status !== last) { last = status; mapStatus(status); logLine(`status → ${status}`); }
-      if (status === "succeeded") { finish(j.result || {}); return; }
+      if (status === "succeeded") {
+        const errorMessage = resultErrorMessage(j.result) || resultErrorMessage(j);
+        if (errorMessage) throw new Error(`execution failed: ${errorMessage}`);
+        finish(j.result || {});
+        return;
+      }
       if (CFG.ui.terminalFailureStatuses.includes(status)) {
         throw new Error(`execution ${status}: ${JSON.stringify(j.error || j.result || "").slice(0, CFG.ui.maxErrorBodyChars)}`);
       }
@@ -606,6 +611,8 @@
   }
 
   function finish(result) {
+    const resultError = resultErrorMessage(result);
+    if (resultError) throw new Error(`execution failed: ${resultError}`);
     advanceTo("done");
     const path = result.video_path || result.path || result.output || "(see server)";
     $("resultPath").textContent = path;
@@ -614,6 +621,12 @@
     if (link === "#") { a.style.display = "none"; } else { a.style.display = ""; }
     $("result").classList.add("on");
     logLine("reel struck — print ready", "ok");
+  }
+
+  function resultErrorMessage(result) {
+    if (!result || typeof result !== "object" || !result.error) return "";
+    if (typeof result.error === "string") return result.error.slice(0, CFG.ui.maxErrorBodyChars);
+    return JSON.stringify(result.error).slice(0, CFG.ui.maxErrorBodyChars);
   }
 
   /* ── ui helpers ── */
