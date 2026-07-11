@@ -57,20 +57,23 @@ def _augment(prompt: str, content_mode: str = "general") -> str:
     return f"{base}. {_style_note(content_mode)}."
 
 
-def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
-    """Center-crop the still to 9:16 vertical for Veo i2v input.
+def _crop_to_ratio(
+    src: Path,
+    dest: Path,
+    *,
+    ratio: float,
+    target_w: int,
+    target_h: int,
+) -> Path:
+    """Center-crop and resize locally for provider aspect targets.
 
-    Gemini returns roughly square (1024x1024); Veo expects vertical 9:16.
-    Take a centered 9:16 strip and resize to 720x1280 (Veo's native res).
-
-    We DO NOT pass image_config={"aspect_ratio": "9:16"} to the SDK — no
-    upstream OpenRouter provider exposes the param, so any request with
-    it 404s. We crop locally.
+    We DO NOT pass image_config={"aspect_ratio": "..."} to the SDK — no
+    upstream OpenRouter provider exposes the param, so any request with it
+    404s. We crop locally.
     """
-    target_h = target_w * 16 // 9
     img = Image.open(src).convert("RGB")
     w, h = img.size
-    desired_ratio = 9 / 16
+    desired_ratio = ratio
     cur_ratio = w / h
     if cur_ratio > desired_ratio:
         new_w = int(h * desired_ratio)
@@ -86,6 +89,38 @@ def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
     return dest
 
 
+def _crop_to_9x16(src: Path, dest: Path, target_w: int = 720) -> Path:
+    """Center-crop the still to 9:16 vertical for Veo i2v input.
+
+    Gemini returns roughly square (1024x1024); Veo expects vertical 9:16.
+    Take a centered 9:16 strip and resize to 720x1280 (Veo's native res).
+    """
+    return _crop_to_ratio(
+        src,
+        dest,
+        ratio=9 / 16,
+        target_w=target_w,
+        target_h=target_w * 16 // 9,
+    )
+
+
+def _crop_to_4x5(src: Path, dest: Path, target_w: int = 1080) -> Path:
+    """Center-crop to 4:5 Instagram portrait, 1080x1350 by default."""
+    return _crop_to_ratio(
+        src,
+        dest,
+        ratio=4 / 5,
+        target_w=target_w,
+        target_h=target_w * 5 // 4,
+    )
+
+
+_CROP_TARGETS = {
+    "9x16": _crop_to_9x16,
+    "4x5": _crop_to_4x5,
+}
+
+
 async def generate_first_frame(
     provider: OpenRouterProvider,
     image_prompt: str,
@@ -94,6 +129,7 @@ async def generate_first_frame(
     content_mode: str = "general",
     *,
     model: str | None = None,
+    crop: str = "9x16",
 ) -> Path:
     """Generate one 720×1280 first frame for a beat.
 
@@ -121,7 +157,8 @@ async def generate_first_frame(
             f"generate_first_frame: image gen returned no images for beat {idx}"
         )
     await _save_image_output(images[0], raw_path)
-    return _crop_to_9x16(raw_path, final_path)
+    cropper = _CROP_TARGETS.get(crop, _crop_to_9x16)
+    return cropper(raw_path, final_path)
 
 
 async def _save_image_output(image, dest: Path) -> None:

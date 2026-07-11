@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from PIL import Image
 from util import make_fake_provider, square_png_bytes
 
 from reel_af.render.images import generate_first_frame
@@ -34,6 +35,25 @@ async def test_generate_first_frame_defaults_to_env_model(tmp_path: Path):
 
     image_calls = [kw for method, kw in fake.calls if method == "image"]
     assert image_calls[0]["model"] == images.IMAGE_MODEL
+
+
+@pytest.mark.parametrize("size", [256, 512, 1000])
+async def test_carousel_crop_is_4x5_portrait(tmp_path: Path, size: int):
+    fake = make_fake_provider(image_data=square_png_bytes(size))
+
+    path = await generate_first_frame(fake(), "x", 0, tmp_path, crop="4x5")
+
+    with Image.open(path) as image:
+        assert image.size == (1080, 1350)
+
+
+async def test_default_crop_still_9x16(tmp_path: Path):
+    fake = make_fake_provider(image_data=square_png_bytes(512))
+
+    path = await generate_first_frame(fake(), "x", 0, tmp_path)
+
+    with Image.open(path) as image:
+        assert image.size == (720, 1280)
 
 
 @pytest.mark.parametrize("blank", ["", "   "])
