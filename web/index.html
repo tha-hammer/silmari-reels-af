@@ -43,7 +43,23 @@
     { "key": "render",     "label": "RENDER",     "note": "printing overlays" },
     { "key": "composite",  "label": "COMPOSITE",  "note": "splicing the cut" },
     { "key": "done",       "label": "PRINT",      "note": "reel struck" }
-  ]
+  ],
+  "ui": {
+    "loginPath": "/login",
+    "bytesPerMiB": 1048576,
+    "maxErrorBodyChars": 200,
+    "flashResetMs": 2600,
+    "healthProbeMs": 20000,
+    "idempotentPendingCode": "idempotent_request_pending",
+    "defaultRetryAfterMs": 3000,
+    "terminalFailureStatuses": ["failed", "cancelled", "canceled", "error"],
+    "statusStageByExecutionStatus": {
+      "queued": "queued", "pending": "queued",
+      "ingesting": "ingest", "transcribing": "transcribe",
+      "running": "render", "processing": "render", "rendering": "render",
+      "compositing": "composite", "succeeded": "done"
+    }
+  }
 }
 </script>
 
@@ -428,7 +444,7 @@
     document.querySelector('.modes button[data-mode="file"]').click();
     vp.classList.add("loaded");
     $("dropTitle").textContent = "MARKED";
-    $("fileName").textContent = `${f.name} · ${(f.size / 1048576).toFixed(1)} MB`;
+    $("fileName").textContent = `${f.name} · ${(f.size / CFG.ui.bytesPerMiB).toFixed(1)} MB`;
   }
 
   /* ── backend health probe ── */
@@ -477,9 +493,27 @@
   }
 
   /* ── submit / ROLL ── */
+  // One idempotency key per logical Roll action; reused across 409 retries so a
+  // retried submit is deduped by the server, never double-dispatched.
+  function newClientRequestId() {
+    return (crypto && crypto.randomUUID) ? crypto.randomUUID()
+      : `cr-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  }
+
+  function buildInput(handle) {
+    if (state.preset.kind === "topic") return { topic: $("url").value.trim() };
+    if (state.mode === "file") return { source: handle, preset: state.preset.id };
+    const u = $("url").value.trim();
+    return { url: u, source: u, preset: state.preset.id };
+  }
+
+  function goToLogin() {
+    logLine("session expired — signing in", "err");
+    window.location.assign(CFG.ui.loginPath);
+  }
+
   async function roll() {
     if (state.busy) return;
-    const isTopic = state.preset.kind === "topic";
     const urlVal = $("url").value.trim();
     if (state.mode === "url" && !urlVal) return flash("no source — paste a URL");
     if (state.mode === "file" && !state.file) return flash("no source — drop a file");
@@ -490,24 +524,24 @@
     $("log").innerHTML = ""; renderTrack();
     logLine(`slate: ${state.preset.label} · ${state.mode.toUpperCase()}`, "ok");
 
+    const clientRequestId = newClientRequestId();
     try {
-      let input;
+      let handle = null;
       if (state.mode === "file") {
         advanceTo("ingest");
         logLine(`uploading ${state.file.name}…`);
-        const handle = await uploadFile(state.file);
-        input = { source: handle, preset: state.preset.id };
+        handle = await uploadFile(state.file);
         logLine(`source registered → ${handle}`, "ok");
       } else {
-        input = isTopic ? { topic: urlVal } : { url: urlVal, source: urlVal, preset: state.preset.id };
         logLine(`source: ${urlVal}`);
       }
       advanceTo("ingest");
-      const execId = await execute(state.preset.target, input);
+      const execId = await execute(state.preset.target, buildInput(handle), clientRequestId);
       $("jobId").textContent = execId;
       logLine(`execution ${execId} accepted`, "ok");
       await poll(execId);
     } catch (err) {
+      if (err && err.code === "unauthenticated") return;  // already redirecting to login
       logLine(String(err && err.message || err), "err");
       advanceTo("");
     } finally {
@@ -519,22 +553,34 @@
     const fd = new FormData();
     fd.append("file", f, f.name);
     const r = await fetch(url(CFG.api.uploadPath), { method: "POST", body: fd });
-    if (!r.ok) throw new Error(`upload failed (${r.status}) — configure api.uploadPath, or use FROM URL`);
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    if (!r.ok) throw new Error(`upload failed (${r.status}) — check size/format, or use FROM URL`);
     const j = await r.json().catch(() => ({}));
     return j.path || j.url || j.handle || j.source || f.name;
   }
 
-  async function execute(target, input) {
-    const r = await fetch(url(CFG.api.executePath, { target }), {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ input }),
-    });
-    const body = await r.text();
-    if (!r.ok) throw new Error(`${target} rejected (${r.status}): ${body.slice(0, 200)}`);
-    const j = JSON.parse(body);
-    const id = j.execution_id || j.id;
-    if (!id) throw new Error("no execution_id returned");
-    return id;
+  async function execute(target, input, clientRequestId) {
+    // Retry the SAME idempotency key on 409 pending (server-deduped, no double dispatch).
+    for (;;) {
+      const r = await fetch(url(CFG.api.executePath, { target }), {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Idempotency-Key": clientRequestId },
+        body: JSON.stringify({ input }),
+      });
+      if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+      const body = await r.text();
+      const j = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+      if (r.status === 409 && j.code === CFG.ui.idempotentPendingCode) {
+        const retryMs = (Number(r.headers.get("Retry-After")) * 1000) || CFG.ui.defaultRetryAfterMs;
+        logLine(`submit pending — retrying in ${retryMs / 1000}s`);
+        await sleep(retryMs);
+        continue;
+      }
+      if (!r.ok) throw new Error(`${target} rejected (${r.status}): ${body.slice(0, CFG.ui.maxErrorBodyChars)}`);
+      const id = j.execution_id || j.id;
+      if (!id) throw new Error("no execution_id returned");
+      return id;
+    }
   }
 
   async function poll(id) {
@@ -549,15 +595,14 @@
       const status = String(j.status || "?");
       if (status !== last) { last = status; mapStatus(status); logLine(`status → ${status}`); }
       if (status === "succeeded") { finish(j.result || {}); return; }
-      if (["failed", "cancelled", "canceled", "error"].includes(status)) {
-        throw new Error(`execution ${status}: ${JSON.stringify(j.error || j.result || "").slice(0, 200)}`);
+      if (CFG.ui.terminalFailureStatuses.includes(status)) {
+        throw new Error(`execution ${status}: ${JSON.stringify(j.error || j.result || "").slice(0, CFG.ui.maxErrorBodyChars)}`);
       }
     }
   }
 
   function mapStatus(status) {
-    const m = { queued: "queued", pending: "queued", running: "render", processing: "render", ingesting: "ingest", transcribing: "transcribe", rendering: "render", compositing: "composite", succeeded: "done" };
-    advanceTo(m[status] || "render");
+    advanceTo(CFG.ui.statusStageByExecutionStatus[status] || "render");
   }
 
   function finish(result) {
@@ -583,7 +628,7 @@
   function flash(msg) {
     clearTimeout(flashT);
     $("hint").textContent = msg; $("hint").style.color = "var(--grease-2)";
-    flashT = setTimeout(() => { $("hint").textContent = "select a source + format, then roll"; $("hint").style.color = ""; }, 2600);
+    flashT = setTimeout(() => { $("hint").textContent = "select a source + format, then roll"; $("hint").style.color = ""; }, CFG.ui.flashResetMs);
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -591,7 +636,7 @@
 
   /* ── boot ── */
   renderPresets(); applyPresetShape(); renderTrack();
-  probe(); setInterval(probe, 20000);
+  probe(); setInterval(probe, CFG.ui.healthProbeMs);
 })();
 </script>
 </body>

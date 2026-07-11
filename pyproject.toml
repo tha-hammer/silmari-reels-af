@@ -47,6 +47,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+markers = [
+    "integration: needs a live Postgres (TEST_DATABASE_URL); reel_job SQL contract tests",
+]
 
 [tool.ruff]
 line-length = 100
@@ -56,10 +59,23 @@ target-version = "py310"
 select = ["E", "F", "I", "N", "W"]
 ignore = ["E501"]
 
+[tool.ruff.lint.per-file-ignores]
+# web/deps.py defines HTTP-status exceptions named after Werkzeug/HTTP semantics
+# (BadRequest, NotFound, Unauthorized, ...) — none carry an "Error" suffix, matching
+# the framework's own exception vocabulary. N818 (Error-suffix) does not apply here.
+"web/deps.py" = ["N818"]
+
 [dependency-groups]
 dev = [
     "hypothesis>=6.156.1",
     "pytest>=9.0.3",
     "pytest-asyncio>=1.3.0",
     "ruff>=0.15.14",
+    # web/ (reel-af-ui) test env — the UI service is a separate deployable
+    # (web/requirements.txt), but its behavior tests under tests/web/ run in the
+    # main project env and need Flask + requests importable to exercise routes.
+    # psycopg drives the `-m integration` reel_job contract tests (TEST_DATABASE_URL).
+    "flask>=3.0",
+    "requests>=2.31",
+    "psycopg[binary]>=3.1",
 ]
