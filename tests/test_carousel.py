@@ -214,6 +214,51 @@ async def test_control_plane_call_resolves_real_deps(tmp_path: Path, monkeypatch
     assert out["slides"][0]["image_ref"] == f"stub://{out['run_id']}/0"
 
 
+@pytest.mark.parametrize("n", [1, 3, 5])
+async def test_carousel_returns_ordered_slides(tmp_path: Path, monkeypatch, n: int):
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+    storage = _FakeStoragePort()
+
+    out = await app_module.research_to_carousel(
+        text="a research doc about batteries",
+        slide_count=n,
+        out_dir=str(tmp_path),
+        provider=fake(),
+        storage=storage,
+        distiller=_fake_distiller,
+        prompt_planner=lambda essence, count: [f"slide prompt {i}" for i in range(count)],
+    )
+
+    slides = out["slides"]
+    assert [slide["idx"] for slide in slides] == list(range(n))
+    assert all(slide["image_prompt"] == f"slide prompt {slide['idx']}" for slide in slides)
+    assert all(slide["image_ref"] == f"stub://{out['run_id']}/{slide['idx']}" for slide in slides)
+    assert all(slide["status"] == "ok" for slide in slides)
+    assert len(slides) == n
+    assert out["out_dir"] == str(tmp_path)
+
+
+async def test_planner_wrong_count_raises(tmp_path: Path, monkeypatch):
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    with pytest.raises(ValueError, match="expected 3"):
+        await app_module.research_to_carousel(
+            text="doc",
+            slide_count=3,
+            out_dir=str(tmp_path),
+            provider=fake(),
+            storage=_FakeStoragePort(),
+            distiller=_fake_distiller,
+            prompt_planner=lambda essence, count: ["only", "two"],
+        )
+
+
 @pytest.mark.parametrize("blank", ["", "   "])
 async def test_blank_model_falls_back_to_default(tmp_path: Path, blank: str):
     from reel_af.render import images

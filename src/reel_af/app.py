@@ -846,8 +846,12 @@ async def research_to_carousel(
     crop = str(cfg.get("crop", "4x5"))
     essence = await _maybe_await(distiller(text))
     prompts = await _resolve_prompts(prompt_planner, essence, count)
+    if len(prompts) != count:
+        raise ValueError(
+            f"prompt_planner returned {len(prompts)} prompts, expected {count}"
+        )
     slides = []
-    for idx, prompt in enumerate(prompts[:count]):
+    for idx, prompt in enumerate(prompts):
         slides.append(
             await _render_one_slide(
                 provider=provider,
