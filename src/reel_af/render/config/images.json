@@ -1,0 +1,17 @@
+{
+  "crop_4x5": "4x5",
+  "crop_4x5_ratio_h": 5,
+  "crop_4x5_ratio_w": 4,
+  "crop_4x5_target_w": 1080,
+  "crop_9x16": "9x16",
+  "crop_9x16_ratio_h": 16,
+  "crop_9x16_ratio_w": 9,
+  "crop_9x16_target_w": 720,
+  "default_crop": "9x16",
+  "default_image_model": "openrouter/google/gemini-2.5-flash-image",
+  "general_style_note": "cinematic documentary still, warm natural light, shallow depth of field, 35mm film grain, VERTICAL portrait composition (taller than wide, the subject occupies the upper-middle two-thirds), fills the frame, no text or letters",
+  "jpeg_quality": 92,
+  "no_image_error_template": "generate_first_frame: image gen returned no images for beat {idx}",
+  "provider_image_count": 1,
+  "scientific_style_note": "documentary photograph from a working research lab, sharp focus throughout, neutral white-balanced lighting (overhead fluorescent or a single bright desk lamp, no warm filters), realistic colors, no shallow depth-of-field blur, no film grain, no lens flares; VERTICAL portrait composition with the artifact (plot / paper / interface / instrument) occupying the upper two-thirds; the frame should look like a phone snapshot of an actual research workspace, not a movie still; no text or letters in frame"
+}

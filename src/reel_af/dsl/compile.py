@@ -26,14 +26,12 @@ from reel_af.dsl.aligner import (
     snap_edge,
     word_boundaries,
 )
-from reel_af.dsl.ast import Extend, Find, Hole, Insert, Join, Trans
-from reel_af.dsl.composite import CompositeDoc, CompositeSegment, MarkerAttachment
+from reel_af.dsl.ast import Extend, Hole, Insert, Join, Trans
+from reel_af.dsl.composite import CompositeDoc, CompositeSegment
 from reel_af.dsl.models import (
     FADE_TO_COLOR_EFFECTS,
-    FFPROBE_DURATION_EPSILON_S,
     JOIN_GAP_LIMIT_S,
     SNAP_TOLERANCE_S,
-    AlignedSpan,
     BlackSegment,
     CompileResult,
     Diagnostic,
@@ -501,7 +499,7 @@ def _should_merge(
             return True
         diagnostics.append(Diagnostic(
             code="JOIN_REFUSED",
-            message=f"join refused: different sources; use [join force]",
+            message="join refused: different sources; use [join force]",
             severity="error",
         ))
         return False

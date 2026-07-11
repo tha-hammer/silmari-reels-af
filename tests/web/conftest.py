@@ -26,11 +26,14 @@ from deps import (  # noqa: E402
     NotFound,
     RoleAccessGuard,
 )
-from reel_jobs import ReelJobRef  # noqa: E402
+from reel_jobs import ReelJobRef, ResearchRunRef  # noqa: E402
 
 FIXED_JOB_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
 ORG_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 USER_ID = uuid.UUID("22222222-2222-2222-2222-222222222222")
+# Foreign tenancy for cross-org concealment tests (Plan 4, CI-2).
+OTHER_ORG = uuid.UUID("33333333-3333-3333-3333-333333333333")
+OTHER_USER = uuid.UUID("44444444-4444-4444-4444-444444444444")
 
 
 def make_ctx(role: str = "member") -> AuthContext:
@@ -60,6 +63,11 @@ class FakeReelJobRepo:
         self._get_error = get_error
         self._by_key: dict = {}          # (org_id, created_by, crid) -> ReelJobRef (idempotency)
         self._attach_error: Exception | None = None
+        # Plan 4 (CI-2): research_run store + execution_id-keyed job index so the
+        # provenance read-back (get_by_execution) genuinely threads the column.
+        self.research_runs: dict = {}    # research_run_id -> ResearchRunRef
+        self._runs_by_exec: dict = {}    # execution_id -> research_run_id
+        self._jobs_by_exec: dict = {}    # execution_id -> ReelJobRef
 
     def ensure_ready(self) -> None:
         pass
@@ -70,10 +78,14 @@ class FakeReelJobRepo:
             existing = self._by_key[key]
             return ReelJobRef(
                 job_id=existing.job_id, org_id=existing.org_id, created_by=existing.created_by,
-                status=existing.status, execution_id=existing.execution_id, created=False,
+                status=existing.status, execution_id=existing.execution_id,
+                source_research_run_id=existing.source_research_run_id, created=False,
             )
         self.inserted.append((ctx, submission, job_id, now, client_request_id))
-        ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="queued")
+        # Thread provenance from the submission (Plan 4) so read-back surfaces it.
+        srr = getattr(submission, "source_research_run_id", None)
+        ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
+                         status="queued", source_research_run_id=srr)
         self._by_key[key] = ref
         return ref
 
@@ -84,21 +96,28 @@ class FakeReelJobRepo:
         if self._attach_error is not None:
             raise self._attach_error
         self.attached.append((ctx, job_id, execution_id))
+        attached_ref = None
         for k, ref in list(self._by_key.items()):
             if ref.job_id == job_id:
-                self._by_key[k] = ReelJobRef(
+                attached_ref = ReelJobRef(
                     job_id=ref.job_id, org_id=ref.org_id, created_by=ref.created_by,
-                    status=ref.status, execution_id=execution_id, created=False,
+                    status=ref.status, execution_id=execution_id,
+                    source_research_run_id=ref.source_research_run_id, created=False,
                 )
-        return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
-                          status="queued", execution_id=execution_id)
+                self._by_key[k] = attached_ref
+        if attached_ref is None:
+            attached_ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
+                                      status="queued", execution_id=execution_id)
+        self._jobs_by_exec[execution_id] = attached_ref  # exec-keyed read path (Plan 4)
+        return attached_ref
 
     def get_by_execution(self, ctx, execution_id):
         if self._get_error is not None:
             raise self._get_error
-        if self._job is None:
+        job = self._jobs_by_exec.get(execution_id) or self._job
+        if job is None or job.org_id != ctx.org_id:
             raise NotFound("job not found")
-        return self._job
+        return job                                          # carries source_research_run_id
 
     def mark_failed(self, ctx, job_id, reason, completed_at) -> None:
         self.failed.append((ctx, job_id, reason))
@@ -109,6 +128,56 @@ class FakeReelJobRepo:
 
     def mark_stale_queued(self, now) -> int:
         return 0
+
+    # ─────────── research_run store (Plan 4, ISC-24; mirrors PgReelJobRepo) ───────────
+
+    def _record_event(self, name: str) -> None:
+        events = getattr(self, "events", None)
+        if events is not None:
+            events.append(name)
+
+    def seed_research_run(self, execution_id, org_id, created_by, status="succeeded"):
+        rid = uuid.uuid4()
+        self.research_runs[rid] = ResearchRunRef(
+            id=rid, org_id=org_id, created_by=created_by, status=status,
+            execution_id=execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = rid
+        return rid                                          # tests OBSERVE via this id
+
+    def insert_research_run(self, ctx, run_id, execution_id, status, now):
+        self._record_event("insert_research_run")
+        self.research_runs[run_id] = ResearchRunRef(
+            id=run_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            status=status, execution_id=execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = run_id
+
+    def update_research_status(self, ctx, run_id, status=None, execution_id=None):
+        self._record_event("update_research_status")
+        r = self.research_runs.get(run_id)
+        if r is None or r.org_id != ctx.org_id:
+            return
+        if r.status in ("succeeded", "failed", "cancelled"):   # terminal monotonicity
+            return
+        self.research_runs[run_id] = ResearchRunRef(
+            id=r.id, org_id=r.org_id, created_by=r.created_by,
+            status=status or r.status, execution_id=execution_id or r.execution_id)
+        if execution_id is not None:
+            self._runs_by_exec[execution_id] = run_id
+
+    def get_research_run(self, ctx, run_id):
+        r = self.research_runs.get(run_id)
+        if r is None or r.org_id != ctx.org_id:
+            raise NotFound("research run not found")        # conceal cross-org
+        return r
+
+    def get_research_by_execution(self, ctx, execution_id):
+        rid = self._runs_by_exec.get(execution_id)
+        r = self.research_runs.get(rid) if rid else None
+        if r is None or r.org_id != ctx.org_id:
+            raise NotFound("research run not found")        # conceal foreign/absent
+        return r
 
 
 class FakeUploadStore:
@@ -142,6 +211,160 @@ class FakeUploadStore:
         return self._presigned
 
 
+class FakeStorage:
+    """In-memory StoragePort for unit tests. Plans 1 and 6 reuse this in their tests."""
+
+    def __init__(self, objects: dict | None = None):
+        self._objects = dict(objects or {})
+        self.presign_calls: list = []
+        self.deleted: list = []
+
+    def put(self, org_id, key, data) -> str:
+        ref = f"{org_id}/{key.lstrip('/')}"
+        self._objects[ref] = data if isinstance(data, (bytes, bytearray)) else data.read()
+        return ref
+
+    def presigned_url(self, ref, ttl=None) -> str:
+        self.presign_calls.append((ref, ttl))
+        return self.presigned_for(ref)
+
+    def presigned_for(self, ref) -> str:
+        return f"https://fake-store/{ref}?sig=test"
+
+    def exists(self, ref) -> bool:
+        return ref in self._objects
+
+    def delete(self, ref) -> None:
+        self.deleted.append(ref)
+        self._objects.pop(ref, None)
+
+
+class FakeSlideRefResolver:
+    """Stub SlideRefResolverPort; real impl is Plan 6's carousel-backed resolver."""
+
+    def __init__(self, refs: dict | None = None):  # {(org_id, cid, idx): ref}
+        self._refs = dict(refs or {})
+
+    def resolve(self, ctx, carousel_id, slide_idx) -> str:
+        ref = self._refs.get((ctx.org_id, carousel_id, slide_idx))
+        if ref is None:
+            raise NotFound("slide not found")  # conceal cross-org + absent (404)
+        return ref
+
+
+class FakeCarouselRepo:
+    """In-memory CarouselRepoPort. Org-scoped; absent/foreign rows are concealed."""
+
+    def __init__(self, hq_cap: int = 5):
+        self._rows: dict = {}
+        self.inserted: list = []
+        self.replaced: list = []
+        self._by_key: dict = {}
+        self._hq_cap = hq_cap
+
+    def ensure_ready(self) -> None:
+        pass
+
+    def seed(self, org, cid, *, status="draft", slides=None):
+        self._rows[(org, cid)] = {
+            "status": status,
+            "slides": list(slides or []),
+            "execution_id": None,
+            "hq_recreate_count": 0,
+        }
+
+    def _own(self, ctx, cid):
+        row = self._rows.get((ctx.org_id, cid))
+        if row is None:
+            raise NotFound("carousel not found")
+        return row
+
+    def insert_or_get_draft(self, ctx, create, carousel_id, now, client_request_id):
+        key = (ctx.org_id, ctx.user_id, client_request_id)
+        if key in self._by_key:
+            cid = self._by_key[key]
+            row = self._rows[(ctx.org_id, cid)]
+            return ReelJobRef(
+                job_id=cid,
+                org_id=ctx.org_id,
+                created_by=ctx.user_id,
+                status=row["status"],
+                execution_id=row["execution_id"],
+                created=False,
+            )
+        self.inserted.append((ctx, create, carousel_id, now, client_request_id))
+        self.seed(ctx.org_id, carousel_id)
+        self._by_key[key] = carousel_id
+        return ReelJobRef(
+            job_id=carousel_id,
+            org_id=ctx.org_id,
+            created_by=ctx.user_id,
+            status="draft",
+            created=True,
+        )
+
+    def attach_execution_id(self, ctx, carousel_id, execution_id):
+        row = self._own(ctx, carousel_id)
+        row["execution_id"] = execution_id
+        return ReelJobRef(
+            job_id=carousel_id,
+            org_id=ctx.org_id,
+            created_by=ctx.user_id,
+            status=row["status"],
+            execution_id=execution_id,
+        )
+
+    def get(self, ctx, carousel_id):
+        from types import SimpleNamespace
+
+        row = self._own(ctx, carousel_id)
+        return SimpleNamespace(status=row["status"], slides=list(row["slides"]))
+
+    def slide_ref(self, ctx, carousel_id, slide_idx) -> str:
+        row = self._own(ctx, carousel_id)
+        for slide in row["slides"]:
+            if slide.get("idx") == slide_idx and slide.get("image_ref"):
+                return slide["image_ref"]
+        raise NotFound("slide not found")
+
+    def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status):
+        row = self._own(ctx, carousel_id)
+        row["slides"] = [
+            {"idx": slide_idx, "image_ref": ref, "prompt": prompt, "status": status}
+            if slide.get("idx") == slide_idx
+            else slide
+            for slide in row["slides"]
+        ]
+        self.replaced.append((ctx.org_id, carousel_id, slide_idx))
+
+    def set_status(self, ctx, carousel_id, status):
+        row = self._own(ctx, carousel_id)
+        if row["status"] not in ("succeeded", "failed", "cancelled"):
+            row["status"] = status
+
+    def draft_slide_refs(self, ctx, carousel_id) -> list[str]:
+        row = self._own(ctx, carousel_id)
+        return [slide["image_ref"] for slide in row["slides"] if slide.get("image_ref")]
+
+    def register_hq_recreate(self, ctx, carousel_id) -> int:
+        row = self._own(ctx, carousel_id)
+        if row["hq_recreate_count"] >= self._hq_cap:
+            from carousels import HqRecreateCapError
+
+            raise HqRecreateCapError(f"HQ recreate cap reached for {carousel_id}")
+        row["hq_recreate_count"] += 1
+        return row["hq_recreate_count"]
+
+    def register(self, carousel_id: str) -> None:
+        self.register_hq_recreate(make_ctx(), carousel_id)
+
+    def count(self, carousel_id: str) -> int:
+        return self.hq_recreate_count(make_ctx(), carousel_id)
+
+    def hq_recreate_count(self, ctx, carousel_id) -> int:
+        return self._own(ctx, carousel_id)["hq_recreate_count"]
+
+
 class FakeControlPlane:
     def __init__(self, response=(202, {"execution_id": "exec_123"}, {}), error=None):
         self._response, self._error = response, error
@@ -170,15 +393,22 @@ def make_deps(
     reel_jobs: FakeReelJobRepo | None = None,
     uploads: FakeUploadStore | None = None,
     control_plane: FakeControlPlane | None = None,
+    carousels: FakeCarouselRepo | None = None,
+    storage: FakeStorage | None = None,
+    slides: FakeSlideRefResolver | None = None,
+    uuid_factory=None,
 ) -> AppDeps:
     return AppDeps(
         identity=identity or FakeIdentity(make_ctx()),
         access_guard=RoleAccessGuard(),
         reel_jobs=reel_jobs or FakeReelJobRepo(),
+        carousels=carousels or FakeCarouselRepo(),
         uploads=uploads or FakeUploadStore(),
         control_plane=control_plane or FakeControlPlane(),
+        storage=storage or FakeStorage(),
+        slides=slides or FakeSlideRefResolver(),
         clock=FixedClock(),
-        uuid_factory=lambda: FIXED_JOB_ID,
+        uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
     )
 

@@ -108,6 +108,20 @@ nothing`), so they're safe alongside deep-research's existing `research_run`.
 | 100–103 | `organization`, `user`, `membership`, `role_definition` |
 | 106 | seed: default org (`e4e47131-…`) + `owner/admin/member/viewer` role→permission matrix |
 | 108 | `reel_job` (FKs to org/user/research_run; unique `(org_id, created_by, client_request_id)`) |
+| TBD | `research_run.execution_id`, `research_run.created_at` for row-first research handoff |
+| TBD | `reel_job.source_research_run_id` for create-from-research provenance reads |
+| TBD | `carousel` (`source_research_run_id`, `execution_id`, `hq_recreate_count`, unique `(org_id, created_by, client_request_id)`) |
+| TBD | `carousel_slide` (`carousel_id`, `org_id`, `idx`, `image_ref`, `prompt`, `status`) |
+
+The service startup readiness gate requires these columns exactly:
+
+- `research_run`: `id`, `org_id`, `created_by`, `execution_id`, `status`, `created_at`
+- `reel_job`: `id`, `org_id`, `created_by`, `client_request_id`, `title`, `source_url`, `topic`,
+  `source_research_run_id`, `params`, `status`, `result_ref`, `execution_id`, `created_at`,
+  `completed_at`
+- `carousel`: `id`, `org_id`, `created_by`, `client_request_id`, `status`,
+  `source_research_run_id`, `hq_recreate_count`, `execution_id`, `created_at`
+- `carousel_slide`: `carousel_id`, `org_id`, `idx`, `image_ref`, `prompt`, `status`
 
 Apply them (idempotent — safe to re-run): `deploy/deploy.sh migrate` (see §7), or manually against
 `user_data`'s public URL. **Until applied, the UI fails closed with `503` and makes no control-plane

@@ -22,7 +22,6 @@ from typing import Any
 
 from reel_af.models import EssenceCandidate, HuntBatch
 
-
 # Shared anti-cliché block applied to ALL hunters. The model is told
 # explicitly which examples are off-limits so it has to dig deeper.
 _ANTI_CLICHE = """

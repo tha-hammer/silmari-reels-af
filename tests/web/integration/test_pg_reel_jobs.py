@@ -55,7 +55,9 @@ create table deepresearch.research_run (
     id uuid primary key,
     org_id uuid not null references deepresearch.organization(id),
     created_by uuid not null references deepresearch.user(id),
-    status text not null default 'queued'
+    execution_id text,
+    status text not null default 'queued',
+    created_at timestamptz not null default now()
 );
 create table deepresearch.reel_job (
     id uuid primary key,
@@ -73,6 +75,27 @@ create table deepresearch.reel_job (
     created_at timestamptz not null default now(),
     completed_at timestamptz,
     unique (org_id, created_by, client_request_id)
+);
+create table deepresearch.carousel (
+    id uuid primary key,
+    org_id uuid not null references deepresearch.organization(id),
+    created_by uuid not null references deepresearch.user(id),
+    client_request_id text not null,
+    status text not null default 'draft',
+    source_research_run_id uuid references deepresearch.research_run(id) on delete set null,
+    hq_recreate_count integer not null default 0,
+    execution_id text,
+    created_at timestamptz not null default now(),
+    unique (org_id, created_by, client_request_id)
+);
+create table deepresearch.carousel_slide (
+    carousel_id uuid not null references deepresearch.carousel(id) on delete cascade,
+    org_id uuid not null,
+    idx integer not null,
+    image_ref text,
+    prompt text,
+    status text not null default 'ok',
+    primary key (carousel_id, idx)
 );
 """
 

@@ -24,8 +24,8 @@ from reel_af.dsl.models import (
     Transition,
     UnmatchedSpan,
     WordsSidecar,
-    validate_renderable,
     _rebuild_forward_refs,
+    validate_renderable,
 )
 
 _rebuild_forward_refs()

@@ -28,5 +28,13 @@
     "image_count": 6,
     "image_every_s": 30,
     "zoom": true
+  },
+  "carousel-default": {
+    "description": "4:5 Instagram portrait image carousel (1080x1350). No video overlay; a set of ordered still slides generated from research/text.",
+    "kind": "carousel",
+    "canvas_w": 1080,
+    "canvas_h": 1350,
+    "crop": "4x5",
+    "slide_count": 5
   }
 }

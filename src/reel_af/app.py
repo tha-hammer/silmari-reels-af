@@ -41,10 +41,13 @@ Invoke async, get an execution_id immediately:
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import os
 import re
 import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -54,10 +57,15 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_PROJECT_ROOT / ".env")
 
 from agentfield import Agent, AgentRouter, AIConfig  # noqa: E402
+from agentfield.media_providers import OpenRouterProvider  # noqa: E402
 
 # Apply SDK bug-fixes at startup so every OpenRouterProvider call gets
 # the fixed behaviour. Module is idempotent.
 import reel_af.sdk_patches  # noqa: E402, F401
+from reel_af.agents.extract import essence_from_text  # noqa: E402
+from reel_af.models import Essence  # noqa: E402
+from reel_af.render.images import generate_first_frame  # noqa: E402
+from reel_af.render.presets import load_preset  # noqa: E402
 
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
@@ -85,6 +93,33 @@ app = Agent(
 
 # All reel reasoners live under prefix "reel".
 reel = AgentRouter(prefix="reel", tags=["video", "viral"])
+
+_CAROUSEL_CONFIG_PATH = Path(__file__).parent / "render" / "config" / "carousel.json"
+
+
+@lru_cache(maxsize=1)
+def _carousel_config() -> dict[str, Any]:
+    return json.loads(_CAROUSEL_CONFIG_PATH.read_text())
+
+
+_CAROUSEL_CFG = _carousel_config()
+CAROUSEL_DEFAULT_PRESET = str(_CAROUSEL_CFG["default_preset"])
+CAROUSEL_DEFAULT_CROP = str(_CAROUSEL_CFG["default_crop"])
+_CAROUSEL_MIN_SLIDE_COUNT = int(_CAROUSEL_CFG["min_slide_count"])
+_CAROUSEL_RUN_ID_HEX_CHARS = int(_CAROUSEL_CFG["run_id_hex_chars"])
+_CAROUSEL_OUTPUT_ROOT = str(_CAROUSEL_CFG["output_root"])
+_CAROUSEL_OUTPUT_DIR_PREFIX = str(_CAROUSEL_CFG["output_dir_prefix"])
+_CAROUSEL_OPENROUTER_ERROR = str(_CAROUSEL_CFG["missing_openrouter_error"])
+_CAROUSEL_PROMPT_COUNT_ERROR_TEMPLATE = str(
+    _CAROUSEL_CFG["planner_wrong_count_error_template"]
+)
+_CAROUSEL_NEGATIVE_IDX_ERROR_TEMPLATE = str(
+    _CAROUSEL_CFG["negative_idx_error_template"]
+)
+_CAROUSEL_PROMPT_USER_TEMPLATE = str(_CAROUSEL_CFG["prompt_user_template"])
+_CAROUSEL_PROMPT_SYSTEM = str(_CAROUSEL_CFG["prompt_system"])
+_SLIDE_STATUS_OK = "ok"
+_SLIDE_STATUS_FAILED = "failed"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -743,6 +778,232 @@ async def composite_to_reel(
              f"(delivered={bool(download_url)}, {took}s)",
              tags=["reel", "composite", "done"])
     return {**result, **meta, **delivered, "timings_s": {"total": took}}
+
+
+# ════════════════════════════════════════════════════════════════════
+# ENTRY REASONER 4 — Research/Text → Carousel
+# ════════════════════════════════════════════════════════════════════
+
+
+class _FailClosedStoragePort:
+    async def put(self, *, run_id, idx, path):
+        raise RuntimeError("carousel StoragePort is not configured")
+
+
+def _default_storage_port():
+    return _FailClosedStoragePort()
+
+
+async def _maybe_await(value):
+    value_is_awaitable = inspect.isawaitable(value)
+    if value_is_awaitable:
+        return await value
+    return value
+
+
+async def _resolve_prompts(prompt_planner, essence, count: int) -> list[str]:
+    prompts = await _maybe_await(prompt_planner(essence, count))
+    return list(prompts or [])
+
+
+def _slide_record(
+    idx: int,
+    image_prompt: str,
+    image_ref: str | None,
+    status: str,
+    *,
+    error: str | None = None,
+) -> dict:
+    record = {
+        "idx": idx,
+        "image_prompt": image_prompt,
+        "image_ref": image_ref,
+        "status": status,
+    }
+    if error is not None:
+        record["error"] = error
+    return record
+
+
+async def plan_carousel_prompts(planner_app: Any, essence: Essence, count: int) -> list[str]:
+    """Turn an Essence into ordered still-image prompts for a carousel."""
+    n = max(_CAROUSEL_MIN_SLIDE_COUNT, int(count))
+    evidence = "; ".join(essence.evidence)
+    user = _CAROUSEL_PROMPT_USER_TEMPLATE.format(
+        n=n,
+        core_claim=essence.core_claim,
+        mechanism=essence.mechanism,
+        evidence=evidence,
+        content_mode=essence.content_mode,
+        domain=essence.domain,
+    )
+    raw = await planner_app.ai(
+        system=_CAROUSEL_PROMPT_SYSTEM,
+        user=user,
+        schema=list[str],
+    )
+    raw_is_single_prompt = isinstance(raw, str)
+    if raw_is_single_prompt:
+        raw_prompts = [raw]
+    else:
+        raw_prompts = list(raw or [])
+    prompts = []
+    for raw_prompt in raw_prompts:
+        if not raw_prompt:
+            continue
+        prompt = raw_prompt.strip()
+        if not prompt:
+            continue
+        prompts.append(prompt)
+    return prompts[:n]
+
+
+def _default_carousel_output_dir(run_id: str) -> Path:
+    return Path.cwd() / _CAROUSEL_OUTPUT_ROOT / f"{_CAROUSEL_OUTPUT_DIR_PREFIX}-{run_id}"
+
+
+def _has_openrouter_api_key() -> bool:
+    return "OPENROUTER_API_KEY" in os.environ
+
+
+async def _render_one_slide(
+    *,
+    provider,
+    storage,
+    run_id: str,
+    idx: int,
+    prompt: str,
+    out_dir: Path,
+    content_mode: str,
+    model: str | None,
+    crop: str,
+    _generate_frame,
+) -> dict:
+    path = await _generate_frame(
+        provider,
+        prompt,
+        idx,
+        out_dir,
+        content_mode,
+        model=model,
+        crop=crop,
+    )
+    ref = await storage.put(run_id=run_id, idx=idx, path=path)
+    return _slide_record(idx, prompt, ref, _SLIDE_STATUS_OK)
+
+
+@reel.reasoner()
+async def research_to_carousel(
+    text: str,
+    preset: str = CAROUSEL_DEFAULT_PRESET,
+    slide_count: int | None = None,
+    model: str | None = None,
+    out_dir: str | None = None,
+    *,
+    provider=None,
+    storage=None,
+    distiller=None,
+    prompt_planner=None,
+    _generate_frame=None,
+) -> dict:
+    """Text/research document to an ordered image carousel."""
+    has_openrouter_api_key = _has_openrouter_api_key()
+    if not has_openrouter_api_key:
+        return {"error": _CAROUSEL_OPENROUTER_ERROR}
+
+    provider = provider or OpenRouterProvider()
+    storage = storage or _default_storage_port()
+    distiller = distiller or (lambda document: essence_from_text(app, document))
+    prompt_planner = prompt_planner or (
+        lambda essence, count: globals()["plan_carousel_prompts"](app, essence, count)
+    )
+    _generate_frame = _generate_frame or generate_first_frame
+
+    run_id = uuid.uuid4().hex[:_CAROUSEL_RUN_ID_HEX_CHARS]
+    run_dir = Path(out_dir) if out_dir else _default_carousel_output_dir(run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cfg = load_preset(preset)
+    count = max(
+        _CAROUSEL_MIN_SLIDE_COUNT,
+        int(slide_count if slide_count is not None else cfg["slide_count"]),
+    )
+    crop = str(cfg.get("crop", CAROUSEL_DEFAULT_CROP))
+    essence = await _maybe_await(distiller(text))
+    prompts = await _resolve_prompts(prompt_planner, essence, count)
+    prompt_count = len(prompts)
+    if prompt_count != count:
+        raise ValueError(
+            _CAROUSEL_PROMPT_COUNT_ERROR_TEMPLATE.format(
+                actual=prompt_count,
+                expected=count,
+            )
+        )
+    slides = []
+    for idx, prompt in enumerate(prompts):
+        try:
+            slides.append(
+                await _render_one_slide(
+                    provider=provider,
+                    storage=storage,
+                    run_id=run_id,
+                    idx=idx,
+                    prompt=prompt,
+                    out_dir=run_dir,
+                    content_mode=essence.content_mode,
+                    model=model,
+                    crop=crop,
+                    _generate_frame=_generate_frame,
+                )
+            )
+        except Exception as exc:
+            slides.append(
+                _slide_record(
+                    idx,
+                    prompt,
+                    None,
+                    _SLIDE_STATUS_FAILED,
+                    error=str(exc),
+                )
+            )
+    return {
+        "run_id": run_id,
+        "preset": preset,
+        "out_dir": str(run_dir),
+        "slides": slides,
+    }
+
+
+async def regenerate_slide(
+    *,
+    run_id: str,
+    idx: int,
+    image_prompt: str,
+    out_dir: str,
+    provider=None,
+    storage=None,
+    content_mode: str = "general",
+    model: str | None = None,
+    crop: str = CAROUSEL_DEFAULT_CROP,
+    _generate_frame=None,
+) -> dict:
+    """Regenerate exactly one carousel slide."""
+    if idx < 0:
+        raise ValueError(_CAROUSEL_NEGATIVE_IDX_ERROR_TEMPLATE.format(idx=idx))
+    provider = provider or OpenRouterProvider()
+    storage = storage or _default_storage_port()
+    _generate_frame = _generate_frame or generate_first_frame
+    return await _render_one_slide(
+        provider=provider,
+        storage=storage,
+        run_id=run_id,
+        idx=idx,
+        prompt=image_prompt,
+        out_dir=Path(out_dir),
+        content_mode=content_mode,
+        model=model,
+        crop=crop,
+        _generate_frame=_generate_frame,
+    )
 
 
 # ════════════════════════════════════════════════════════════════════

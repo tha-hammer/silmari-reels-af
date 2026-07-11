@@ -17,15 +17,42 @@ disable SuperTokens). The module-level ``app`` uses ``default_deps()`` and does
 
 from __future__ import annotations
 
+import asyncio
+import inspect
+import json
 import os
 import re
+import tempfile
+import uuid
+from importlib import import_module
+from pathlib import Path
 
-from deps import AppDeps, BadGateway, HttpError, NotFound, RepositoryUnavailable, default_deps
+from carousels import CarouselHqRecreateGuard, HqRecreateCapError, build_carousel_create
+from deps import (
+    AppDeps,
+    BadGateway,
+    BadRequest,
+    Conflict,
+    HttpError,
+    NotFound,
+    RepositoryUnavailable,
+    SchemaUnavailable,
+    default_deps,
+)
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
-from reel_jobs import TERMINAL_STATUSES, ReelJobStatus, build_submission, normalize_reel_status
+from reel_jobs import (
+    FORBIDDEN_IDENTITY_FIELDS,
+    TERMINAL_STATUSES,
+    TEXT_TARGET_BY_OUTPUT,
+    ReelJobStatus,
+    build_research_dispatch,
+    build_submission,
+    normalize_reel_status,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
+API_MESSAGES_PATH = os.path.join(HERE, "api_messages.json")
 
 # Named literals introduced by this plan (§10 CodeCleanup gate) — headers, the
 # idempotency-pending code, and the handful of HTTP statuses set directly here
@@ -37,14 +64,52 @@ HTTP_CREATED = 201
 HTTP_ACCEPTED = 202
 HTTP_CONFLICT = 409
 HTTP_NOT_FOUND = 404
+TARGET_CAROUSEL = "reel-af.reel_research_to_carousel"
+RECREATE_OUTPUT_DIR = "reel-af-carousel-recreate"
 
 # Pure route predicates — inspect method/subpath ONLY (no I/O, no body parse).
 _SUBMIT_RE = re.compile(r"^v1/execute/async/([^/]+)$")
 _POLL_RE = re.compile(r"^v1/executions/([^/]+)$")
+_CAROUSEL_GET_RE = re.compile(r"^v1/carousels/([^/]+)$")
+_CAROUSEL_RECREATE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)/recreate$")
+_CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
+_CAROUSEL_FINALIZE_RE = re.compile(r"^v1/carousels/([^/]+)/finalize$")
+_SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
+_RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
+
+
+def _load_api_messages() -> dict[str, str]:
+    with open(API_MESSAGES_PATH, encoding="utf-8") as fh:
+        raw = json.load(fh)
+    if not isinstance(raw, dict):
+        raise RuntimeError("api_messages.json must contain a flat object")
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+API_MESSAGES = _load_api_messages()
+
+
+def _is_carousel_create(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/carousels"
 
 
 def _is_upload(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/uploads"
+
+
+def _is_research_run(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/research/run"
+
+
+def _is_create_from_research(method: str, sub: str) -> bool:
+    return method == "POST" and sub == "v1/research/create"
+
+
+def _slide_target(method: str, sub: str) -> tuple[str, int] | None:
+    if method != "GET":
+        return None
+    m = _SLIDE_RE.match(sub)
+    return (m.group(1), int(m.group(2))) if m else None
 
 
 def _submit_target(method: str, sub: str) -> str | None:
@@ -58,6 +123,41 @@ def _poll_id(method: str, sub: str) -> str | None:
     if method != "GET":
         return None
     m = _POLL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _carousel_id(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _CAROUSEL_GET_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _carousel_recreate_target(method: str, sub: str) -> tuple[str, int] | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_RECREATE_RE.match(sub)
+    return (m.group(1), int(m.group(2))) if m else None
+
+
+def _carousel_cancel_id(method: str, sub: str) -> str | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_CANCEL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _carousel_finalize_id(method: str, sub: str) -> str | None:
+    if method != "POST":
+        return None
+    m = _CAROUSEL_FINALIZE_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _research_poll_id(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _RESEARCH_POLL_RE.match(sub)
     return m.group(1) if m else None
 
 
@@ -82,6 +182,21 @@ def _idempotent_response(ref) -> tuple[Response, int]:
     if ref.status in TERMINAL_STATUSES:
         return jsonify({"job_id": str(ref.job_id), "status": ref.status}), HTTP_ACCEPTED
     resp = jsonify({"code": IDEMPOTENT_PENDING_CODE, "job_id": str(ref.job_id)})
+    resp.headers[HEADER_RETRY_AFTER] = str(IDEMPOTENCY_RETRY_AFTER_S)
+    return resp, HTTP_CONFLICT
+
+
+def _idempotent_carousel_response(ref) -> tuple[Response, int]:
+    """Carousel create replay response; mirrors reel idempotency but never emits job_id."""
+    if ref.execution_id:
+        return jsonify({
+            "execution_id": ref.execution_id,
+            "carousel_id": str(ref.job_id),
+            "status": ref.status,
+        }), HTTP_ACCEPTED
+    if ref.status in TERMINAL_STATUSES:
+        return jsonify({"carousel_id": str(ref.job_id), "status": ref.status}), HTTP_ACCEPTED
+    resp = jsonify({"code": IDEMPOTENT_PENDING_CODE, "carousel_id": str(ref.job_id)})
     resp.headers[HEADER_RETRY_AFTER] = str(IDEMPOTENCY_RETRY_AFTER_S)
     return resp, HTTP_CONFLICT
 
@@ -122,9 +237,12 @@ def _normalize_execution_status(cp_body: dict) -> ReelJobStatus:
     return normalized
 
 
-def _poll_response_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
+def _poll_response_body(cp_body: dict, normalized: ReelJobStatus, job=None) -> dict:
     payload = dict(cp_body)
     payload["status"] = normalized
+    source_run_id = getattr(job, "source_research_run_id", None)
+    if source_run_id is not None:
+        payload["source_research_run_id"] = str(source_run_id)
     if normalized == "failed" and "error" not in payload:
         error = _execution_error(cp_body)
         if error is not None:
@@ -153,11 +271,30 @@ def _resolve_cp_input(deps: AppDeps, ctx, submission) -> dict:
     return cp_input
 
 
+def _source_research_run_id(deps: AppDeps, ctx, body: dict | None) -> uuid.UUID | None:
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("research_run_id")
+    if raw is None:
+        raw = body.get("source_research_run_id")
+    if raw in (None, ""):
+        return None
+    try:
+        run_id = uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise BadRequest("research_run_id must be a UUID", code="invalid_research_run_id") from exc
+    deps.reel_jobs.get_research_run(ctx, run_id)  # 404 conceals absent/cross-org
+    return run_id
+
+
 def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)            # 401 / 403 / 503, before any CP call
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
     body = request.get_json(silent=True)
-    submission = build_submission(target, body)     # 400 (incl. forbidden identity fields)
+    source_research_run_id = _source_research_run_id(deps, ctx, body)
+    submission = build_submission(
+        target, body, source_research_run_id=source_research_run_id
+    )                                               # 400 (incl. forbidden identity fields)
     cp_input = _resolve_cp_input(deps, ctx, submission)  # file-mode: ctx-owned handle → url (404/503)
 
     job_id = deps.uuid_factory()
@@ -193,6 +330,323 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     return jsonify(payload), status
 
 
+def _handle_research_run(deps: AppDeps) -> tuple[Response, int]:
+    """Dispatch a deep-research run and record it as an owned ``research_run`` row.
+
+    ROW-FIRST ordering (CI-3, mirrors ``_handle_submit``): mint ``run_id`` → insert a
+    ``queued`` row (execution_id=None) → dispatch → attach the CP execution_id. A crash
+    mid-request leaves a recoverable ``queued`` row, never an orphan CP execution. CP
+    failure / missing execution_id marks the row ``failed`` and passes the CP body through.
+    """
+    ctx = deps.identity.resolve(request)                     # 401 / 403 / 503
+    deps.access_guard.authorize_create(ctx)                  # 403 fail-closed
+    body = request.get_json(silent=True)
+    target, cp_body_out = build_research_dispatch(body)      # 400 empty/forbidden
+    run_id = deps.uuid_factory()
+    now = deps.clock.now()
+    deps.reel_jobs.insert_research_run(ctx, run_id, None, "queued", now)   # ROW FIRST
+    try:
+        status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
+    except HttpError:
+        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
+        raise                                                # 502 etc
+    if status >= 400:
+        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
+        return jsonify(cp_body), status                      # passthrough, no orphan claim
+    if "execution_id" not in cp_body:
+        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
+        raise BadGateway("control plane returned no execution_id")
+    deps.reel_jobs.update_research_status(                    # attach execution_id
+        ctx, run_id, execution_id=cp_body["execution_id"])
+    return jsonify({"research_run_id": str(run_id),
+                    "execution_id": cp_body["execution_id"]}), status
+
+
+def _research_result_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
+    """Surface the three research document keys from the CP result (empty while running)."""
+    result = cp_body.get("result") or {}
+    return {
+        "status": normalized,
+        "markdown": result.get("markdown"),
+        "html": result.get("html"),
+        "sources": result.get("sources", []),
+    }
+
+
+def _handle_research_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
+    """Poll a research run the caller owns (org-scoped; 404 conceals foreign/absent),
+    reconcile status terminal-monotonically by run_id, and surface {status, markdown,
+    html, sources}. Authorization is org-scope-only by design (no per-run role gate)."""
+    ctx = deps.identity.resolve(request)
+    run = deps.reel_jobs.get_research_by_execution(ctx, execution_id)  # 404 foreign/absent
+    status, cp_body, _headers = deps.control_plane.get_execution(execution_id)
+    if status >= 400:
+        return jsonify(cp_body), status                      # transient CP error passthrough
+    normalized = _normalize_execution_status(cp_body)
+    deps.reel_jobs.update_research_status(ctx, run.id, status=normalized)  # terminal-monotonic
+    return jsonify(_research_result_body(cp_body, normalized)), status
+
+
+# ─────────────── create-from-research fan-out (Plan 5, ISC-30/35) ───────────────
+
+
+class _DispatchOutcome:
+    """Result of enqueuing one fan-out leg (no exception on CP failure — the caller
+    applies the partial-failure contract: 502 only when ZERO legs enqueued)."""
+
+    def __init__(self, ok: bool, execution_id: str | None, outcome: str):
+        self.ok, self.execution_id, self.outcome = ok, execution_id, outcome
+
+
+def _validate_outputs(body: dict) -> list[str]:
+    """Sorted, de-duplicated output list. Empty → 400; unknown type → 400 (review C2)."""
+    raw = body.get("outputs")
+    if not isinstance(raw, list) or not raw:
+        raise BadRequest("outputs must be a non-empty list", code="invalid_outputs")
+    outputs = sorted(set(raw))
+    for output in outputs:
+        if output not in TEXT_TARGET_BY_OUTPUT:  # single source of truth for valid outputs
+            raise BadRequest(f"unknown output type: {output}", code="unknown_output")
+    return outputs
+
+
+def _dispatch_one(deps: AppDeps, ctx, target, submission, job_id, crid, now) -> _DispatchOutcome:
+    """Enqueue one submission: insert queued row → dispatch → attach execution_id.
+    Returns a disposition instead of raising on CP failure, so the fan-out can honor
+    'no cross-output rollback; 502 only when zero enqueued' (Plan 5 review C2)."""
+    cp_input = _resolve_cp_input(deps, ctx, submission)      # text-mode: identity/provenance-free
+    ref = deps.reel_jobs.insert_or_get_queued(ctx, submission, job_id, now, crid)
+    if not ref.created:
+        return _DispatchOutcome(True, ref.execution_id, "idempotent")  # returning key, already enqueued
+    try:
+        status, cp_body, _headers = deps.control_plane.dispatch_async(target, {"input": cp_input})
+    except HttpError:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, "dispatch_error", now)
+        return _DispatchOutcome(False, None, "cp_error")
+    if status >= 400:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, f"cp_status_{status}", now)
+        return _DispatchOutcome(False, None, "cp_error")
+    if "execution_id" not in cp_body:
+        deps.reel_jobs.mark_failed(ctx, ref.job_id, "no_execution_id", now)
+        return _DispatchOutcome(False, None, "no_execution_id")
+    deps.reel_jobs.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
+    return _DispatchOutcome(True, cp_body["execution_id"], "enqueued")
+
+
+def _handle_create_from_research(deps: AppDeps) -> tuple[Response, int]:
+    """Create-from-text fan-out: for each selected output build a text submission and
+    dispatch it, preserving provenance on the DB row (never the reasoner input). One
+    idempotency sub-key per output; distinct job_id per output; multi-job response."""
+    ctx = deps.identity.resolve(request)                     # 401
+    deps.access_guard.authorize_create(ctx)                  # 403
+    body = request.get_json(silent=True) or {}
+    for key in body:                                         # forbidden identity on the create body
+        if key in FORBIDDEN_IDENTITY_FIELDS:
+            raise BadRequest(f"forbidden identity field: {key}", code="forbidden_field")
+    outputs = _validate_outputs(body)                        # 400 empty/unknown, sorted+deduped
+    run_id = _source_research_run_id(deps, ctx, body)        # 400 malformed / 404 cross-org / None
+    crid = _client_request_id(deps, body)
+    now = deps.clock.now()
+
+    jobs, enqueued = [], 0
+    for output in outputs:                                   # deterministic sorted order (C2)
+        target = TEXT_TARGET_BY_OUTPUT[output]
+        submission = build_submission(  # 400 invalid_text before any dispatch on the first leg
+            target, {"input": {"text": body.get("text")}}, source_research_run_id=run_id)
+        job_id = deps.uuid_factory()                         # DISTINCT per output (review C3)
+        result = _dispatch_one(deps, ctx, target, submission, job_id, f"{crid}:{output}", now)
+        jobs.append({"output": output, "job_id": str(job_id),
+                     "execution_id": result.execution_id, "outcome": result.outcome})
+        enqueued += 1 if result.ok else 0
+
+    if enqueued == 0:                                        # partial-failure contract (C2)
+        raise BadGateway("all create-from-research dispatches failed")
+    return jsonify({"jobs": jobs}), HTTP_ACCEPTED
+
+
+def _handle_carousel_create(deps: AppDeps) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.access_guard.authorize_create(ctx)
+    body = request.get_json(silent=True)
+    create = build_carousel_create(body)
+    if create.source_research_run_id is not None:
+        deps.reel_jobs.get_research_run(ctx, create.source_research_run_id)
+
+    carousel_id = deps.uuid_factory()
+    now = deps.clock.now()
+    crid = _client_request_id(deps, body)
+    ref = deps.carousels.insert_or_get_draft(ctx, create, carousel_id, now, crid)
+    if not ref.created:
+        return _idempotent_carousel_response(ref)
+
+    try:
+        status, cp_body, _headers = deps.control_plane.dispatch_async(
+            TARGET_CAROUSEL, {"input": create.cp_input()}
+        )
+    except HttpError:
+        deps.carousels.set_status(ctx, ref.job_id, "failed")
+        raise
+    if status >= 400:
+        deps.carousels.set_status(ctx, ref.job_id, "failed")
+        return jsonify(cp_body), status
+    if "execution_id" not in cp_body:
+        deps.carousels.set_status(ctx, ref.job_id, "failed")
+        raise BadGateway("control plane returned no execution_id")
+    deps.carousels.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
+    payload = dict(cp_body)
+    payload.setdefault("carousel_id", str(ref.job_id))
+    payload.setdefault("status", ref.status)
+    return jsonify(payload), status
+
+
+def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    view = deps.carousels.get(ctx, carousel_id)
+    return jsonify({"status": view.status, "slides": view.slides}), 200
+
+
+def _openrouter_provider():
+    import_module("reel_af.sdk_patches")
+    from agentfield.media_providers import OpenRouterProvider
+
+    return OpenRouterProvider()
+
+
+async def _call_plan2_recreate(
+    *,
+    carousel: dict,
+    idx: int,
+    note: str,
+    out_dir: str,
+    provider,
+    storage,
+    guard,
+) -> dict:
+    from reel_af.recreate import recreate_slide
+
+    return await recreate_slide(
+        carousel=carousel,
+        idx=idx,
+        note=note,
+        out_dir=out_dir,
+        provider=provider,
+        storage=storage,
+        guard=guard,
+        acknowledge_premium=True,
+    )
+
+
+def _recreate_out_dir() -> str:
+    root = Path(os.getenv("REEL_CAROUSEL_RECREATE_DIR", tempfile.gettempdir()))
+    return str(root / RECREATE_OUTPUT_DIR)
+
+
+def _carousel_manifest(carousel_id: str, view) -> dict:
+    slides = []
+    for slide in view.slides:
+        prompt = slide.get("image_prompt") or slide.get("prompt") or ""
+        slides.append({**slide, "image_prompt": prompt})
+    return {"carousel_id": carousel_id, "run_id": carousel_id, "slides": slides}
+
+
+def _resolve_recreate_result(result):
+    return asyncio.run(result) if inspect.isawaitable(result) else result
+
+
+def _handle_carousel_recreate(deps: AppDeps, carousel_id: str, slide_idx: int, recreate_fn) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.access_guard.authorize_create(ctx)
+    view = deps.carousels.get(ctx, carousel_id)  # 404 before paid work / cross-org spend
+    has_openrouter_key = "OPENROUTER_API_KEY" in os.environ
+    if not has_openrouter_key:
+        raise SchemaUnavailable(API_MESSAGES["CAROUSEL_RECREATE_OPENROUTER_REQUIRED"])
+    body = request.get_json(silent=True) or {}
+    note = body.get("note", "")
+    note = note if isinstance(note, str) else str(note)
+    note_is_blank = not note.strip()
+    if note_is_blank:
+        raise BadRequest(API_MESSAGES["CAROUSEL_RECREATE_NOTE_REQUIRED"], code="invalid_note")
+    slide_count = len(view.slides)
+    slide_out_of_range = slide_idx < 0 or slide_idx >= slide_count
+    if slide_out_of_range:
+        raise NotFound(API_MESSAGES["CAROUSEL_SLIDE_NOT_FOUND"])
+    provider = _openrouter_provider()
+    guard = CarouselHqRecreateGuard(deps.carousels, ctx)
+    carousel = _carousel_manifest(carousel_id, view)
+    out_dir = _recreate_out_dir()
+    try:
+        if recreate_fn is None:
+            slide = _resolve_recreate_result(
+                _call_plan2_recreate(
+                    carousel=carousel,
+                    idx=slide_idx,
+                    note=note,
+                    out_dir=out_dir,
+                    provider=provider,
+                    storage=deps.storage,
+                    guard=guard,
+                )
+            )
+        else:
+            slide = _resolve_recreate_result(
+                recreate_fn(
+                    ctx,
+                    carousel_id,
+                    slide_idx,
+                    note,
+                    provider=provider,
+                    storage=deps.storage,
+                    guard=guard,
+                    carousel=carousel,
+                    out_dir=out_dir,
+                )
+            )
+    except HqRecreateCapError as exc:
+        raise Conflict(str(exc), code="hq_recreate_cap_exceeded") from exc
+    deps.carousels.replace_slide(
+        ctx,
+        carousel_id,
+        slide_idx,
+        slide.get("image_ref"),
+        slide.get("prompt") or slide.get("image_prompt"),
+        slide.get("status", "ok"),
+    )
+    return jsonify(slide), 200
+
+
+def _handle_carousel_cancel(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.carousels.get(ctx, carousel_id)  # 404 before any destructive work
+    refs = deps.carousels.draft_slide_refs(ctx, carousel_id)
+    for ref in refs:
+        try:
+            deps.storage.delete(ref)
+        except HttpError:
+            deps.logger.warning("carousel_cancel_delete_failed carousel_id=%s ref=%s", carousel_id, ref)
+    deps.carousels.set_status(ctx, carousel_id, "cancelled")
+    return jsonify({"status": "cancelled"}), 200
+
+
+def _handle_carousel_finalize(deps: AppDeps, carousel_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    deps.carousels.get(ctx, carousel_id)  # 404 conceals absent/foreign rows before write
+    deps.carousels.set_status(ctx, carousel_id, "succeeded")
+    view = deps.carousels.get(ctx, carousel_id)
+    return jsonify({"status": view.status}), 200
+
+
+def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Response, int]:
+    """Serve a carousel slide image: auth → resolve org-scoped ref → confirm the
+    object exists → 302-redirect to a presigned object-storage URL. Concealment
+    (cross-org → 404) lives in ``deps.slides.resolve`` (Plan 6 real impl), not here."""
+    ctx = deps.identity.resolve(request)                       # 401 / 403 / 503 first
+    ref = deps.slides.resolve(ctx, carousel_id, slide_idx)     # 404 conceals cross-org/absent
+    if not deps.storage.exists(ref):
+        raise NotFound("slide image not found")                # 404, fail-closed (ISC-48)
+    url = deps.storage.presigned_url(ref)
+    return redirect(url), 302   # single 302: tuple status, matching sibling (Response,int) handlers
+
+
 def _handle_upload(deps: AppDeps) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
@@ -217,7 +671,7 @@ def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
     result_ref = _resolve_result_ref(execution_id, cp_body) if normalized == "succeeded" else None
     completed_at = deps.clock.now() if normalized in TERMINAL_STATUSES else None
     deps.reel_jobs.update_from_execution(ctx, execution_id, normalized, result_ref, completed_at)
-    return jsonify(_poll_response_body(cp_body, normalized)), status
+    return jsonify(_poll_response_body(cp_body, normalized, job)), status
 
 
 def _not_found() -> tuple[Response, int]:
@@ -225,16 +679,40 @@ def _not_found() -> tuple[Response, int]:
     return jsonify({"error": "not found", "code": "not_found"}), HTTP_NOT_FOUND
 
 
-def _api_router(deps: AppDeps, subpath: str) -> tuple[Response, int]:
+def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Response, int]:
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
+    if _is_carousel_create(method, subpath):
+        return _handle_carousel_create(deps)
+    if _is_research_run(method, subpath):
+        return _handle_research_run(deps)
+    if _is_create_from_research(method, subpath):
+        return _handle_create_from_research(deps)
     target = _submit_target(method, subpath)
     if target is not None:
         return _handle_submit(deps, target)
     execution_id = _poll_id(method, subpath)
     if execution_id is not None:
         return _handle_poll(deps, execution_id)
+    research_execution_id = _research_poll_id(method, subpath)
+    if research_execution_id is not None:
+        return _handle_research_poll(deps, research_execution_id)
+    carousel_id = _carousel_id(method, subpath)
+    if carousel_id is not None:
+        return _handle_carousel_get(deps, carousel_id)
+    recreate = _carousel_recreate_target(method, subpath)
+    if recreate is not None:
+        return _handle_carousel_recreate(deps, *recreate, recreate_fn)
+    finalize_id = _carousel_finalize_id(method, subpath)
+    if finalize_id is not None:
+        return _handle_carousel_finalize(deps, finalize_id)
+    cancel_id = _carousel_cancel_id(method, subpath)
+    if cancel_id is not None:
+        return _handle_carousel_cancel(deps, cancel_id)
+    slide = _slide_target(method, subpath)
+    if slide is not None:
+        return _handle_slide(deps, *slide)
     return _not_found()
 
 
@@ -334,7 +812,11 @@ def _configure_supertokens(app: Flask, deps: AppDeps) -> None:
 
 
 def create_app(
-    deps: AppDeps | None = None, *, enable_supertokens: bool = True, auth_decorator=None
+    deps: AppDeps | None = None,
+    *,
+    enable_supertokens: bool = True,
+    auth_decorator=None,
+    recreate_fn=None,
 ) -> Flask:
     deps = deps or default_deps()
     app = Flask(__name__, static_folder=None)
@@ -366,7 +848,7 @@ def create_app(
     )
     @auth(session_required=False)
     def api(subpath: str):
-        return _api_router(deps, subpath)
+        return _api_router(deps, subpath, recreate_fn=recreate_fn)
 
     @app.errorhandler(HttpError)
     def _on_http_error(err: HttpError):

@@ -8,10 +8,12 @@ that contract at the resolver, the psycopg readiness gate, and the submit route.
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import server
 from auth import ResolverIdentity
+from carousels import CarouselCreate
 from conftest import FakeControlPlane, FakeIdentity, FakeReelJobRepo, make_deps
 from deps import AuthContext, Forbidden, SchemaUnavailable, Unauthorized
 
@@ -95,6 +97,52 @@ def test_pg_reader_ensure_ready_is_503_without_database_url(monkeypatch):
 
     with pytest.raises(SchemaUnavailable):
         PgMembershipReader().ensure_ready()
+
+
+def test_required_schema_includes_carousel_read_model():
+    from pg import REQUIRED_SCHEMA
+
+    assert REQUIRED_SCHEMA["carousel"] == {
+        "id",
+        "org_id",
+        "created_by",
+        "client_request_id",
+        "status",
+        "source_research_run_id",
+        "hq_recreate_count",
+        "execution_id",
+        "created_at",
+    }
+    assert REQUIRED_SCHEMA["carousel_slide"] == {
+        "carousel_id",
+        "org_id",
+        "idx",
+        "image_ref",
+        "prompt",
+        "status",
+    }
+
+
+def test_pg_carousel_repo_methods_fail_closed_without_database_url(monkeypatch):
+    monkeypatch.delenv("DEEPRESEARCH_DATABASE_URL", raising=False)
+    from pg import PgCarouselRepo
+
+    repo = PgCarouselRepo()
+    ctx = AuthContext(
+        user_id=uuid.uuid4(),
+        org_id=uuid.uuid4(),
+        role="member",
+        supertokens_user_id="st-x",
+    )
+
+    with pytest.raises(SchemaUnavailable):
+        repo.insert_or_get_draft(
+            ctx,
+            CarouselCreate(source_text="doc", preset="carousel-default"),
+            uuid.uuid4(),
+            datetime.now(timezone.utc),
+            "K",
+        )
 
 
 # ── submit route fails closed on schema-unavailable: 503, no row, no CP (B2) ──

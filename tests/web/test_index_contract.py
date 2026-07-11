@@ -134,6 +134,9 @@ def test_composite_preset_details_match_render_config_exactly():
 
     by_id = {p["id"]: p for p in cfg["presets"]}
     for preset_id, raw in source.items():
+        if raw.get("kind") == "carousel":
+            assert preset_id not in by_id
+            continue
         assert by_id[preset_id]["details"] == _expected_preset_details(raw)
 
 
@@ -232,11 +235,22 @@ def test_visible_preset_targets_match_backend_allowlist():
     html = INDEX_HTML.read_text(encoding="utf-8")
     cfg = _config(html)
 
-    from reel_jobs import ALLOWLISTED_TARGETS, TARGET_COMPOSITE, TARGET_TOPIC
+    from reel_jobs import (
+        ALLOWLISTED_TARGETS,
+        TARGET_COMPOSITE,
+        TARGET_TEXT_CAROUSEL,
+        TARGET_TEXT_REEL,
+        TARGET_TOPIC,
+    )
 
     targets = {p["target"] for p in cfg["presets"]}
     assert targets == {TARGET_COMPOSITE, TARGET_TOPIC}
-    assert targets == set(ALLOWLISTED_TARGETS)
+    assert set(ALLOWLISTED_TARGETS) == {
+        TARGET_COMPOSITE,
+        TARGET_TOPIC,
+        TARGET_TEXT_CAROUSEL,
+        TARGET_TEXT_REEL,
+    }
 
 
 def test_ui_status_aliases_are_known_by_backend_normalizer():

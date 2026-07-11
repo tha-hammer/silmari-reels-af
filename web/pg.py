@@ -16,9 +16,10 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 
-from deps import RepositoryUnavailable, SchemaUnavailable
-from reel_jobs import ReelJobRef, ReelJobStatus
+from deps import NotFound, RepositoryUnavailable, SchemaUnavailable
+from reel_jobs import ReelJobRef, ReelJobStatus, ResearchRunRef
 
 _VALID_ROLES = ("owner", "admin", "member", "viewer")
 
@@ -37,12 +38,19 @@ REQUIRED_SCHEMA: dict[str, set[str]] = {
     "organization": {"id", "status"},
     "membership": {"org_id", "user_id", "role", "status"},
     "role_definition": {"role", "permissions"},
-    "research_run": {"id", "org_id", "created_by", "status"},
+    # CI-1: insert_research_run writes 6 columns; fail closed at startup (503) if the
+    # root migration lacks execution_id/created_at rather than 500 on the first INSERT.
+    "research_run": {"id", "org_id", "created_by", "execution_id", "status", "created_at"},
     "reel_job": {
         "id", "org_id", "created_by", "client_request_id", "title", "source_url", "topic",
         "source_research_run_id", "params", "status", "result_ref",
         "execution_id", "created_at", "completed_at",
     },
+    "carousel": {
+        "id", "org_id", "created_by", "client_request_id", "status",
+        "source_research_run_id", "hq_recreate_count", "execution_id", "created_at",
+    },
+    "carousel_slide": {"carousel_id", "org_id", "idx", "image_ref", "prompt", "status"},
 }
 
 
@@ -248,13 +256,15 @@ class PgReelJobRepo(_SharedSchema):
         return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="failed")
 
     def get_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
-        from deps import NotFound
-
         conn = _connect(_database_url())
         try:
             with conn.cursor() as cur:
+                # ISC-25 (GAP1): SELECT source_research_run_id — the writer binds it
+                # (insert_or_get_queued) but this reader used to omit it, so provenance
+                # was silently null on read. Surfacing it here closes the seam.
                 cur.execute(
-                    "select id, org_id, created_by, status, execution_id, result_ref, completed_at "
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
                     "from deepresearch.reel_job where execution_id = %s and org_id = %s",
                     (execution_id, ctx.org_id),
                 )
@@ -266,6 +276,7 @@ class PgReelJobRepo(_SharedSchema):
         return ReelJobRef(
             job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
             execution_id=row[4], result_ref=row[5], completed_at=row[6],
+            source_research_run_id=row[7],
         )
 
     def update_from_execution(
@@ -299,6 +310,54 @@ class PgReelJobRepo(_SharedSchema):
             conn.close()
         return affected
 
+    # ─────────────── research_run persistence (Plan 4, ISC-24) ───────────────
+
+    def insert_research_run(self, ctx, run_id, execution_id, status, now):  # pragma: no cover - integration
+        # ROW-FIRST (CI-3): execution_id may be None at insert (dispatch not yet
+        # attempted); the route attaches it via update_research_status after dispatch.
+        self._update(
+            "insert into deepresearch.research_run "
+            "(id, org_id, created_by, execution_id, status, created_at) "
+            "values (%s,%s,%s,%s,%s,%s)",
+            (run_id, ctx.org_id, ctx.user_id, execution_id, status, now),
+        )
+
+    def update_research_status(self, ctx, run_id, status=None, execution_id=None):  # pragma: no cover - integration
+        # Terminal monotonicity: never downgrade a terminal run (mirrors
+        # update_from_execution). Attach execution_id only when supplied. Org-scoped.
+        self._update(
+            "update deepresearch.research_run set "
+            "status = coalesce(%s, status), "
+            "execution_id = coalesce(%s, execution_id) "
+            "where id = %s and org_id = %s "
+            "and status not in ('succeeded','failed','cancelled')",
+            (status, execution_id, run_id, ctx.org_id),
+        )
+
+    def get_research_run(self, ctx, run_id):  # pragma: no cover - integration
+        return self._research_run_one("where id = %s and org_id = %s", (run_id, ctx.org_id))
+
+    def get_research_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
+        return self._research_run_one(
+            "where execution_id = %s and org_id = %s", (execution_id, ctx.org_id)
+        )
+
+    def _research_run_one(self, where: str, params: tuple):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id "
+                    "from deepresearch.research_run " + where,
+                    params,
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("research run not found")  # conceal cross-org / absent
+        return ResearchRunRef(*row)
+
     def _update(self, sql: str, params: tuple):  # pragma: no cover - integration
         conn = _connect(_database_url())
         try:
@@ -307,6 +366,219 @@ class PgReelJobRepo(_SharedSchema):
                 conn.commit()
         finally:
             conn.close()
+
+
+class PgCarouselRepo(_SharedSchema):
+    """Carousel read-model repository. All reads/writes are org-scoped."""
+
+    def insert_or_get_draft(
+        self, ctx, create, carousel_id, now, client_request_id
+    ):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.carousel "
+                    "(id, org_id, created_by, client_request_id, status, "
+                    " source_research_run_id, created_at) "
+                    "values (%s,%s,%s,%s,'draft',%s,%s) "
+                    "on conflict (org_id, created_by, client_request_id) do nothing "
+                    "returning id",
+                    (
+                        carousel_id, ctx.org_id, ctx.user_id, client_request_id,
+                        create.source_research_run_id, now,
+                    ),
+                )
+                inserted = cur.fetchone()
+                if inserted is not None:
+                    conn.commit()
+                    return ReelJobRef(
+                        job_id=carousel_id,
+                        org_id=ctx.org_id,
+                        created_by=ctx.user_id,
+                        status="draft",
+                        created=True,
+                        source_research_run_id=create.source_research_run_id,
+                    )
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, "
+                    "source_research_run_id "
+                    "from deepresearch.carousel "
+                    "where org_id = %s and created_by = %s and client_request_id = %s",
+                    (ctx.org_id, ctx.user_id, client_request_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("carousel not found")
+        return ReelJobRef(
+            job_id=row[0],
+            org_id=row[1],
+            created_by=row[2],
+            status=row[3],
+            execution_id=row[4],
+            source_research_run_id=row[5],
+            created=False,
+        )
+
+    def attach_execution_id(self, ctx, carousel_id, execution_id):  # pragma: no cover
+        row = self._one(
+            "update deepresearch.carousel set execution_id = %s "
+            "where id = %s and org_id = %s "
+            "returning id, org_id, created_by, status, execution_id, source_research_run_id",
+            (execution_id, carousel_id, ctx.org_id),
+        )
+        return ReelJobRef(
+            job_id=row[0],
+            org_id=row[1],
+            created_by=row[2],
+            status=row[3],
+            execution_id=row[4],
+            source_research_run_id=row[5],
+            created=False,
+        )
+
+    def get(self, ctx, carousel_id):  # pragma: no cover
+        status = self._one(
+            "select status from deepresearch.carousel where id = %s and org_id = %s",
+            (carousel_id, ctx.org_id),
+        )[0]
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select idx, image_ref, prompt, status "
+                    "from deepresearch.carousel_slide "
+                    "where carousel_id = %s and org_id = %s "
+                    "order by idx",
+                    (carousel_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return SimpleNamespace(
+            status=status,
+            slides=[
+                {"idx": idx, "image_ref": ref, "prompt": prompt, "status": slide_status}
+                for idx, ref, prompt, slide_status in rows
+            ],
+        )
+
+    def slide_ref(self, ctx, carousel_id, slide_idx) -> str:  # pragma: no cover
+        return self._one(
+            "select image_ref from deepresearch.carousel_slide "
+            "where carousel_id = %s and org_id = %s and idx = %s and image_ref is not null",
+            (carousel_id, ctx.org_id, slide_idx),
+        )[0]
+
+    def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status):  # pragma: no cover
+        self._one(
+            "update deepresearch.carousel_slide "
+            "set image_ref = %s, prompt = %s, status = %s "
+            "where carousel_id = %s and org_id = %s and idx = %s "
+            "returning idx",
+            (ref, prompt, status, carousel_id, ctx.org_id, slide_idx),
+        )
+
+    def set_status(self, ctx, carousel_id, status):  # pragma: no cover
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update deepresearch.carousel set status = %s "
+                    "where id = %s and org_id = %s "
+                    "and status not in ('succeeded','failed','cancelled') "
+                    "returning status",
+                    (status, carousel_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    cur.execute(
+                        "select status from deepresearch.carousel "
+                        "where id = %s and org_id = %s",
+                        (carousel_id, ctx.org_id),
+                    )
+                    row = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("carousel not found")
+
+    def draft_slide_refs(self, ctx, carousel_id) -> list[str]:  # pragma: no cover
+        status = self._one(
+            "select status from deepresearch.carousel where id = %s and org_id = %s",
+            (carousel_id, ctx.org_id),
+        )[0]
+        if status in ("succeeded", "failed", "cancelled"):
+            return []
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select image_ref from deepresearch.carousel_slide "
+                    "where carousel_id = %s and org_id = %s and image_ref is not null "
+                    "order by idx",
+                    (carousel_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [row[0] for row in rows]
+
+    def register_hq_recreate(self, ctx, carousel_id) -> int:  # pragma: no cover
+        from carousels import HqRecreateCapError
+
+        from reel_af.recreate import HQ_RECREATE_CAP
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update deepresearch.carousel "
+                    "set hq_recreate_count = hq_recreate_count + 1 "
+                    "where id = %s and org_id = %s and hq_recreate_count < %s "
+                    "returning hq_recreate_count",
+                    (carousel_id, ctx.org_id, HQ_RECREATE_CAP),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    conn.commit()
+                    return row[0]
+                cur.execute(
+                    "select hq_recreate_count from deepresearch.carousel "
+                    "where id = %s and org_id = %s",
+                    (carousel_id, ctx.org_id),
+                )
+                existing = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if existing is None:
+            raise NotFound("carousel not found")
+        raise HqRecreateCapError(f"HQ recreate cap reached for {carousel_id}")
+
+    def hq_recreate_count(self, ctx, carousel_id) -> int:  # pragma: no cover
+        return self._one(
+            "select hq_recreate_count from deepresearch.carousel "
+            "where id = %s and org_id = %s",
+            (carousel_id, ctx.org_id),
+        )[0]
+
+    def _one(self, sql: str, params: tuple):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                row = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("carousel not found")
+        return row
 
 
 def build_identity(reader: PgMembershipReader | None = None):

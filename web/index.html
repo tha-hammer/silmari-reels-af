@@ -15,6 +15,15 @@
     "base": "",
     "executePath": "/api/v1/execute/async/{target}",
     "pollPath": "/api/v1/executions/{id}",
+    "researchRunPath": "/api/v1/research/run",
+    "researchPollPath": "/api/v1/research/{id}",
+    "createFromTextPath": "/api/v1/research/create",
+    "carouselCreatePath": "/api/v1/carousels",
+    "carouselPath": "/api/v1/carousels/{id}",
+    "carouselSlidePath": "/api/v1/carousels/{id}/slides/{idx}",
+    "carouselRecreatePath": "/api/v1/carousels/{id}/slides/{idx}/recreate",
+    "carouselFinalizePath": "/api/v1/carousels/{id}/finalize",
+    "carouselCancelPath": "/api/v1/carousels/{id}/cancel",
     "uploadPath": "/api/v1/uploads",
     "healthPath": "/health",
     "pollIntervalMs": 2500,
@@ -76,12 +85,38 @@
     "dropTitle": "MARK IN",
     "dropHint": "Drop a video file — or paste a link below.",
     "urlPlaceholder": "https://youtube.com/watch?v=…  ·  or any video URL",
+    "researchQueryPlaceholder": "what should we research?",
+    "researchDocPlaceholder": "research document appears here - edit before creating",
+    "researchCreate": "CREATE",
+    "researching": "RESEARCHING",
+    "creating": "CREATING",
     "roll": "ROLL",
     "rolling": "ROLLING",
     "reset": "NEW TAKE"
   },
+  "carouselReviewTitle": "CAROUSEL REVIEW",
+  "carouselReviewAriaLabel": "Carousel review",
+  "carouselCancelLabel": "CANCEL",
+  "carouselCreateLabel": "CREATE",
+  "carouselRecreateLabel": "RECREATE",
+  "carouselRecreatingLabel": "RECREATING",
+  "carouselNotePlaceholder": "note for this image",
+  "carouselDefaultPreset": "carousel-default",
+  "carouselOutputKey": "carousel",
+  "carouselOutcomeReview": "review",
+  "carouselClientRequestSuffix": "carousel-review",
+  "carouselDraftStatus": "draft",
+  "carouselSucceededStatus": "succeeded",
+  "carouselTerminalStatuses": ["succeeded", "failed", "cancelled", "canceled"],
+  "carouselReadyLog": "carousel {id} ready for review",
+  "carouselRecreatedLog": "slide {idx} recreated",
+  "carouselCancelledLog": "carousel {id} cancelled",
+  "carouselFinalizedLog": "carousel {id} finalized",
+  "carouselSlideAlt": "Slide {idx}",
+  "carouselSlideLabel": "SLIDE {idx}",
   "stages": [
     { "key": "queued",     "label": "SLATE",      "note": "job on the bench" },
+    { "key": "research",   "label": "RESEARCH",   "note": "briefing the room" },
     { "key": "ingest",     "label": "INGEST",     "note": "pulling the source" },
     { "key": "transcribe", "label": "TRANSCRIBE", "note": "reading the words" },
     { "key": "render",     "label": "RENDER",     "note": "printing overlays" },
@@ -269,6 +304,94 @@
   .slate .row:focus-within { border-color: var(--grease); }
   input#file { display: none; }
 
+  /* research create surface */
+  .research { display: grid; gap: 12px; margin-top: 16px; border: 1px solid var(--line-2); background: var(--film-2); padding: 14px; }
+  .research[hidden] { display: none; }
+  .research-modes { display: inline-flex; gap: 4px; padding: 4px; border: 1px solid var(--line); width: max-content; }
+  .research-modes button {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--print-dim); background: none; border: none; padding: 8px 10px; cursor: pointer;
+  }
+  .research-modes button[aria-selected="true"] { background: var(--print); color: var(--film); font-weight: 700; }
+  .research .row { display: flex; border: 1px solid var(--line-2); background: var(--film); }
+  .research .tick { font-family: var(--mono); font-size: 11px; color: var(--grease); padding: 0 14px; display: grid; place-items: center; border-right: 1px solid var(--line); letter-spacing: 0.1em; }
+  .research input[type="text"] {
+    flex: 1; background: none; border: none; color: var(--print); font-family: var(--mono);
+    font-size: 14px; padding: 16px 14px; outline: none; letter-spacing: 0.01em; min-width: 0;
+  }
+  .research input::placeholder, .research textarea::placeholder { color: var(--print-fog); }
+  .research .row:focus-within, .research textarea:focus { border-color: var(--grease); }
+  .research textarea {
+    min-height: 180px; resize: vertical; background: var(--film); color: var(--print);
+    border: 1px solid var(--line-2); padding: 14px; font-family: var(--mono); font-size: 12px;
+    line-height: 1.55; outline: none;
+  }
+  .outputs { display: flex; flex-wrap: wrap; gap: 10px; }
+  .outputs label {
+    display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--line);
+    padding: 9px 11px; font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em;
+    color: var(--print-dim); cursor: pointer;
+  }
+  .outputs input { accent-color: var(--grease); }
+  .research .roll { margin-top: 0; padding: 16px; font-size: 15px; }
+
+  /* carousel review */
+  .carousel-review {
+    margin-top: 24px; border: 1px solid var(--line-2); background: var(--film-2);
+  }
+  .carousel-review[hidden] { display: none; }
+  .carousel-top {
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    padding: 12px 14px; border-bottom: 1px solid var(--line);
+  }
+  .carousel-title {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.3em;
+    color: var(--print-fog); text-transform: uppercase;
+  }
+  .carousel-actions { display: flex; gap: 8px; }
+  .carousel-actions button, .carousel-slide button {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    border: 1px solid var(--line-2); background: var(--film); color: var(--print);
+    padding: 9px 11px; cursor: pointer;
+  }
+  .carousel-actions button.primary, .carousel-slide button {
+    background: var(--grease); color: var(--film); border-color: var(--grease);
+  }
+  .carousel-actions button:disabled, .carousel-slide button:disabled {
+    background: var(--film-3); color: var(--print-fog); border-color: var(--line);
+    cursor: not-allowed;
+  }
+  .carousel-scroll {
+    max-height: 680px; overflow-y: auto; display: grid; gap: 14px; padding: 14px;
+  }
+  .carousel-slide {
+    display: grid; grid-template-columns: minmax(150px, 220px) minmax(0, 1fr);
+    gap: 14px; align-items: stretch; border: 1px solid var(--line); background: var(--film);
+    padding: 12px;
+  }
+  .carousel-frame { aspect-ratio: 4 / 5; background: var(--film-3); overflow: hidden; }
+  .carousel-frame img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .carousel-meta { display: grid; gap: 10px; min-width: 0; }
+  .carousel-meta .idx {
+    font-family: var(--mono); font-size: 10px; letter-spacing: 0.24em;
+    color: var(--amber); text-transform: uppercase;
+  }
+  .carousel-meta .prompt {
+    font-family: var(--body); font-size: 13px; color: var(--print-dim);
+    line-height: 1.5; overflow-wrap: anywhere;
+  }
+  .carousel-meta textarea {
+    min-height: 76px; resize: vertical; background: var(--film-2); color: var(--print);
+    border: 1px solid var(--line-2); padding: 10px; font-family: var(--mono);
+    font-size: 12px; line-height: 1.45; outline: none;
+  }
+  .carousel-meta textarea:focus { border-color: var(--grease); }
+  @media (max-width: 700px) {
+    .carousel-slide { grid-template-columns: 1fr; }
+    .carousel-top { align-items: stretch; flex-direction: column; }
+    .carousel-actions { justify-content: flex-end; }
+  }
+
   /* right column — controls */
   .controls { opacity: 0; animation: rise 0.8s 0.44s cubic-bezier(.2,.7,.2,1) forwards; }
   .panel { border: 1px solid var(--line); background: var(--panel); backdrop-filter: blur(4px); }
@@ -395,6 +518,7 @@
         <div class="modes" role="tablist">
           <button role="tab" aria-selected="true" data-mode="file">DROP FILE</button>
           <button role="tab" aria-selected="false" data-mode="url">FROM URL</button>
+          <button role="tab" aria-selected="false" data-mode="research">FROM RESEARCH</button>
         </div>
 
         <div class="viewport-wrap">
@@ -417,6 +541,28 @@
           </div>
         </div>
         <input type="file" id="file" accept="video/*" />
+
+        <!-- Create-from-research surface (Plan 5, ISC-28..36). -->
+        <div class="research" id="researchSurface" hidden>
+          <div class="research-modes" role="tablist" aria-label="Research create mode">
+            <button type="button" role="tab" aria-selected="true" data-research-mode="automatic">AUTO</button>
+            <button type="button" role="tab" aria-selected="false" data-research-mode="full_control">FULL CONTROL</button>
+          </div>
+          <div class="row">
+            <span class="tick">ASK▸</span>
+            <input type="text" id="researchQuery" spellcheck="false" autocomplete="off"
+                   placeholder="what should we research?" />
+          </div>
+          <textarea id="researchDoc" placeholder="research document appears here — edit before creating"
+                    spellcheck="false" hidden></textarea>
+          <div class="outputs" id="researchOutputs" role="group" aria-label="Outputs to create">
+            <label><input type="checkbox" data-output="video" /> VIDEO</label>
+            <label><input type="checkbox" data-output="carousel" /> CAROUSEL</label>
+          </div>
+          <button class="roll" id="createFromResearch" disabled>
+            <span class="rec"></span><span id="createFromResearchLabel">CREATE</span>
+          </button>
+        </div>
       </div>
 
       <!-- right: controls -->
@@ -446,6 +592,27 @@
         <div class="hint" id="hint">select a source + format, then roll</div>
       </div>
     </div>
+
+    <section class="carousel-review" id="carouselReview" hidden>
+      <div class="carousel-top">
+        <div class="carousel-title" id="carouselTitle"></div>
+        <div class="carousel-actions">
+          <button type="button" id="carouselCancel"></button>
+          <button type="button" class="primary" id="carouselFinalize"></button>
+        </div>
+      </div>
+      <div class="carousel-scroll" id="carouselSlides">
+        <article class="carousel-slide" data-carousel-slide-template hidden>
+          <div class="carousel-frame"><img alt="" /></div>
+          <div class="carousel-meta">
+            <div class="idx"></div>
+            <div class="prompt"></div>
+            <textarea></textarea>
+            <button type="button" data-carousel-action="recreate"></button>
+          </div>
+        </article>
+      </div>
+    </section>
 
     <!-- console -->
     <div class="console" id="console">
@@ -487,6 +654,7 @@
   const SERVER_ERROR_MAX = 599;
   const MILLISECONDS_PER_SECOND = 1000;
   const NO_DOWNLOAD_HREF = "#";
+  const DISPLAY_INDEX_OFFSET = 1;
 
   const state = {
     mode: MODE_FILE,
@@ -494,7 +662,16 @@
     file: null,
     busy: false,
     count: CFG.ui.countDefault,
+    researchMode: "automatic",
+    researchRunId: null,
+    researchExecId: null,
+    researchDoc: "",
+    carouselId: null,
+    carouselView: null
   };
+  function template(text, values) {
+    return String(text).replace(/\{([a-zA-Z0-9_]+)\}/g, (_, key) => String(values[key] ?? ""));
+  }
 
   /* ── timecode clock (HH:MM:SS:FF @ 24fps feel) ── */
   const pad = (n, w = 2) => String(n).padStart(w, "0");
@@ -511,7 +688,20 @@
   $("dropTitle").textContent = CFG.copy.dropTitle;
   $("dropHint").textContent = CFG.copy.dropHint;
   $("url").placeholder = CFG.copy.urlPlaceholder;
+  $("researchQuery").placeholder = CFG.copy.researchQueryPlaceholder;
+  $("researchDoc").placeholder = CFG.copy.researchDocPlaceholder;
+  $("createFromResearchLabel").textContent = CFG.copy.researchCreate;
+  $("carouselReview").setAttribute("aria-label", CFG.carouselReviewAriaLabel);
+  $("carouselTitle").textContent = CFG.carouselReviewTitle;
+  $("carouselCancel").textContent = CFG.carouselCancelLabel;
+  $("carouselFinalize").textContent = CFG.carouselCreateLabel;
   $("rollLabel").textContent = CFG.copy.roll;
+
+  const carouselSlideTemplate = document.querySelector("[data-carousel-slide-template]");
+  if (carouselSlideTemplate) {
+    carouselSlideTemplate.querySelector("textarea").placeholder = CFG.carouselNotePlaceholder;
+    carouselSlideTemplate.querySelector("[data-carousel-action]").textContent = CFG.carouselRecreateLabel;
+  }
 
   /* ── presets ── */
   function renderPresets() {
@@ -540,12 +730,11 @@
     if (state.preset.kind === KIND_TOPIC) {
       state.mode = MODE_URL;
       document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x.dataset.mode === MODE_URL));
-      $("slate").classList.add("on");
       $("url").placeholder = "a topic or phrase → reel";
-      $("dropHint").textContent = "Type a topic below, then roll.";
     } else {
       $("url").placeholder = CFG.copy.urlPlaceholder;
     }
+    syncModeUi();
   }
 
   /* ── preset detail rows (config-sourced, textContent only — no innerHTML) ── */
@@ -642,10 +831,76 @@
     b.onclick = () => {
       state.mode = b.dataset.mode;
       document.querySelectorAll(".modes button").forEach((x) => x.setAttribute("aria-selected", x === b));
-      $("slate").classList.toggle("on", state.mode === "url");
-      $("dropHint").textContent = state.mode === "url" ? "Paste a video link in the slate below." : CFG.copy.dropHint;
+      syncModeUi();
     };
   });
+
+  function syncModeUi() {
+    const isUrl = state.mode === "url";
+    const isResearch = state.mode === "research";
+    $("slate").classList.toggle("on", isUrl);
+    $("researchSurface").hidden = !isResearch;
+    if (isResearch) {
+      $("dropHint").textContent = "Run research, then create a video and carousel.";
+    } else if (state.preset.kind === "topic") {
+      $("dropHint").textContent = "Type a topic below, then roll.";
+    } else {
+      $("dropHint").textContent = isUrl ? "Paste a video link in the slate below." : CFG.copy.dropHint;
+    }
+    updateResearchModeUi();
+  }
+
+  /* ── research create surface ── */
+  document.querySelectorAll("[data-research-mode]").forEach((b) => {
+    b.onclick = () => {
+      state.researchMode = b.dataset.researchMode;
+      updateResearchModeUi();
+    };
+  });
+  $("researchQuery").addEventListener("input", () => {
+    state.researchRunId = null;
+    state.researchExecId = null;
+    state.researchDoc = "";
+    $("researchDoc").value = "";
+    updateResearchModeUi();
+  });
+  $("researchDoc").addEventListener("input", updateResearchModeUi);
+  document.querySelectorAll("#researchOutputs input[data-output]").forEach((x) => {
+    x.addEventListener("change", updateResearchModeUi);
+  });
+  $("createFromResearch").onclick = createFromResearchFlow;
+  $("carouselCancel").onclick = cancelCarousel;
+  $("carouselFinalize").onclick = finalizeCarousel;
+  $("carouselSlides").addEventListener("click", (ev) => {
+    const button = ev.target.closest("[data-carousel-action='recreate']");
+    if (!button || button.closest("[data-carousel-slide-template]")) return;
+    const idx = Number(button.dataset.idx);
+    if (!Number.isInteger(idx)) return;
+    const slide = button.closest(".carousel-slide");
+    const note = slide ? slide.querySelector("textarea").value : "";
+    recreateCarouselSlide(idx, note, button);
+  });
+
+  function selectedResearchOutputs() {
+    if (state.researchMode === "automatic") return ["video", "carousel"];
+    return Array.from(document.querySelectorAll("#researchOutputs input[data-output]:checked"))
+      .map((x) => x.dataset.output);
+  }
+
+  function updateResearchModeUi() {
+    const full = state.researchMode === "full_control";
+    const hasDoc = Boolean(state.researchDoc);
+    document.querySelectorAll("[data-research-mode]").forEach((b) => {
+      b.setAttribute("aria-selected", b.dataset.researchMode === state.researchMode);
+    });
+    $("researchDoc").hidden = !full || !hasDoc;
+    $("researchOutputs").hidden = !full || !hasDoc;
+    const queryReady = Boolean($("researchQuery").value.trim());
+    const textReady = full && hasDoc ? Boolean($("researchDoc").value.trim()) : queryReady;
+    const outputsReady = !full || !hasDoc || selectedResearchOutputs().length > 0;
+    $("createFromResearchLabel").textContent = full && !hasDoc ? "RESEARCH" : CFG.copy.researchCreate;
+    $("createFromResearch").disabled = state.busy || !queryReady || !textReady || !outputsReady;
+  }
 
   /* ── file drop ── */
   const vp = $("viewport");
@@ -807,6 +1062,254 @@
     }
   }
 
+  async function createFromResearchFlow() {
+    if (state.busy) return;
+    const query = $("researchQuery").value.trim();
+    if (!query) return flash("enter a research query");
+
+    setBusy(true);
+    $("console").classList.add("on");
+    $("result").classList.remove("on");
+    $("log").innerHTML = ""; renderTrack();
+    const clientRequestId = newClientRequestId();
+    try {
+      if (!state.researchDoc || !state.researchRunId) {
+        advanceTo("research");
+        logLine(`research: ${query}`);
+        const run = await runResearch(query, clientRequestId);
+        state.researchRunId = run.research_run_id;
+        state.researchExecId = run.execution_id;
+        $("jobId").textContent = state.researchExecId;
+        logLine(`research execution ${state.researchExecId} accepted`, "ok");
+        const doc = await pollResearch(state.researchExecId);
+        state.researchDoc = researchDocumentText(doc);
+        $("researchDoc").value = state.researchDoc;
+        if (!state.researchDoc.trim()) throw new Error("research returned no document text");
+        markStage("research", true);
+        if (state.researchMode === "full_control") {
+          logLine("research document ready for edits", "ok");
+          return;
+        }
+      }
+
+      const outputs = selectedResearchOutputs();
+      if (!outputs.length) return flash("select an output");
+      const text = state.researchMode === "full_control" ? $("researchDoc").value : state.researchDoc;
+      if (!text.trim()) throw new Error("research document is empty");
+      advanceTo("render");
+      logLine(`creating: ${outputs.join(" + ")}`);
+      const jobs = [];
+      const fanoutOutputs = outputs.filter((output) => output !== CFG.carouselOutputKey);
+      if (fanoutOutputs.length) {
+        jobs.push(...await postCreateFromResearch(text, fanoutOutputs, state.researchRunId, clientRequestId));
+      }
+      const shouldCreateCarousel = outputs.includes(CFG.carouselOutputKey);
+      if (shouldCreateCarousel) {
+        jobs.push(await createCarouselReview(text, state.researchRunId, clientRequestId));
+      }
+      const labels = jobs.map((j) => `${j.output}:${j.execution_id || j.carousel_id || j.job_id}`);
+      $("jobId").textContent = labels.join(", ");
+      $("resultPath").textContent = labels.join(" · ");
+      const a = $("resultLink"); a.href = "#"; a.style.display = "none";
+      $("result").classList.add("on");
+      advanceTo("done");
+      logLine(`created ${jobs.length} job${jobs.length === 1 ? "" : "s"}`, "ok");
+    } catch (err) {
+      if (err && err.code === "unauthenticated") return;
+      logLine(String(err && err.message || err), "err");
+      advanceTo("");
+    } finally {
+      setBusy(false);
+      updateResearchModeUi();
+    }
+  }
+
+  async function runResearch(query, clientRequestId) {
+    const r = await fetch(url(CFG.api.researchRunPath), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `${clientRequestId}:research` },
+      body: JSON.stringify({ query }),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const body = await r.text();
+    const j = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`research rejected (${r.status}): ${body.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    if (!j.execution_id || !j.research_run_id) throw new Error("research returned no execution_id");
+    return j;
+  }
+
+  async function pollResearch(id) {
+    const start = Date.now();
+    let last = null;
+    while (true) {
+      if (Date.now() - start > CFG.api.timeoutMs) throw new Error("research timed out");
+      await sleep(CFG.api.pollIntervalMs);
+      let j;
+      try { j = await (await fetch(url(CFG.api.researchPollPath, { id }))).json(); }
+      catch { logLine("research poll error — retrying"); continue; }
+      const status = String(j.status || "?");
+      if (status !== last) { last = status; advanceTo("research"); logLine(`research status → ${status}`); }
+      if (status === "succeeded") return j;
+      if (CFG.ui.terminalFailureStatuses.includes(status)) {
+        throw new Error(`research ${status}: ${JSON.stringify(j.error || "").slice(0, CFG.ui.maxErrorBodyChars)}`);
+      }
+    }
+  }
+
+  function researchDocumentText(doc) {
+    return String(doc.markdown || doc.html || "");
+  }
+
+  async function postCreateFromResearch(text, outputs, researchRunId, clientRequestId) {
+    const body = { text, outputs };
+    if (researchRunId) body.research_run_id = researchRunId;
+    const r = await fetch(url(CFG.api.createFromTextPath), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": `${clientRequestId}:create` },
+      body: JSON.stringify(body),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`create rejected (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    if (!Array.isArray(j.jobs) || !j.jobs.length) throw new Error("create returned no jobs");
+    return j.jobs;
+  }
+
+  async function getJson(path, subs = {}) {
+    const r = await fetch(url(path, subs), { method: "GET" });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`request failed (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    return j;
+  }
+
+  async function postJson(path, body = {}, subs = {}, clientRequestId = "") {
+    const headers = { "Content-Type": "application/json" };
+    if (clientRequestId) headers["Idempotency-Key"] = clientRequestId;
+    const r = await fetch(url(path, subs), {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+    if (r.status === 401) { goToLogin(); throw Object.assign(new Error("unauthenticated"), { code: "unauthenticated" }); }
+    const raw = await r.text();
+    const j = (() => { try { return JSON.parse(raw); } catch { return {}; } })();
+    if (!r.ok) throw new Error(`request failed (${r.status}): ${raw.slice(0, CFG.ui.maxErrorBodyChars)}`);
+    return j;
+  }
+
+  async function createCarouselReview(text, researchRunId, clientRequestId) {
+    const body = { source_text: text, preset: CFG.carouselDefaultPreset };
+    if (researchRunId) body.research_run_id = researchRunId;
+    const created = await postJson(
+      CFG.api.carouselCreatePath,
+      body,
+      {},
+      `${clientRequestId}:${CFG.carouselClientRequestSuffix}`,
+    );
+    const carouselId = created.carousel_id || created.id;
+    if (!carouselId) throw new Error("carousel create returned no carousel_id");
+    state.carouselId = carouselId;
+    $("jobId").textContent = created.execution_id || carouselId;
+    await loadCarousel(carouselId);
+    logLine(template(CFG.carouselReadyLog, { id: carouselId }), "ok");
+    return {
+      output: CFG.carouselOutputKey,
+      carousel_id: carouselId,
+      execution_id: created.execution_id,
+      outcome: CFG.carouselOutcomeReview,
+    };
+  }
+
+  async function loadCarousel(carouselId) {
+    const view = await getJson(CFG.api.carouselPath, { id: carouselId });
+    state.carouselId = carouselId;
+    state.carouselView = view;
+    renderCarousel(view);
+    return view;
+  }
+
+  function renderCarousel(view) {
+    const slides = Array.isArray(view.slides) ? [...view.slides] : [];
+    slides.sort((a, b) => Number(a.idx) - Number(b.idx));
+    $("carouselSlides").replaceChildren();
+    for (const slide of slides) renderCarouselSlide(slide);
+    $("carouselReview").hidden = false;
+    const terminal = CFG.carouselTerminalStatuses.includes(String(view.status || ""));
+    $("carouselCancel").disabled = state.busy || terminal;
+    $("carouselFinalize").disabled = state.busy || terminal || slides.length === 0;
+  }
+
+  function renderCarouselSlide(slide) {
+    const idx = Number(slide.idx);
+    const row = carouselSlideTemplate.cloneNode(true);
+    row.hidden = false;
+    row.removeAttribute("data-carousel-slide-template");
+    const img = row.querySelector("img");
+    img.src = url(CFG.api.carouselSlidePath, { id: state.carouselId, idx });
+    const displayIdx = pad(idx + DISPLAY_INDEX_OFFSET);
+    img.alt = template(CFG.carouselSlideAlt, { idx: displayIdx });
+    row.querySelector(".idx").textContent = template(CFG.carouselSlideLabel, { idx: displayIdx });
+    row.querySelector(".prompt").textContent = slide.prompt || slide.image_prompt || "";
+    row.querySelector("textarea").placeholder = CFG.carouselNotePlaceholder;
+    const button = row.querySelector("[data-carousel-action]");
+    button.dataset.idx = String(idx);
+    button.textContent = CFG.carouselRecreateLabel;
+    button.disabled = state.busy || String(state.carouselView && state.carouselView.status) !== CFG.carouselDraftStatus;
+    $("carouselSlides").appendChild(row);
+  }
+
+  async function recreateCarouselSlide(idx, note, button) {
+    if (!state.carouselId || state.busy) return;
+    setBusy(true);
+    button.textContent = CFG.carouselRecreatingLabel;
+    try {
+      await postJson(CFG.api.carouselRecreatePath, { note }, { id: state.carouselId, idx });
+      await loadCarousel(state.carouselId);
+      logLine(template(CFG.carouselRecreatedLog, { idx: pad(idx + DISPLAY_INDEX_OFFSET) }), "ok");
+    } finally {
+      const buttonStillMounted = document.body.contains(button);
+      if (buttonStillMounted) button.textContent = CFG.carouselRecreateLabel;
+      setBusy(false);
+    }
+  }
+
+  async function cancelCarousel() {
+    if (!state.carouselId || state.busy) return;
+    const carouselId = state.carouselId;
+    setBusy(true);
+    try {
+      await postJson(CFG.api.carouselCancelPath, {}, { id: carouselId });
+      state.carouselView = null;
+      state.carouselId = null;
+      $("carouselReview").hidden = true;
+      $("carouselSlides").replaceChildren();
+      logLine(template(CFG.carouselCancelledLog, { id: carouselId }), "ok");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function finalizeCarousel() {
+    if (!state.carouselId || state.busy) return;
+    setBusy(true);
+    try {
+      const result = await postJson(CFG.api.carouselFinalizePath, {}, { id: state.carouselId });
+      const view = {
+        ...(state.carouselView || {}),
+        status: result.status || CFG.carouselSucceededStatus,
+        slides: state.carouselView ? state.carouselView.slides : [],
+      };
+      state.carouselView = view;
+      renderCarousel(view);
+      logLine(template(CFG.carouselFinalizedLog, { id: state.carouselId }), "ok");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function poll(id) {
     const start = Date.now();
     let last = null;
@@ -887,7 +1390,17 @@
     $("roll").disabled = b;
     $("roll").classList.toggle("busy", b);
     $("rollLabel").textContent = b ? CFG.copy.rolling : CFG.copy.roll;
+    $("createFromResearch").classList.toggle("busy", b);
+    const carouselStatus = String(state.carouselView && state.carouselView.status || "");
+    const carouselTerminal = CFG.carouselTerminalStatuses.includes(carouselStatus);
+    const carouselHasSlides = Boolean(state.carouselView && Array.isArray(state.carouselView.slides) && state.carouselView.slides.length);
+    $("carouselCancel").disabled = b || !state.carouselId || carouselTerminal;
+    $("carouselFinalize").disabled = b || !state.carouselId || carouselTerminal || !carouselHasSlides;
+    document.querySelectorAll("#carouselSlides [data-carousel-action]").forEach((x) => {
+      x.disabled = b || !state.carouselId || carouselTerminal;
+    });
     vp.classList.toggle("busy", b);
+    updateResearchModeUi();
   }
   let flashT;
   function flash(msg) {
@@ -897,7 +1410,7 @@
   }
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  $("roll").onclick = roll;
+  $("roll").onclick = () => state.mode === "research" ? createFromResearchFlow() : roll();
 
   /* ── count stepper wiring ── */
   $("countInput").min = String(CFG.ui.countMin);

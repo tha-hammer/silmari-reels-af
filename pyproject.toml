@@ -45,6 +45,7 @@ reel-af-server = "reel_af.app:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
+"reel_af.agents" = ["config/*.json"]
 "reel_af.render" = ["config/*.json"]
 
 [tool.pytest.ini_options]
