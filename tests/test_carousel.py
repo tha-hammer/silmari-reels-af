@@ -78,6 +78,25 @@ class _StubApp:
         return self._essence
 
 
+class _FakeStoragePort:
+    def __init__(self):
+        self.saved = []
+
+    async def put(self, *, run_id, idx, path):
+        self.saved.append((run_id, idx, path))
+        return f"stub://{run_id}/{idx}"
+
+
+async def _fake_distiller(text):
+    return Essence(
+        core_claim="c",
+        mechanism="m",
+        evidence=["e"],
+        content_mode="general",
+        domain="tech",
+    )
+
+
 async def test_essence_from_text_bypasses_fetch(monkeypatch):
     from reel_af.agents import extract
 
@@ -152,6 +171,47 @@ def test_research_to_carousel_is_registered():
 
     names = [r["wrapper"].__name__ for r in app_module.reel.reasoners]
     assert "research_to_carousel" in names
+
+
+async def test_missing_api_key_returns_house_error(tmp_path: Path, monkeypatch):
+    import reel_af.app as app_module
+
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    out = await app_module.research_to_carousel(
+        text="doc",
+        slide_count=1,
+        out_dir=str(tmp_path),
+    )
+
+    assert out == {"error": "OPENROUTER_API_KEY not set in env."}
+
+
+async def test_control_plane_call_resolves_real_deps(tmp_path: Path, monkeypatch):
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    fake = make_fake_provider(image_data=square_png_bytes(300))
+
+    monkeypatch.setattr(app_module, "OpenRouterProvider", lambda *a, **k: fake(), raising=False)
+    monkeypatch.setattr(app_module, "_default_storage_port", lambda: _FakeStoragePort(), raising=False)
+    monkeypatch.setattr(
+        app_module,
+        "plan_carousel_prompts",
+        lambda app, essence, n: [f"p{i}" for i in range(n)],
+        raising=False,
+    )
+    monkeypatch.setattr(app_module, "essence_from_text", lambda app, text: _fake_distiller(text), raising=False)
+
+    out = await app_module.research_to_carousel(
+        text="doc",
+        slide_count=1,
+        out_dir=str(tmp_path),
+    )
+
+    assert [slide["idx"] for slide in out["slides"]] == [0]
+    assert out["slides"][0]["status"] == "ok"
+    assert out["slides"][0]["image_ref"] == f"stub://{out['run_id']}/0"
 
 
 @pytest.mark.parametrize("blank", ["", "   "])

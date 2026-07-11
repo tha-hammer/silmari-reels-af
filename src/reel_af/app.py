@@ -41,6 +41,7 @@ Invoke async, get an execution_id immediately:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import os
 import re
 import time
@@ -54,10 +55,14 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_PROJECT_ROOT / ".env")
 
 from agentfield import Agent, AgentRouter, AIConfig  # noqa: E402
+from agentfield.media_providers import OpenRouterProvider  # noqa: E402
 
 # Apply SDK bug-fixes at startup so every OpenRouterProvider call gets
 # the fixed behaviour. Module is idempotent.
 import reel_af.sdk_patches  # noqa: E402, F401
+from reel_af.agents.extract import essence_from_text  # noqa: E402
+from reel_af.render.images import generate_first_frame  # noqa: E402
+from reel_af.render.presets import load_preset  # noqa: E402
 
 app = Agent(
     node_id=os.getenv("AGENT_NODE_ID", "reel-af"),
@@ -740,6 +745,71 @@ async def composite_to_reel(
 # ════════════════════════════════════════════════════════════════════
 
 
+class _FailClosedStoragePort:
+    async def put(self, *, run_id, idx, path):
+        raise RuntimeError("carousel StoragePort is not configured")
+
+
+def _default_storage_port():
+    return _FailClosedStoragePort()
+
+
+async def _maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+async def _resolve_prompts(prompt_planner, essence, count: int) -> list[str]:
+    prompts = await _maybe_await(prompt_planner(essence, count))
+    return list(prompts or [])
+
+
+def _slide_record(
+    idx: int,
+    image_prompt: str,
+    image_ref: str | None,
+    status: str,
+    *,
+    error: str | None = None,
+) -> dict:
+    record = {
+        "idx": idx,
+        "image_prompt": image_prompt,
+        "image_ref": image_ref,
+        "status": status,
+    }
+    if error is not None:
+        record["error"] = error
+    return record
+
+
+async def _render_one_slide(
+    *,
+    provider,
+    storage,
+    run_id: str,
+    idx: int,
+    prompt: str,
+    out_dir: Path,
+    content_mode: str,
+    model: str | None,
+    crop: str,
+    _generate_frame,
+) -> dict:
+    path = await _generate_frame(
+        provider,
+        prompt,
+        idx,
+        out_dir,
+        content_mode,
+        model=model,
+        crop=crop,
+    )
+    ref = await storage.put(run_id=run_id, idx=idx, path=path)
+    return _slide_record(idx, prompt, ref, "ok")
+
+
 @reel.reasoner()
 async def research_to_carousel(
     text: str,
@@ -755,11 +825,48 @@ async def research_to_carousel(
     _generate_frame=None,
 ) -> dict:
     """Text/research document to an ordered image carousel."""
+    if "OPENROUTER_API_KEY" not in os.environ:
+        return {"error": "OPENROUTER_API_KEY not set in env."}
+
+    provider = provider or OpenRouterProvider()
+    storage = storage or _default_storage_port()
+    distiller = distiller or (lambda document: essence_from_text(app, document))
+    prompt_planner = prompt_planner or (
+        lambda essence, count: globals()["plan_carousel_prompts"](app, essence, count)
+    )
+    _generate_frame = _generate_frame or generate_first_frame
+
+    run_id = uuid.uuid4().hex[:8]
+    run_dir = (
+        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"carousel-{run_id}")
+    )
+    run_dir.mkdir(parents=True, exist_ok=True)
+    cfg = load_preset(preset)
+    count = max(1, int(slide_count if slide_count is not None else cfg["slide_count"]))
+    crop = str(cfg.get("crop", "4x5"))
+    essence = await _maybe_await(distiller(text))
+    prompts = await _resolve_prompts(prompt_planner, essence, count)
+    slides = []
+    for idx, prompt in enumerate(prompts[:count]):
+        slides.append(
+            await _render_one_slide(
+                provider=provider,
+                storage=storage,
+                run_id=run_id,
+                idx=idx,
+                prompt=prompt,
+                out_dir=run_dir,
+                content_mode=essence.content_mode,
+                model=model,
+                crop=crop,
+                _generate_frame=_generate_frame,
+            )
+        )
     return {
-        "run_id": uuid.uuid4().hex[:8],
+        "run_id": run_id,
         "preset": preset,
-        "out_dir": out_dir,
-        "slides": [],
+        "out_dir": str(run_dir),
+        "slides": slides,
     }
 
 
