@@ -104,6 +104,18 @@ class AuthContext:
     supertokens_user_id: str
 
 
+@dataclass(frozen=True)
+class LocalRun:
+    """reel-af's OWN local ``research_run`` row resolved from a foreign ``execution_id``
+    (INT-02 C-Correlation). ``id`` is the local UUID stamped as provenance (never the
+    text ``execution_id`` — C-Own); ``org_id`` is the sole tenant authority for the
+    background write (no request ctx — C-Own tenancy)."""
+
+    id: uuid.UUID
+    org_id: uuid.UUID
+    created_by: uuid.UUID
+
+
 # ─────────────────────────── ports ───────────────────────────
 
 
@@ -130,6 +142,9 @@ class ReelJobRepoPort(Protocol):
     def insert_or_get_queued(self, ctx, submission, job_id, now, client_request_id): ...
     def attach_execution_id(self, ctx, job_id, execution_id): ...
     def get_by_execution(self, ctx, execution_id): ...
+    # INT-04 lineage (read-only, reel-af-OWNED table): forward read-by-id + reverse provenance.
+    def get(self, ctx, job_id): ...
+    def reel_jobs_by_source_run(self, ctx, run_id): ...
     def mark_failed(self, ctx, job_id, reason, completed_at): ...
     def update_from_execution(self, ctx, execution_id, status, result_ref, completed_at): ...
     def mark_stale_queued(self, now) -> int: ...
@@ -146,6 +161,8 @@ class CarouselRepoPort(Protocol):
     def insert_or_get_draft(self, ctx, create, carousel_id, now, client_request_id): ...
     def attach_execution_id(self, ctx, carousel_id, execution_id): ...
     def get(self, ctx, carousel_id): ...
+    # INT-04 lineage (read-only, reel-af-OWNED table): reverse provenance lookup.
+    def carousels_by_source_run(self, ctx, run_id): ...
     def slide_ref(self, ctx, carousel_id, slide_idx) -> str: ...
     def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status): ...
     def set_status(self, ctx, carousel_id, status): ...
@@ -165,6 +182,56 @@ class UploadStorePort(Protocol):
 class ControlPlanePort(Protocol):
     def dispatch_async(self, target: str, body: dict) -> tuple[int, dict, dict]: ...
     def get_execution(self, execution_id: str) -> tuple[int, dict, dict]: ...
+
+
+# ── INT-02 durable-cursor consumer ports (background-safe; NO request ctx) ──
+# The hand-off rides the DURABLE bus only (A1); these ports abstract the durable
+# read surface + reel-af's OWN dedup/cursor/resolution/stamp store. They are wired
+# lazily in ``default_deps`` (no I/O at construction) so a background driver can use
+# them off the request path.
+
+
+@runtime_checkable
+class EventReaderPort(Protocol):
+    """Durable, cursor-based read of ``research.completed`` from the shipped ``/events``
+    surface (``last_event_sequence``). NEVER the in-memory ``GlobalExecutionEventBus``
+    (at-most-once/drop-on-full — A1). Returns CloudEvent records (each with a monotonic
+    ``sequence``) having ``sequence > cursor`` and ``type == event_type``, in Seq order."""
+
+    def read_since(self, cursor: int, event_type: str, limit: int) -> list: ...
+
+
+@runtime_checkable
+class ProcessedMessagesPort(Protocol):
+    """reel-af's OWN dedup + atomic effect store, keyed on the CloudEvents ``id``.
+
+    ``stamp_dedup_advance`` is the C5 one-transaction effect: insert
+    ``processed_messages(id)`` ON CONFLICT DO NOTHING, (if fresh) resolve + idempotently
+    stamp ``source_research_run_id`` = the resolved LOCAL UUID scoped to the resolved
+    ``org_id``, and advance the cursor — all-or-nothing. Fusing these on one adapter is
+    required by C5: three independent ports could not share one transaction."""
+
+    def already_processed(self, cloudevents_id: str) -> bool: ...
+    def mark(self, cloudevents_id: str, execution_id: str | None) -> None: ...
+    def stamp_dedup_advance(self, event: dict, consumer: str): ...  # -> ConsumeResult (one TX)
+
+
+@runtime_checkable
+class EventCursorPort(Protocol):
+    """reel-af's OWN per-consumer durable cursor (``event_cursor``). ``advance`` is used
+    for the deduped/malformed/filtered fast paths (no stamp); the fresh-event advance
+    happens INSIDE ``stamp_dedup_advance`` so it commits with the effect (C-AtLeastOnce)."""
+
+    def get(self, consumer: str) -> int: ...
+    def advance(self, consumer: str, seq: int) -> None: ...
+
+
+@runtime_checkable
+class LocalRunResolverPort(Protocol):
+    """Resolve a foreign ``execution_id`` to reel-af's LOCAL ``research_run`` row, the
+    UUID stamped as provenance and the tenant boundary for the background write."""
+
+    def resolve(self, execution_id: str) -> LocalRun | None: ...
 
 
 @runtime_checkable
@@ -243,6 +310,15 @@ class _Unconfigured:
 # ─────────────────────────── container ───────────────────────────
 
 
+@runtime_checkable
+class ResearchRunReaderPort(Protocol):
+    """Reads deep-research run detail through the OWNER's interface, keyed by
+    ``execution_id`` (API Composition — INT Phase 0). reel-af never SQL-reads the
+    owner table ``deepresearch.research_run``; it references foreign data by-id."""
+
+    def read(self, ctx, execution_id: str) -> dict: ...   # owner interface, keyed by execution_id
+
+
 @dataclass
 class AppDeps:
     identity: IdentityProvider
@@ -253,9 +329,18 @@ class AppDeps:
     control_plane: ControlPlanePort
     storage: StoragePort
     slides: SlideRefResolverPort
+    research_reader: ResearchRunReaderPort
+    # INT-02 durable-cursor consumer ports (background-safe; no request ctx).
+    events: EventReaderPort
+    processed: ProcessedMessagesPort
+    cursor: EventCursorPort
+    local_runs: LocalRunResolverPort
     clock: Clock
     uuid_factory: UuidFactory
     logger: logging.Logger
+    # INT-04: optional, read-only lineage view — self-composed over the org-scoped repos above.
+    # Wired post-construction (it references this container); ``None`` until wired.
+    lineage: "object | None" = None
 
 
 def default_deps() -> AppDeps:
@@ -270,7 +355,8 @@ def default_deps() -> AppDeps:
     # Lazy imports avoid an import cycle (pg/auth/control_plane import this module).
     from carousels import CarouselSlideRefResolver
     from control_plane import HttpControlPlane
-    from pg import PgCarouselRepo, PgReelJobRepo, build_identity
+    from pg import PgCarouselRepo, PgEventConsumerStore, PgReelJobRepo, build_identity
+    from research_reader import OwnerInterfaceResearchRunReader
     from storage import ObjectStorage
     from uploads import BucketUploadStore, LocalUploadStore
 
@@ -280,19 +366,39 @@ def default_deps() -> AppDeps:
     # fail closed (503) until their backing store is configured.
     uploads = BucketUploadStore() if os.getenv("REEL_BUCKET_NAME") else LocalUploadStore()
     carousels = PgCarouselRepo()
-    return AppDeps(
+    control_plane = HttpControlPlane()              # identity-free client, reused by the reader
+    # INT-02: reel-af's OWN dedup/cursor/resolve/stamp store (one adapter, one tx for the
+    # C5 effect). The event READER transport (durable /events poll vs SSE) stays an Open-Seam
+    # behind EventReaderPort — fail-closed until wired, so the opt-in driver denies not leaks.
+    consumer_store = PgEventConsumerStore()
+    deps = AppDeps(
         identity=build_identity(),                 # SuperTokens session (fail-closed) + DB reader
         access_guard=RoleAccessGuard(),
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
         carousels=carousels,                        # carousel read-model; 503 until applied
         uploads=uploads,                            # bucket (prod) or local volume (dev); 503 until configured
-        control_plane=HttpControlPlane(),
+        control_plane=control_plane,
         storage=ObjectStorage(),                    # media object store; 503 until REEL_BUCKET_NAME configured
         slides=CarouselSlideRefResolver(carousels),
+        # INT Phase 0: read owner run detail via the owner interface, never local SQL.
+        research_reader=OwnerInterfaceResearchRunReader(control_plane),
+        # INT-02 consumer: fail-closed reader transport (Open-Seam) + reel-af's own store.
+        events=_Unconfigured(
+            RepositoryUnavailable, "event reader transport not wired (INT-02 Open-Seam)"
+        ),
+        processed=consumer_store,
+        cursor=consumer_store,
+        local_runs=consumer_store,
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,
     )
+    # INT-04: the read-only lineage view is self-composed over the org-scoped repos above
+    # (no new external client, no I/O at construction).
+    from lineage import LineageView
+
+    deps.lineage = LineageView(deps)
+    return deps
 
 
 def env(name: str, default: str = "") -> str:

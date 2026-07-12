@@ -194,7 +194,9 @@ def test_research_poll_foreign_run_is_404():
 # ─────────────────────── Behavior 3 (ISC-24) ───────────────────────
 
 
-def test_research_run_records_owned_row_and_returns_ids_row_first():
+def test_research_run_dispatches_without_owner_table_write():
+    # INT Phase 0: the deep-research node OWNS research_run — reel-af dispatches and
+    # returns its OWN handle + the owner execution_id, but writes NOTHING to the owner table.
     events: list[str] = []
     cp = RecordingControlPlane(events=events, dispatch_response=(202, {"execution_id": "exec_r9"}, {}))
     deps = make_deps(control_plane=cp)
@@ -204,25 +206,29 @@ def test_research_run_records_owned_row_and_returns_ids_row_first():
 
     assert resp.status_code == 202
     body = resp.get_json()
-    assert body["research_run_id"] == str(uuid.UUID(body["research_run_id"]))
+    assert body["research_run_id"] == str(uuid.UUID(body["research_run_id"]))  # reel-af's own handle
     assert body["execution_id"] == "exec_r9"
-    run = deps.reel_jobs.get_research_run(make_ctx(), uuid.UUID(body["research_run_id"]))
-    assert run.org_id == make_ctx().org_id
-    assert run.created_by == make_ctx().user_id
-    assert run.execution_id == "exec_r9"
-    assert events[:3] == ["insert_research_run", "dispatch", "update_research_status"]
+    assert events == ["dispatch"]                       # only the dispatch — no insert/update
+    assert "insert_research_run" not in events
+    assert "update_research_status" not in events
+    assert deps.reel_jobs.research_runs == {}           # no owner-table row minted
 
 
-def test_research_run_cp_failure_marks_row_failed():
-    cp = RecordingControlPlane(dispatch_response=(202, {"status": "accepted_without_execution"}, {}))
+def test_research_run_missing_execution_id_passes_through_without_owner_write():
+    # CP returns 2xx but no execution_id -> passthrough of the CP body/status (INT Phase 0
+    # removed the row-first bookkeeping that used to synthesize a 502); still NO owner write.
+    events: list[str] = []
+    cp = RecordingControlPlane(
+        events=events, dispatch_response=(202, {"status": "accepted_without_execution"}, {}))
     deps = make_deps(control_plane=cp)
+    deps.reel_jobs.events = events
 
     resp = _client(deps).post(RESEARCH_URL, json={"query": "grid storage"})
 
-    assert resp.status_code == 502
-    assert len(deps.reel_jobs.research_runs) == 1
-    run = next(iter(deps.reel_jobs.research_runs.values()))
-    assert run.status == "failed"
+    assert resp.status_code == 202                      # passthrough of CP status
+    assert deps.reel_jobs.research_runs == {}
+    assert "insert_research_run" not in events
+    assert "update_research_status" not in events
 
 
 # ─────────────────────── Behavior 4 (ISC-25) ───────────────────────

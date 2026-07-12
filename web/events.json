@@ -1,0 +1,8 @@
+{
+  "_comment": "INT-02 durable-cursor consumer tunables (web/events.py). Flat, one-jump access — no magic numbers in consume_since / run_research_consumer_loop. Underscore-prefixed keys are documentation-only and dropped at load.",
+  "consumer_name": "reel-af",
+  "batch_limit": 100,
+  "poll_interval_seconds": 5,
+  "max_retries": 5,
+  "backoff_seconds": 2
+}

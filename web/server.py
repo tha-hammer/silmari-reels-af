@@ -52,6 +52,9 @@ from reel_jobs import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
+# INT-02: the durable-cursor consumer driver is opt-in (off by default) so tests and
+# request-only deployments never spawn the background thread. Prod sets this to start it.
+ENV_CONSUMER_ENABLED = "REEL_CONSUMER_ENABLED"
 API_MESSAGES_PATH = os.path.join(HERE, "api_messages.json")
 
 # Named literals introduced by this plan (§10 CodeCleanup gate) — headers, the
@@ -76,6 +79,9 @@ _CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
 _CAROUSEL_FINALIZE_RE = re.compile(r"^v1/carousels/([^/]+)/finalize$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
+# INT-04: read-only, ORG-SCOPED lineage surface (optional dashboard). GET-only.
+_LINEAGE_ENTITY_RE = re.compile(r"^v1/lineage/entity/([^/]+)$")
+_LINEAGE_RUN_RE = re.compile(r"^v1/lineage/run/([^/]+)$")
 
 
 def _load_api_messages() -> dict[str, str]:
@@ -158,6 +164,20 @@ def _research_poll_id(method: str, sub: str) -> str | None:
     if method != "GET":
         return None
     m = _RESEARCH_POLL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _lineage_entity_id(method: str, sub: str) -> str | None:
+    if method != "GET":                                   # POST/PUT/DELETE -> not routed (no write)
+        return None
+    m = _LINEAGE_ENTITY_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _lineage_run_id(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _LINEAGE_RUN_RE.match(sub)
     return m.group(1) if m else None
 
 
@@ -331,33 +351,19 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
 
 
 def _handle_research_run(deps: AppDeps) -> tuple[Response, int]:
-    """Dispatch a deep-research run and record it as an owned ``research_run`` row.
-
-    ROW-FIRST ordering (CI-3, mirrors ``_handle_submit``): mint ``run_id`` → insert a
-    ``queued`` row (execution_id=None) → dispatch → attach the CP execution_id. A crash
-    mid-request leaves a recoverable ``queued`` row, never an orphan CP execution. CP
-    failure / missing execution_id marks the row ``failed`` and passes the CP body through.
+    """Dispatch a deep-research run. The deep-research node OWNS and writes
+    ``research_run`` (ARCHITECTURE §11) — reel-af issues ZERO INSERT/UPDATE against
+    it (INT Phase 0). reel-af returns its OWN handle (``research_run_id``) alongside
+    the owner-minted ``execution_id``; on CP failure it passes the body through with
+    NO owner-table write.
     """
     ctx = deps.identity.resolve(request)                     # 401 / 403 / 503
     deps.access_guard.authorize_create(ctx)                  # 403 fail-closed
-    body = request.get_json(silent=True)
-    target, cp_body_out = build_research_dispatch(body)      # 400 empty/forbidden
-    run_id = deps.uuid_factory()
-    now = deps.clock.now()
-    deps.reel_jobs.insert_research_run(ctx, run_id, None, "queued", now)   # ROW FIRST
-    try:
-        status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
-    except HttpError:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        raise                                                # 502 etc
-    if status >= 400:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        return jsonify(cp_body), status                      # passthrough, no orphan claim
-    if "execution_id" not in cp_body:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        raise BadGateway("control plane returned no execution_id")
-    deps.reel_jobs.update_research_status(                    # attach execution_id
-        ctx, run_id, execution_id=cp_body["execution_id"])
+    target, cp_body_out = build_research_dispatch(request.get_json(silent=True))  # 400 empty/forbidden
+    run_id = deps.uuid_factory()                             # reel-af's OWN handle (not an owner row)
+    status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
+    if status >= 400 or "execution_id" not in cp_body:
+        return jsonify(cp_body), status                      # passthrough; NO owner-table write on failure
     return jsonify({"research_run_id": str(run_id),
                     "execution_id": cp_body["execution_id"]}), status
 
@@ -374,16 +380,21 @@ def _research_result_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
 
 
 def _handle_research_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
-    """Poll a research run the caller owns (org-scoped; 404 conceals foreign/absent),
-    reconcile status terminal-monotonically by run_id, and surface {status, markdown,
-    html, sources}. Authorization is org-scope-only by design (no per-run role gate)."""
+    """Poll a research run by ``execution_id`` and surface {status, markdown, html,
+    sources} from the control plane. INT Phase 0: reel-af issues NO write to the
+    owner's ``research_run`` table — it does not reconcile status into it.
+
+    NOTE (deferred, coupled to claude-alpha's pg.py migration): the ownership 404
+    concealment still goes through ``get_research_by_execution`` (a read of the owner
+    table in prod). Replacing it with the identity-free owner-interface read
+    (``deps.research_reader``) drops reel-af-side cross-org concealment — a
+    tenancy-semantics decision left to the Phase 0/1 handoff, not guessed here (ISC-4 poll)."""
     ctx = deps.identity.resolve(request)
-    run = deps.reel_jobs.get_research_by_execution(ctx, execution_id)  # 404 foreign/absent
+    deps.reel_jobs.get_research_by_execution(ctx, execution_id)  # 404 conceals foreign/absent
     status, cp_body, _headers = deps.control_plane.get_execution(execution_id)
     if status >= 400:
         return jsonify(cp_body), status                      # transient CP error passthrough
     normalized = _normalize_execution_status(cp_body)
-    deps.reel_jobs.update_research_status(ctx, run.id, status=normalized)  # terminal-monotonic
     return jsonify(_research_result_body(cp_body, normalized)), status
 
 
@@ -503,6 +514,21 @@ def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int
     ctx = deps.identity.resolve(request)
     view = deps.carousels.get(ctx, carousel_id)
     return jsonify({"status": view.status, "slides": view.slides}), 200
+
+
+# ─────────── INT-04 read-only, ORG-SCOPED lineage endpoints (optional dashboard) ───────────
+# Resolve the caller's AuthContext; delegate to LineageView; NO write route. Another org's id
+# conceals to a 200 empty list (never a cross-org leak) via the org-scoped repos.
+
+
+def _handle_lineage_entity(deps: AppDeps, entity_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    return jsonify([u.to_json() for u in deps.lineage.what_produced(ctx, entity_id)]), 200
+
+
+def _handle_lineage_run(deps: AppDeps, run_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    return jsonify([d.to_json() for d in deps.lineage.what_came_from(ctx, run_id)]), 200
 
 
 def _openrouter_provider():
@@ -713,6 +739,12 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     slide = _slide_target(method, subpath)
     if slide is not None:
         return _handle_slide(deps, *slide)
+    lineage_entity = _lineage_entity_id(method, subpath)
+    if lineage_entity is not None:
+        return _handle_lineage_entity(deps, lineage_entity)
+    lineage_run = _lineage_run_id(method, subpath)
+    if lineage_run is not None:
+        return _handle_lineage_run(deps, lineage_run)
     return _not_found()
 
 
@@ -867,7 +899,23 @@ def create_app(
     def _on_http_error(err: HttpError):
         return jsonify({"error": err.message, "code": err.code}), err.status
 
+    _maybe_start_consumer(deps)
     return app
+
+
+def _maybe_start_consumer(deps: AppDeps):
+    """INT-02 B5 lifecycle: start the durable-cursor consumer driver on app startup and
+    stop it at process exit — but ONLY when opt-in via ``REEL_CONSUMER_ENABLED`` (off in
+    tests and request-only deploys). Background-safe: the driver uses no request ctx."""
+    if not os.getenv(ENV_CONSUMER_ENABLED):
+        return None
+    import atexit
+
+    from events import start_research_consumer
+
+    handle = start_research_consumer(deps, logger=deps.logger)
+    atexit.register(handle.stop)
+    return handle
 
 
 app = create_app()

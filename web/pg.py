@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime
 from types import SimpleNamespace
 
-from deps import NotFound, RepositoryUnavailable, SchemaUnavailable
+from deps import LocalRun, NotFound, RepositoryUnavailable, SchemaUnavailable
 from reel_jobs import ReelJobRef, ReelJobStatus, ResearchRunRef
 
 _VALID_ROLES = ("owner", "admin", "member", "viewer")
@@ -60,6 +60,11 @@ FEATURE_SCHEMA: dict[str, set[str]] = {
         "source_research_run_id", "hq_recreate_count", "execution_id", "created_at",
     },
     "carousel_slide": {"carousel_id", "org_id", "idx", "image_ref", "prompt", "status"},
+    # INT-02 consumer-owned tables (root-applied migration; asserted here, fail-closed 503
+    # until applied — consumes, never vendors). ``processed_messages`` PK = CloudEvents id
+    # (the idempotency key); ``event_cursor`` PK = consumer (reel-af's durable cursor).
+    "processed_messages": {"id", "execution_id"},
+    "event_cursor": {"consumer", "last_event_sequence"},
 }
 
 # Full schema (migrations / docs / feature-readiness reference the union).
@@ -304,6 +309,52 @@ class PgReelJobRepo(_SharedSchema):
             source_research_run_id=row[7],
         )
 
+    def get(self, ctx, job_id):  # pragma: no cover - integration
+        # INT-04 forward lineage: org-scoped read-by-id of a reel job (carries provenance).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
+                    "from deepresearch.reel_job where id = %s and org_id = %s",
+                    (job_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("reel job not found")           # conceal cross-org / absent
+        return ReelJobRef(
+            job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
+            execution_id=row[4], result_ref=row[5], completed_at=row[6],
+            source_research_run_id=row[7],
+        )
+
+    def reel_jobs_by_source_run(self, ctx, run_id):  # pragma: no cover - integration
+        # INT-04 reverse lineage: reel-af-OWNED table ONLY, org-scoped by ctx (no new table).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
+                    "from deepresearch.reel_job "
+                    "where source_research_run_id = %s and org_id = %s",
+                    (run_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=r[0], org_id=r[1], created_by=r[2], status=r[3],
+                execution_id=r[4], result_ref=r[5], completed_at=r[6],
+                source_research_run_id=r[7],
+            )
+            for r in rows
+        ]
+
     def update_from_execution(
         self, ctx, execution_id, status: ReelJobStatus, result_ref, completed_at
     ):  # pragma: no cover - integration
@@ -466,10 +517,12 @@ class PgCarouselRepo(_SharedSchema):
         )
 
     def get(self, ctx, carousel_id):  # pragma: no cover
-        status = self._one(
-            "select status from deepresearch.carousel where id = %s and org_id = %s",
+        # source_research_run_id is surfaced so INT-04 forward lineage can resolve provenance.
+        status, source_research_run_id = self._one(
+            "select status, source_research_run_id from deepresearch.carousel "
+            "where id = %s and org_id = %s",
             (carousel_id, ctx.org_id),
-        )[0]
+        )
         conn = _connect(_database_url())
         try:
             with conn.cursor() as cur:
@@ -485,11 +538,34 @@ class PgCarouselRepo(_SharedSchema):
             conn.close()
         return SimpleNamespace(
             status=status,
+            source_research_run_id=source_research_run_id,
             slides=[
                 {"idx": idx, "image_ref": ref, "prompt": prompt, "status": slide_status}
                 for idx, ref, prompt, slide_status in rows
             ],
         )
+
+    def carousels_by_source_run(self, ctx, run_id):  # pragma: no cover - integration
+        # INT-04 reverse lineage: reel-af-OWNED carousel table ONLY, org-scoped (no new table).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, source_research_run_id "
+                    "from deepresearch.carousel "
+                    "where source_research_run_id = %s and org_id = %s",
+                    (run_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=r[0], org_id=r[1], created_by=r[2], status=r[3],
+                execution_id=r[4], source_research_run_id=r[5],
+            )
+            for r in rows
+        ]
 
     def slide_ref(self, ctx, carousel_id, slide_idx) -> str:  # pragma: no cover
         return self._one(
@@ -604,6 +680,152 @@ class PgCarouselRepo(_SharedSchema):
         if row is None:
             raise NotFound("carousel not found")
         return row
+
+
+class PgEventConsumerStore(_SharedSchema):
+    """reel-af's OWN durable dedup + cursor + resolution + provenance-stamp store (INT-02).
+
+    Implements ``ProcessedMessagesPort`` + ``EventCursorPort`` + ``LocalRunResolverPort``.
+    Writes ONLY reel-af's own tables (``processed_messages``, ``event_cursor``, and the
+    ``reel_job``/``carousel`` provenance column) — NEVER ``deepresearch.research_run`` or any
+    owner table (A3, C-Own). Background-safe: scoped by the resolved local row's ``org_id``,
+    never a request ``ctx``.
+    """
+
+    # ─────────────── EventCursorPort (standalone advance for deduped/malformed) ───────────────
+
+    def get(self, consumer: str) -> int:  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select last_event_sequence from deepresearch.event_cursor "
+                    "where consumer = %s",
+                    (consumer,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return row[0] if row else 0
+
+    def advance(self, consumer: str, seq: int) -> None:  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                self._advance_cursor(cur, consumer, seq)
+                conn.commit()
+        finally:
+            conn.close()
+
+    # ─────────────── ProcessedMessagesPort ───────────────
+
+    def already_processed(self, cloudevents_id: str) -> bool:  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select 1 from deepresearch.processed_messages where id = %s",
+                    (cloudevents_id,),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def mark(self, cloudevents_id: str, execution_id: str | None) -> None:  # pragma: no cover
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.processed_messages (id, execution_id) "
+                    "values (%s, %s) on conflict (id) do nothing",
+                    (cloudevents_id, execution_id),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+
+    # ─────────────── LocalRunResolverPort ───────────────
+
+    def resolve(self, execution_id: str) -> LocalRun | None:  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                run = self._resolve_local_run(cur, execution_id)
+        finally:
+            conn.close()
+        return run
+
+    # ─────────────── the C5 one-transaction effect ───────────────
+
+    def stamp_dedup_advance(self, event: dict, consumer: str):  # pragma: no cover - integration
+        """ONE transaction (C5): insert ``processed_messages(id)`` ON CONFLICT DO NOTHING;
+        if fresh, resolve ``execution_id`` → the local ``research_run`` and idempotently stamp
+        ``source_research_run_id`` = the resolved LOCAL UUID (never the text id) scoped to the
+        resolved ``org_id`` (C-Own); then advance the cursor. All-or-nothing — no crash window
+        splits the stamp from the dedup mark or the cursor advance."""
+        from events import ConsumeResult
+
+        seq = event["sequence"]
+        cloudevents_id = event["id"]
+        execution_id = event["subject"]
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.processed_messages (id, execution_id) "
+                    "values (%s, %s) on conflict (id) do nothing returning id",
+                    (cloudevents_id, execution_id),
+                )
+                first_seen = cur.fetchone() is not None
+                local_run_found = False
+                if first_seen:
+                    run = self._resolve_local_run(cur, execution_id)
+                    if run is not None:
+                        local_run_found = True
+                        self._stamp_provenance(cur, run, execution_id)
+                self._advance_cursor(cur, consumer, seq)
+                conn.commit()
+        finally:
+            conn.close()
+        return ConsumeResult(first_seen=first_seen, local_run_found=local_run_found)
+
+    # ─────────────── SQL helpers (share one cursor/tx) ───────────────
+
+    @staticmethod
+    def _resolve_local_run(cur, execution_id: str) -> LocalRun | None:  # pragma: no cover
+        # READ of reel-af's OWN local research_run (never an owner write — A3).
+        cur.execute(
+            "select id, org_id, created_by from deepresearch.research_run "
+            "where execution_id = %s",
+            (execution_id,),
+        )
+        row = cur.fetchone()
+        return LocalRun(id=row[0], org_id=row[1], created_by=row[2]) if row else None
+
+    @staticmethod
+    def _stamp_provenance(cur, run: LocalRun, execution_id: str) -> None:  # pragma: no cover
+        # Idempotent (null-guarded), org-scoped stamp of the resolved LOCAL UUID. Correlated
+        # by the research execution_id (the dispatched-run §1a case). The broader
+        # create-from-research correlation column is Plan 6's Open-Seam; this stamp only ever
+        # touches reel-af's OWN reel_job/carousel rows in the resolved org (C-Own / C6).
+        for table in ("reel_job", "carousel"):
+            cur.execute(
+                f"update deepresearch.{table} set source_research_run_id = %s "
+                "where source_research_run_id is null and org_id = %s and execution_id = %s",
+                (run.id, run.org_id, execution_id),
+            )
+
+    @staticmethod
+    def _advance_cursor(cur, consumer: str, seq: int) -> None:  # pragma: no cover
+        # Monotonic upsert: never regress the cursor (greatest wins).
+        cur.execute(
+            "insert into deepresearch.event_cursor (consumer, last_event_sequence) "
+            "values (%s, %s) on conflict (consumer) do update set "
+            "last_event_sequence = greatest("
+            "deepresearch.event_cursor.last_event_sequence, excluded.last_event_sequence)",
+            (consumer, seq),
+        )
 
 
 def build_identity(reader: PgMembershipReader | None = None):
