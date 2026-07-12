@@ -331,33 +331,19 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
 
 
 def _handle_research_run(deps: AppDeps) -> tuple[Response, int]:
-    """Dispatch a deep-research run and record it as an owned ``research_run`` row.
-
-    ROW-FIRST ordering (CI-3, mirrors ``_handle_submit``): mint ``run_id`` → insert a
-    ``queued`` row (execution_id=None) → dispatch → attach the CP execution_id. A crash
-    mid-request leaves a recoverable ``queued`` row, never an orphan CP execution. CP
-    failure / missing execution_id marks the row ``failed`` and passes the CP body through.
+    """Dispatch a deep-research run. The deep-research node OWNS and writes
+    ``research_run`` (ARCHITECTURE §11) — reel-af issues ZERO INSERT/UPDATE against
+    it (INT Phase 0). reel-af returns its OWN handle (``research_run_id``) alongside
+    the owner-minted ``execution_id``; on CP failure it passes the body through with
+    NO owner-table write.
     """
     ctx = deps.identity.resolve(request)                     # 401 / 403 / 503
     deps.access_guard.authorize_create(ctx)                  # 403 fail-closed
-    body = request.get_json(silent=True)
-    target, cp_body_out = build_research_dispatch(body)      # 400 empty/forbidden
-    run_id = deps.uuid_factory()
-    now = deps.clock.now()
-    deps.reel_jobs.insert_research_run(ctx, run_id, None, "queued", now)   # ROW FIRST
-    try:
-        status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
-    except HttpError:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        raise                                                # 502 etc
-    if status >= 400:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        return jsonify(cp_body), status                      # passthrough, no orphan claim
-    if "execution_id" not in cp_body:
-        deps.reel_jobs.update_research_status(ctx, run_id, status="failed")
-        raise BadGateway("control plane returned no execution_id")
-    deps.reel_jobs.update_research_status(                    # attach execution_id
-        ctx, run_id, execution_id=cp_body["execution_id"])
+    target, cp_body_out = build_research_dispatch(request.get_json(silent=True))  # 400 empty/forbidden
+    run_id = deps.uuid_factory()                             # reel-af's OWN handle (not an owner row)
+    status, cp_body, _headers = deps.control_plane.dispatch_async(target, cp_body_out)
+    if status >= 400 or "execution_id" not in cp_body:
+        return jsonify(cp_body), status                      # passthrough; NO owner-table write on failure
     return jsonify({"research_run_id": str(run_id),
                     "execution_id": cp_body["execution_id"]}), status
 
@@ -374,16 +360,21 @@ def _research_result_body(cp_body: dict, normalized: ReelJobStatus) -> dict:
 
 
 def _handle_research_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
-    """Poll a research run the caller owns (org-scoped; 404 conceals foreign/absent),
-    reconcile status terminal-monotonically by run_id, and surface {status, markdown,
-    html, sources}. Authorization is org-scope-only by design (no per-run role gate)."""
+    """Poll a research run by ``execution_id`` and surface {status, markdown, html,
+    sources} from the control plane. INT Phase 0: reel-af issues NO write to the
+    owner's ``research_run`` table — it does not reconcile status into it.
+
+    NOTE (deferred, coupled to claude-alpha's pg.py migration): the ownership 404
+    concealment still goes through ``get_research_by_execution`` (a read of the owner
+    table in prod). Replacing it with the identity-free owner-interface read
+    (``deps.research_reader``) drops reel-af-side cross-org concealment — a
+    tenancy-semantics decision left to the Phase 0/1 handoff, not guessed here (ISC-4 poll)."""
     ctx = deps.identity.resolve(request)
-    run = deps.reel_jobs.get_research_by_execution(ctx, execution_id)  # 404 foreign/absent
+    deps.reel_jobs.get_research_by_execution(ctx, execution_id)  # 404 conceals foreign/absent
     status, cp_body, _headers = deps.control_plane.get_execution(execution_id)
     if status >= 400:
         return jsonify(cp_body), status                      # transient CP error passthrough
     normalized = _normalize_execution_status(cp_body)
-    deps.reel_jobs.update_research_status(ctx, run.id, status=normalized)  # terminal-monotonic
     return jsonify(_research_result_body(cp_body, normalized)), status
 
 
