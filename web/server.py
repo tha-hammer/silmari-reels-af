@@ -762,6 +762,10 @@ def _configure_supertokens(app: Flask, deps: AppDeps) -> None:
         return
 
     website_domain = os.getenv("UI_WEBSITE_DOMAIN", "http://localhost:8899").rstrip("/")
+    # Unified login: set to a shared parent domain (e.g. ".silmari.ai") so the session
+    # cookie is shared across sibling services (tools.*, research.*, reels.*). Unset keeps
+    # the host-scoped cookie. Mirrors deep-research/silmari-tools SESSION_COOKIE_DOMAIN.
+    cookie_domain = os.getenv("SESSION_COOKIE_DOMAIN") or None
     conn_uri = os.getenv("SUPERTOKENS_CONNECTION_URI", "http://localhost:3567").rstrip("/")
     api_key = os.getenv("SUPERTOKENS_API_KEY") or None
     allowed = {
@@ -795,7 +799,7 @@ def _configure_supertokens(app: Flask, deps: AppDeps) -> None:
         supertokens_config=SupertokensConfig(connection_uri=conn_uri, api_key=api_key),
         framework="flask",
         recipe_list=[
-            session.init(),
+            session.init(cookie_domain=cookie_domain),
             emailpassword.init(
                 override=emailpassword.InputOverrideConfig(apis=_restrict_signups)
             ),
