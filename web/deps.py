@@ -243,6 +243,15 @@ class _Unconfigured:
 # ─────────────────────────── container ───────────────────────────
 
 
+@runtime_checkable
+class ResearchRunReaderPort(Protocol):
+    """Reads deep-research run detail through the OWNER's interface, keyed by
+    ``execution_id`` (API Composition — INT Phase 0). reel-af never SQL-reads the
+    owner table ``deepresearch.research_run``; it references foreign data by-id."""
+
+    def read(self, ctx, execution_id: str) -> dict: ...   # owner interface, keyed by execution_id
+
+
 @dataclass
 class AppDeps:
     identity: IdentityProvider
@@ -253,6 +262,7 @@ class AppDeps:
     control_plane: ControlPlanePort
     storage: StoragePort
     slides: SlideRefResolverPort
+    research_reader: ResearchRunReaderPort
     clock: Clock
     uuid_factory: UuidFactory
     logger: logging.Logger
@@ -271,6 +281,7 @@ def default_deps() -> AppDeps:
     from carousels import CarouselSlideRefResolver
     from control_plane import HttpControlPlane
     from pg import PgCarouselRepo, PgReelJobRepo, build_identity
+    from research_reader import OwnerInterfaceResearchRunReader
     from storage import ObjectStorage
     from uploads import BucketUploadStore, LocalUploadStore
 
@@ -280,15 +291,18 @@ def default_deps() -> AppDeps:
     # fail closed (503) until their backing store is configured.
     uploads = BucketUploadStore() if os.getenv("REEL_BUCKET_NAME") else LocalUploadStore()
     carousels = PgCarouselRepo()
+    control_plane = HttpControlPlane()              # identity-free client, reused by the reader
     return AppDeps(
         identity=build_identity(),                 # SuperTokens session (fail-closed) + DB reader
         access_guard=RoleAccessGuard(),
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
         carousels=carousels,                        # carousel read-model; 503 until applied
         uploads=uploads,                            # bucket (prod) or local volume (dev); 503 until configured
-        control_plane=HttpControlPlane(),
+        control_plane=control_plane,
         storage=ObjectStorage(),                    # media object store; 503 until REEL_BUCKET_NAME configured
         slides=CarouselSlideRefResolver(carousels),
+        # INT Phase 0: read owner run detail via the owner interface, never local SQL.
+        research_reader=OwnerInterfaceResearchRunReader(control_plane),
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,

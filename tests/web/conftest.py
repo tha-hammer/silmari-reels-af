@@ -366,10 +366,11 @@ class FakeCarouselRepo:
 
 
 class FakeControlPlane:
-    def __init__(self, response=(202, {"execution_id": "exec_123"}, {}), error=None):
-        self._response, self._error = response, error
+    def __init__(self, response=(202, {"execution_id": "exec_123"}, {}), error=None, get_error=None):
+        self._response, self._error, self._get_error = response, error, get_error
         self.dispatch_calls: list = []
         self.get_calls: list = []
+        self.get_execution_calls: list = []          # INT Phase 0: owner-interface read spy
 
     def dispatch_async(self, target, body):
         self.dispatch_calls.append((target, body))
@@ -378,8 +379,27 @@ class FakeControlPlane:
         return self._response
 
     def get_execution(self, execution_id):
+        if self._get_error is not None:              # owner unreachable → fail closed
+            raise self._get_error
         self.get_calls.append(execution_id)
+        self.get_execution_calls.append(execution_id)
         return self._response
+
+
+class FakeResearchRunReader:
+    """In-memory ResearchRunReaderPort for unit tests. Resolves by execution_id;
+    fails closed (NotFound) for an unknown id — never synthesizes a row."""
+
+    def __init__(self, details: dict | None = None):
+        self._details = dict(details or {})          # execution_id -> detail dict
+        self.read_calls: list = []
+
+    def read(self, ctx, execution_id: str) -> dict:
+        self.read_calls.append(execution_id)
+        detail = self._details.get(execution_id)
+        if detail is None:
+            raise NotFound("research run not found")
+        return detail
 
 
 class FixedClock:
@@ -396,6 +416,7 @@ def make_deps(
     carousels: FakeCarouselRepo | None = None,
     storage: FakeStorage | None = None,
     slides: FakeSlideRefResolver | None = None,
+    research_reader: FakeResearchRunReader | None = None,
     uuid_factory=None,
 ) -> AppDeps:
     return AppDeps(
@@ -407,6 +428,7 @@ def make_deps(
         control_plane=control_plane or FakeControlPlane(),
         storage=storage or FakeStorage(),
         slides=slides or FakeSlideRefResolver(),
+        research_reader=research_reader or FakeResearchRunReader(),
         clock=FixedClock(),
         uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
