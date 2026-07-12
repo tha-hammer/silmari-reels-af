@@ -79,6 +79,25 @@
     "images": { "count": 3, "placement": "full", "minDurationS": 2.0, "maxDurationS": 3.0, "edgeGuardS": 2.0 },
     "encode": { "crf": 19, "preset": "fast", "contextOnly": true }
   },
+  "tunables": {
+    "reel_seconds":            { "type": "number", "min": 15,  "max": 600, "applies": "window" },
+    "overlay_accent":          { "type": "color",              "applies": "both" },
+    "overlay_vertical_anchor": { "type": "number", "min": 0,   "max": 1,   "applies": "middle_third" },
+    "phrase_max_words":        { "type": "int",    "min": 1,   "max": 20,  "applies": "middle_third" },
+    "phrase_max_dur_s":        { "type": "number", "min": 0.5, "max": 10,  "applies": "middle_third" },
+    "phrase_gap_s":            { "type": "number", "min": 0,   "max": 5,   "applies": "middle_third" },
+    "phrase_hold_s":           { "type": "number", "min": 0,   "max": 5,   "applies": "middle_third" },
+    "phrase_uppercase":        { "type": "bool",               "applies": "middle_third" },
+    "font_scale":              { "type": "number", "min": 0.5, "max": 2.0, "applies": "both" },
+    "card_opacity":            { "type": "number", "min": 0,   "max": 1,   "applies": "middle_third" },
+    "box_opacity":             { "type": "number", "min": 0,   "max": 1,   "applies": "lower_third" },
+    "accent_bar_px":           { "type": "int",    "min": 0,   "max": 40,  "applies": "both" },
+    "corner_radius":           { "type": "int",    "min": 0,   "max": 80,  "applies": "both" },
+    "anim_style":              { "type": "enum",   "values": ["spring", "fade", "slide", "none"], "applies": "both" },
+    "anim_damping":            { "type": "number", "min": 1,   "max": 400, "applies": "both" },
+    "anim_mass":               { "type": "number", "min": 0.1, "max": 5,   "applies": "both" },
+    "lower_third_duration_s":  { "type": "number", "min": 0,   "max": 30,  "applies": "lower_third" }
+  },
   "copy": {
     "mark": "REEL-AF",
     "sub": "CUTTING ROOM",
@@ -414,6 +433,19 @@
   .count-ctl input::-webkit-outer-spin-button, .count-ctl input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
   .count-note { font-family: var(--mono); font-size: 10px; color: var(--print-fog); margin-top: 8px; letter-spacing: 0.06em; }
 
+  /* tune panel — composite-only per-job overlay/effect overrides */
+  .tune-controls { padding: 12px 18px 4px; display: flex; flex-direction: column; gap: 12px; }
+  .tune-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .tune-row .tk { font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--print-dim); flex: none; }
+  .tune-row .tf { display: flex; align-items: center; gap: 8px; }
+  .tune-row input[type="range"] { width: 120px; }
+  .tune-row .tval { font-family: var(--mono); font-size: 11px; color: var(--print-fog); min-width: 38px; text-align: right; }
+  .tune-row input[type="color"] { width: 34px; height: 26px; padding: 0; border: 1px solid var(--line-2); background: none; }
+  .tune-row select { background: var(--film-2); color: var(--print); border: 1px solid var(--line-2); font-family: var(--mono); font-size: 11px; padding: 4px 6px; }
+  .tune-row input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--grease); }
+  .tune-reset { margin: 4px 18px 16px; background: none; border: 1px solid var(--line-2); color: var(--print-dim); font-family: var(--mono); font-size: 10px; letter-spacing: 0.1em; padding: 8px 12px; cursor: pointer; text-transform: uppercase; }
+  .tune-reset:hover { color: var(--grease); border-color: var(--grease); }
+
   /* ROLL button */
   .roll {
     width: 100%; margin-top: 18px; font-family: var(--disp); font-weight: 800; font-size: 19px;
@@ -564,6 +596,11 @@
             <div class="count-note" id="countNote">how many composite reels to cut</div>
           </div>
         </div>
+        <div class="panel" id="tunePanel">
+          <h3>Tune</h3>
+          <div class="tune-controls" id="tuneControls"></div>
+          <button type="button" class="tune-reset" id="resetTune">reset to preset</button>
+        </div>
         <div class="panel readonly" id="finishPanel">
           <h3>Global Polished Defaults</h3>
           <div class="scopeNote">Finish-stage output defaults — not editable per job.</div>
@@ -650,6 +687,7 @@
     file: null,
     busy: false,
     count: CFG.ui.countDefault,
+    overrides: {},
     researchMode: "automatic",
     researchRunId: null,
     researchExecId: null,
@@ -701,6 +739,7 @@
       el.innerHTML = `<span class="ratio">${p.ratio}</span><span class="meta"><span class="l">${p.label}</span><span class="s">${p.sub}</span></span>`;
       el.onclick = () => {
         state.preset = p;
+        state.overrides = {};    // tuning is preset-specific; clear on switch
         renderPresets();
         applyPresetShape();
         renderPresetDetails(p);
@@ -811,7 +850,152 @@
     $("countInput").value = String(state.count);
   }
   function renderJobSettings() {
-    $("jobSettings").style.display = (state.preset.kind === KIND_TOPIC) ? "none" : "";
+    const hide = state.preset.kind === KIND_TOPIC;
+    $("jobSettings").style.display = hide ? "none" : "";
+    $("tunePanel").style.display = hide ? "none" : "";
+    renderTune();
+  }
+
+  /* ── tune panel: per-job overlay/effect overrides (composite-only) ──
+     Controls are built from CFG.tunables (the mirror of tunables.json); each is
+     seeded from the selected preset's default, and buildInput sends only the
+     values a user changed away from that default (collectOverrides). */
+  const EFFECT_DEFAULTS = {
+    font_scale: 1.0, card_opacity: 0.84, box_opacity: 0.88,
+    accent_bar_px: 8, corner_radius: 22,
+    anim_style: "spring", anim_damping: 200, anim_mass: 0.5,
+  };
+  const TUNE_LABELS = {
+    reel_seconds: "Reel length (s)", overlay_accent: "Accent",
+    overlay_vertical_anchor: "Vertical anchor", phrase_max_words: "Phrase max words",
+    phrase_max_dur_s: "Phrase max seconds", phrase_gap_s: "Phrase gap (s)",
+    phrase_hold_s: "Phrase hold (s)", phrase_uppercase: "Uppercase",
+    font_scale: "Font scale", card_opacity: "Card opacity", box_opacity: "Box opacity",
+    accent_bar_px: "Accent bar (px)", corner_radius: "Corner radius",
+    anim_style: "Animation", anim_damping: "Anim damping", anim_mass: "Anim mass",
+    lower_third_duration_s: "Lower-third seconds",
+  };
+
+  function presetDefault(key) {
+    const d = (state.preset && state.preset.details) || {};
+    const ph = d.phrase || {};
+    const lt = d.lowerThird || {};
+    const byKey = {
+      reel_seconds: d.reelSeconds,
+      overlay_accent: d.overlayAccent,
+      overlay_vertical_anchor: ph.verticalAnchor,
+      phrase_max_words: ph.maxWords,
+      phrase_max_dur_s: ph.maxDurationS,
+      phrase_gap_s: ph.gapS,
+      phrase_hold_s: ph.holdS,
+      phrase_uppercase: ph.uppercase,
+      lower_third_duration_s: lt.durationS,
+    };
+    const val = byKey[key];
+    return val != null ? val : EFFECT_DEFAULTS[key];
+  }
+
+  function tunablesForPreset() {
+    const overlay = (state.preset.details && state.preset.details.overlay) || null;
+    return Object.keys(CFG.tunables)
+      .map((k) => [k, CFG.tunables[k]])
+      .filter(([, spec]) =>
+        spec.applies === "both" || spec.applies === "window" || spec.applies === overlay
+      );
+  }
+
+  function stepFor(spec) {
+    return spec.type === "int" ? 1 : (spec.max != null && spec.max <= 5 ? 0.05 : 1);
+  }
+
+  function tuneControlRow(key, spec) {
+    const row = document.createElement("div");
+    row.className = "tune-row";
+    const label = document.createElement("span");
+    label.className = "tk";
+    label.textContent = TUNE_LABELS[key] || key;
+    const field = document.createElement("span");
+    field.className = "tf";
+    const seed = state.overrides[key] != null ? state.overrides[key] : presetDefault(key);
+
+    let control;
+    if (spec.type === "bool") {
+      control = document.createElement("input");
+      control.type = "checkbox";
+      control.checked = Boolean(seed);
+    } else if (spec.type === "color") {
+      control = document.createElement("input");
+      control.type = "color";
+      control.value = seed || "#7E22CE";
+    } else if (spec.type === "enum") {
+      control = document.createElement("select");
+      spec.values.forEach((opt) => {
+        const o = document.createElement("option");
+        o.value = opt;
+        o.textContent = opt;
+        control.appendChild(o);
+      });
+      control.value = seed != null ? seed : spec.values[0];
+    } else {
+      control = document.createElement("input");
+      control.type = "range";
+      control.min = String(spec.min);
+      control.max = String(spec.max);
+      control.step = String(stepFor(spec));
+      control.value = String(seed != null ? seed : spec.min);
+      const out = document.createElement("span");
+      out.className = "tval";
+      out.textContent = control.value;
+      control.addEventListener("input", () => { out.textContent = control.value; });
+      field.appendChild(control);
+      field.appendChild(out);
+      control.dataset.tuneKey = key;
+      control.dataset.tuneType = spec.type;
+      row.appendChild(label);
+      row.appendChild(field);
+      return row;
+    }
+    control.dataset.tuneKey = key;
+    control.dataset.tuneType = spec.type;
+    field.appendChild(control);
+    row.appendChild(label);
+    row.appendChild(field);
+    return row;
+  }
+
+  function renderTune() {
+    const box = $("tuneControls");
+    while (box.firstChild) box.removeChild(box.firstChild);
+    if (state.preset.kind === KIND_TOPIC) return;
+    tunablesForPreset().forEach(([key, spec]) => box.appendChild(tuneControlRow(key, spec)));
+  }
+
+  function tuneValuesEqual(a, b) {
+    if (typeof a === "number" && typeof b === "number") return a === b;
+    if (typeof a === "string" && typeof b === "string") return a.toLowerCase() === b.toLowerCase();
+    return a === b;
+  }
+
+  function collectOverrides() {
+    const out = {};
+    if (state.preset.kind === KIND_TOPIC) return out;
+    document.querySelectorAll("#tuneControls [data-tune-key]").forEach((el) => {
+      const key = el.dataset.tuneKey;
+      const type = el.dataset.tuneType;
+      let val;
+      if (type === "bool") val = el.checked;
+      else if (type === "int") val = parseInt(el.value, 10);
+      else if (type === "number") val = parseFloat(el.value);
+      else val = el.value;
+      if (val === "" || (typeof val === "number" && Number.isNaN(val))) return;
+      if (!tuneValuesEqual(val, presetDefault(key))) out[key] = val;
+    });
+    return out;
+  }
+
+  function resetTune() {
+    state.overrides = {};
+    renderTune();
   }
 
   /* ── mode toggle ── */
@@ -963,9 +1147,12 @@
 
   function buildInput(handle) {
     if (state.preset.kind === KIND_TOPIC) return { topic: $("url").value.trim() };
-    if (state.mode === MODE_FILE) return { source: handle, preset: state.preset.id, count: selectedCount() };
-    const u = $("url").value.trim();
-    return { url: u, preset: state.preset.id, count: selectedCount() };
+    const base = (state.mode === MODE_FILE)
+      ? { source: handle, preset: state.preset.id, count: selectedCount() }
+      : { url: $("url").value.trim(), preset: state.preset.id, count: selectedCount() };
+    const overrides = collectOverrides();
+    if (Object.keys(overrides).length) base.overrides = overrides;
+    return base;
   }
 
   function goToLogin() {
@@ -1408,6 +1595,11 @@
   $("countDec").onclick = () => setCount(state.count - 1);
   $("countInc").onclick = () => setCount(state.count + 1);
   $("countInput").addEventListener("change", () => setCount(selectedCount()));
+
+  /* ── tune panel wiring ── */
+  $("resetTune").addEventListener("click", resetTune);
+  $("tuneControls").addEventListener("input", () => { state.overrides = collectOverrides(); });
+  $("tuneControls").addEventListener("change", () => { state.overrides = collectOverrides(); });
 
   /* ── boot ── */
   renderPresets();

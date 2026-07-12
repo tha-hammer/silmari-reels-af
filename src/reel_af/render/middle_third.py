@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from reel_af.render.lower_third import input_args
+from reel_af.render.lower_third import input_args, overlay_effect_props
 
 # Repo-root ``remotion/`` project: this file is src/reel_af/render/middle_third.py
 _DEFAULT_PROJECT_DIR = Path(__file__).resolve().parents[3] / "remotion"
@@ -106,13 +106,17 @@ def render_overlay(
     *,
     chrome: str | None = None,
     force: bool = False,
+    runner: Any = subprocess.run,
 ) -> Path:
     """Render the preset's Remotion composition to a transparent PNG sequence.
 
-    Props (segments, accent, vertical anchor, total frames) are written to a
-    sidecar file rather than passed inline — a window's segment list can exceed
-    the shell arg length. Skips rendering when the sequence already exists
-    (unless ``force``). Returns ``out_seq_dir``."""
+    Props (segments, accent, vertical anchor, total frames, plus any tuned effect
+    props merged onto ``preset``) are written to a sidecar file rather than passed
+    inline — a window's segment list can exceed the shell arg length. Skips
+    rendering when the sequence already exists (unless ``force``). The Remotion
+    invocation goes through the injected ``runner`` (default ``subprocess.run``) so
+    tests can drive the merge + prop emission without a Node/Chromium subprocess.
+    Returns ``out_seq_dir``."""
     out_seq_dir = Path(out_seq_dir)
     if not force and out_seq_dir.exists() and any(out_seq_dir.glob(_FRAME_GLOB)):
         return out_seq_dir
@@ -122,7 +126,12 @@ def render_overlay(
         "segments": segments,
         "totalFrames": total_frames,
         "verticalAnchor": float(preset.get("overlay_vertical_anchor", 0.5)),
+        **overlay_effect_props(preset),
     }
+    if preset.get("card_opacity") is not None:
+        props["cardOpacity"] = float(preset["card_opacity"])
+    if preset.get("phrase_uppercase") is not None:
+        props["textTransform"] = "uppercase" if preset["phrase_uppercase"] else "none"
     props_path = out_seq_dir.parent / "props.json"
     props_path.write_text(json.dumps(props))
     cmd = [
@@ -131,7 +140,7 @@ def render_overlay(
     ]
     if chrome:
         cmd.append(f"--browser-executable={chrome}")
-    subprocess.run(cmd, cwd=str(project_dir(preset)), check=True, capture_output=True)
+    runner(cmd, cwd=str(project_dir(preset)), check=True, capture_output=True)
     return out_seq_dir
 
 

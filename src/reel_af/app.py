@@ -47,6 +47,7 @@ import os
 import re
 import time
 import uuid
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -661,22 +662,72 @@ SOURCE_NO_AUDIO_TRACK_MESSAGE = (
 )
 
 
+@dataclass
+class CompositeDeps:
+    """The external I/O the composite pipeline drives (download, audio probe,
+    transcribe, duration probe). Injected so the merge + prop-emission span is
+    drivable in tests without ffmpeg/whisper/network; production builds the real
+    wiring via :func:`_default_composite_deps`."""
+
+    download: Any
+    has_audio: Any
+    transcribe: Any
+    probe_duration: Any
+
+
+def _ffprobe_duration(src: Path) -> float:
+    import subprocess
+
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "csv=p=0", str(src)],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    return float(out)
+
+
+def _default_composite_deps() -> CompositeDeps:
+    from reel_af.render.captions import caption_words, has_audio_stream
+    from reel_af.render.hooks import download_crisp_source
+
+    return CompositeDeps(
+        download=download_crisp_source,
+        has_audio=has_audio_stream,
+        transcribe=caption_words,
+        probe_duration=_ffprobe_duration,
+    )
+
+
 def _run_composite_reels(
     *, url: str, preset_name: str, count: int, out_path: Path, chrome: str | None,
+    overrides: dict | None = None,
+    deps: CompositeDeps | None = None,
+    runner: Any = None,
 ) -> dict:
     """Blocking: download the source video, transcribe it, and cut ``count``
     preset-length reels with a Remotion overlay. Reuses the exact building
-    blocks behind the ``reel-af reels`` CLI (no LLM / media API calls)."""
+    blocks behind the ``reel-af reels`` CLI (no LLM / media API calls).
+
+    ``overrides`` is a per-job tunable dict merged onto the loaded preset after
+    ``safe_overrides`` drops unknown keys and clamps values (plan Behavior 1/2).
+    ``deps``/``runner`` are injectable seams for the external I/O + render
+    subprocess so the merge and prop emission are drivable without ffmpeg/whisper/
+    Node (default to the real wiring)."""
     import shutil
-    import subprocess
 
     from reel_af.render import lower_third, middle_third
-    from reel_af.render.captions import caption_words, has_audio_stream
-    from reel_af.render.hooks import download_crisp_source
     from reel_af.render.presets import load_preset, preset_names
+    from reel_af.render.tunables import safe_overrides
+
+    if deps is None:
+        deps = _default_composite_deps()
+    if runner is None:
+        import subprocess
+
+        runner = subprocess.run
 
     try:
-        cfg = load_preset(preset_name)
+        cfg = {**load_preset(preset_name), **safe_overrides(overrides)}
     except KeyError:
         return {"error": f"unknown preset {preset_name!r}; available: {preset_names()}"}
     overlay_kind = cfg.get("overlay")
@@ -687,16 +738,14 @@ def _run_composite_reels(
     fps = int(cfg.get("fps", 30))
     reel_s = float(cfg["reel_seconds"])
     try:
-        src = download_crisp_source(url, out_path / "source.mp4")
+        src = deps.download(url, out_path / "source.mp4")
     except (RuntimeError, ValueError) as exc:
         return {"error": str(exc)}
-    source_has_audio = has_audio_stream(src)
+    source_has_audio = deps.has_audio(src)
     if not source_has_audio:
         return {"error": SOURCE_NO_AUDIO_TRACK_MESSAGE, "code": SOURCE_NO_AUDIO_TRACK_CODE}
-    words = caption_words(src, workdir=out_path)
-    dur = float(subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(src)],
-        capture_output=True, text=True, check=True).stdout.strip())
+    words = deps.transcribe(src, workdir=out_path)
+    dur = float(deps.probe_duration(src))
     n = int(dur // reel_s)
     if n < 1:
         return {"error": f"source is {dur:.0f}s — shorter than one {reel_s:.0f}s reel."}
@@ -708,9 +757,11 @@ def _run_composite_reels(
         seq = d / "seq"
         if overlay_kind == "middle_third":
             segs = middle_third.window_segments(words, t0, t0 + reel_s, cfg, fps=fps)
-            overlay = middle_third.render_overlay(segs, int(reel_s * fps), seq, cfg, chrome=chrome)
+            overlay = middle_third.render_overlay(
+                segs, int(reel_s * fps), seq, cfg, chrome=chrome, runner=runner
+            )
             final = middle_third.composite_window(
-                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps, runner=runner
             )
         else:
             title = lower_third.title_from_words(words, t0, t0 + reel_s, cfg)
@@ -720,9 +771,11 @@ def _run_composite_reels(
                 accent=str(cfg.get("overlay_accent", "#7E22CE")),
                 chrome=chrome,
                 cfg=cfg,
+                runner=runner,
             )
             final = lower_third.composite_window(
-                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps, cfg=cfg
+                src, t0, reel_s, overlay, d / f"reel{idx:02d}.mp4", fps=fps, cfg=cfg,
+                runner=runner,
             )
         shutil.rmtree(seq, ignore_errors=True)
         reels.append(str(final))
@@ -735,6 +788,7 @@ async def composite_to_reel(
     url: str,
     preset: str = "middle-third-dynamic",
     count: int = 1,
+    overrides: dict | None = None,
     out_dir: str | None = None,
 ) -> dict:
     """Turn a source VIDEO (URL) into vertical reel(s) with a Remotion overlay.
@@ -759,7 +813,8 @@ async def composite_to_reel(
     t_start = time.time()
     result = await asyncio.to_thread(
         _run_composite_reels, url=url, preset_name=preset,
-        count=max(1, int(count)), out_path=out_path, chrome=chrome)
+        count=max(1, int(count)), out_path=out_path, chrome=chrome,
+        overrides=overrides)
     took = round(time.time() - t_start, 1)
     # NB: source ``url`` is intentionally NOT surfaced in the reel result — it is the
     # (presigned) input, and the UI must never present it as the reel download (T10).

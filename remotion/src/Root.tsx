@@ -1,9 +1,12 @@
 import React from "react";
 import { Composition } from "remotion";
-import { LowerThird } from "./LowerThird";
-import { MiddleThird, Segment } from "./MiddleThird";
+import { LowerThird, lowerThirdSchema } from "./LowerThird";
+import { MiddleThird, Segment, middleThirdSchema } from "./MiddleThird";
 
-// 6s lower-third overlay at 1920x1080/30fps. Title + accent come from --props.
+// Effect-prop defaults equal to the components' previous hardcoded literals, so a
+// render that omits a prop is pixel-identical to before. A tuned `--props` payload
+// (built by the Python render modules) overrides individual props; the Zod schema
+// validates the merged result at render time.
 export const RemotionRoot: React.FC = () => {
   return (
     <>
@@ -14,7 +17,18 @@ export const RemotionRoot: React.FC = () => {
         fps={30}
         width={1920}
         height={1080}
-        defaultProps={{ title: "Lower Third Title", accent: "#7E22CE" }}
+        schema={lowerThirdSchema}
+        defaultProps={{
+          title: "Lower Third Title",
+          accent: "#7E22CE",
+          fontScale: 1,
+          boxOpacity: 0.88,
+          accentBarPx: 8,
+          cornerRadius: 12,
+          anim: "spring" as const,
+          animDamping: 200,
+          animMass: 0.6,
+        }}
       />
       <Composition
         id="MiddleThird"
@@ -22,6 +36,7 @@ export const RemotionRoot: React.FC = () => {
         fps={30}
         width={1080}
         height={1920}
+        schema={middleThirdSchema}
         defaultProps={{
           segments: [
             { text: "Script-synced overlay", from: 0, durationInFrames: 60 },
@@ -29,6 +44,14 @@ export const RemotionRoot: React.FC = () => {
           accent: "#7E22CE",
           totalFrames: 0,
           verticalAnchor: 0.5,
+          fontScale: 1,
+          cardOpacity: 0.84,
+          accentBarPx: 9,
+          cornerRadius: 22,
+          anim: "spring" as const,
+          animDamping: 200,
+          animMass: 0.5,
+          textTransform: "none" as const,
         }}
         calculateMetadata={({ props }) => {
           const segs = (props.segments ?? []) as Segment[];

@@ -431,3 +431,184 @@ def test_topic_canonical_params_are_exact():
     assert resp.status_code == 202
     _ctx, submission, *_ = repo.inserted[0]
     assert submission.params == {"target": TOPIC_TARGET}
+
+
+# ─────────────── Behavior 5: web boundary accepts + validates `overrides` ───────────────
+
+
+def test_composite_url_overrides_reach_dispatched_cp_input():
+    """Closure Test A (BLOCKING): valid overrides ride through canonicalization
+    into the production dispatch body and the persisted params."""
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_ov"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic",
+                        "overrides": {"phrase_max_words": 3, "overlay_accent": "#00E5FF"}}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"]["overrides"] == {"phrase_max_words": 3, "overlay_accent": "#00E5FF"}
+    _ctx, submission, *_ = repo.inserted[0]
+    assert submission.params["overrides"] == {"phrase_max_words": 3, "overlay_accent": "#00E5FF"}
+
+
+def test_composite_file_overrides_survive_presign_alongside_url():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_ovf"}, {}))
+    uploads = FakeUploadStore(presigned="https://bucket.example/signed/clip.mp4?sig=xyz")
+    deps = make_deps(
+        identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp, uploads=uploads
+    )
+    handle = f"{ORG_ID}/abc-clip.mp4"
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"source": handle, "preset": "middle-third-dynamic",
+                        "overrides": {"font_scale": 1.5}}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"]["url"] == "https://bucket.example/signed/clip.mp4?sig=xyz"
+    assert dispatched["input"]["overrides"] == {"font_scale": 1.5}
+    assert "source" not in dispatched["input"]
+
+
+def test_composite_url_numeric_string_override_is_canonicalized():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_ovs"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic",
+                        "overrides": {"reel_seconds": "60"}}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched["input"]["overrides"] == {"reel_seconds": 60.0}
+
+
+def test_composite_unknown_override_key_rejected_before_row_or_cp():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic",
+                        "overrides": {"bogus_key": 1}}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "unsupported_override_field"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+@pytest.mark.parametrize(
+    "bad_override",
+    [
+        {"reel_seconds": 5},            # below min
+        {"reel_seconds": 9999},         # above max
+        {"font_scale": 9},              # above max
+        {"anim_style": "wobble"},       # not in enum
+        {"overlay_accent": "not-a-hex"},
+        {"phrase_max_words": "abc"},    # uncoercible int
+        {"phrase_uppercase": "maybe"},  # uncoercible bool
+    ],
+)
+def test_composite_invalid_override_value_rejected_before_row_or_cp(bad_override):
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic",
+                        "overrides": bad_override}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_override"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+def test_file_mode_invalid_override_rejects_before_presign():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    uploads = FakeUploadStore()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo,
+                     control_plane=cp, uploads=uploads)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"source": f"{ORG_ID}/clip.mp4", "preset": "middle-third-dynamic",
+                        "overrides": {"font_scale": 99}}},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "invalid_override"
+    assert uploads.presign_calls == []
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []
+
+
+# ─────────────── Behavior 6: no overrides unchanged; topic rejects overrides ───────────────
+
+
+def test_composite_no_overrides_cp_input_is_byte_identical():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_plain"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc", "preset": "middle-third-dynamic"}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert dispatched == {"input": {"url": "https://youtube.com/watch?v=abc",
+                                    "preset": "middle-third-dynamic", "count": 1}}
+    _ctx, submission, *_ = repo.inserted[0]
+    assert "overrides" not in submission.params
+
+
+def test_composite_empty_overrides_object_is_treated_as_none():
+    repo = FakeReelJobRepo()
+    cp = FakeControlPlane(response=(202, {"execution_id": "exec_empty"}, {}))
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        COMPOSITE_URL,
+        json={"input": {"url": "https://youtube.com/watch?v=abc",
+                        "preset": "middle-third-dynamic", "overrides": {}}},
+    )
+
+    assert resp.status_code == 202
+    _target, dispatched = cp.dispatch_calls[0]
+    assert "overrides" not in dispatched["input"]
+    _ctx, submission, *_ = repo.inserted[0]
+    assert "overrides" not in submission.params
+
+
+def test_topic_with_overrides_is_unsupported_input_field():
+    repo, cp = FakeReelJobRepo(), FakeControlPlane()
+    deps = make_deps(identity=FakeIdentity(make_ctx("member")), reel_jobs=repo, control_plane=cp)
+
+    resp = _client(deps).post(
+        TOPIC_URL, json={"input": {"topic": "black holes", "overrides": {"font_scale": 1.5}}}
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json()["code"] == "unsupported_input_field"
+    assert repo.inserted == []
+    assert cp.dispatch_calls == []

@@ -16,6 +16,7 @@ from typing import Literal
 from urllib.parse import urlparse
 
 from deps import BadRequest
+from tunables import validate_overrides
 
 ReelJobStatus = Literal["queued", "producing", "succeeded", "failed", "cancelled"]
 
@@ -75,11 +76,13 @@ _METADATA_INPUT_KEYS = frozenset(
 # ``input`` is an authenticated UI-boundary hardening reject (unsupported_input_field).
 TOPIC_ALLOWED_INPUT_KEYS = frozenset({"topic"}) | _METADATA_INPUT_KEYS
 # URL mode carries a legacy duplicate ``source`` (compat-only; must equal ``url``).
+# ``overrides`` is the per-job tuning object (plan Behavior 5) — composite-only;
+# the topic set above deliberately excludes it (Behavior 6).
 COMPOSITE_URL_ALLOWED_INPUT_KEYS = (
-    frozenset({"url", "source", "preset", "count"}) | _METADATA_INPUT_KEYS
+    frozenset({"url", "source", "preset", "count", "overrides"}) | _METADATA_INPUT_KEYS
 )
 COMPOSITE_FILE_ALLOWED_INPUT_KEYS = (
-    frozenset({"source", "preset", "count"}) | _METADATA_INPUT_KEYS
+    frozenset({"source", "preset", "count", "overrides"}) | _METADATA_INPUT_KEYS
 )
 TEXT_ALLOWED_INPUT_KEYS = frozenset({"text"}) | _METADATA_INPUT_KEYS
 
@@ -211,8 +214,12 @@ def _canonical_params(
     source_mode: str | None = None,
     preset: str | None = None,
     count: int | None = None,
+    overrides: dict | None = None,
 ) -> dict:
-    """Exact persisted ``submission.params`` — built from normalized values only."""
+    """Exact persisted ``submission.params`` — built from normalized values only.
+
+    ``overrides`` is recorded only when non-empty so an un-tuned submit is
+    byte-identical to before (plan Behavior 6)."""
     params: dict = {"target": target}
     if source_mode is not None:
         params["source_mode"] = source_mode
@@ -220,6 +227,8 @@ def _canonical_params(
         params["preset"] = preset
     if count is not None:
         params["count"] = count
+    if overrides:
+        params["overrides"] = overrides
     return params
 
 
@@ -299,14 +308,20 @@ def build_submission(
             normalized = raw_url.strip()
             _reject_legacy_source_mismatch(raw_input, normalized)
             count = _parse_composite_count(raw_input)
+            overrides = validate_overrides(raw_input.get("overrides"))
+            cp_input = {"url": normalized, "preset": preset, "count": count}
+            if overrides:
+                cp_input["overrides"] = overrides
             return ReelSubmission(
                 target=target,
                 title=preset[:TITLE_MAX],
                 source_url=normalized,
                 topic=None,
                 source_research_run_id=source_research_run_id,
-                params=_canonical_params(target, source_mode="url", preset=preset, count=count),
-                cp_input={"url": normalized, "preset": preset, "count": count},
+                params=_canonical_params(
+                    target, source_mode="url", preset=preset, count=count, overrides=overrides
+                ),
+                cp_input=cp_input,
             )
 
         # File mode.
@@ -316,14 +331,20 @@ def build_submission(
             raise BadRequest("file submit requires an upload handle", code="missing_source")
         handle = handle.strip()
         count = _parse_composite_count(raw_input)
+        overrides = validate_overrides(raw_input.get("overrides"))
+        cp_input = {"source": handle, "preset": preset, "count": count}
+        if overrides:
+            cp_input["overrides"] = overrides
         return ReelSubmission(
             target=target,
             title=preset[:TITLE_MAX],
             source_url=None,
             topic=None,
             source_research_run_id=source_research_run_id,
-            params=_canonical_params(target, source_mode="file", preset=preset, count=count),
-            cp_input={"source": handle, "preset": preset, "count": count},
+            params=_canonical_params(
+                target, source_mode="file", preset=preset, count=count, overrides=overrides
+            ),
+            cp_input=cp_input,
             source_handle=handle,
         )
 

@@ -46,6 +46,33 @@ def project_dir(cfg: Any = None) -> Path:
     return Path(override) if override else _DEFAULT_PROJECT_DIR
 
 
+# Snake-cased tunable key → (camelCase Remotion prop, caster). Shared by both
+# overlays (``middle_third`` imports this) — the one place the naming boundary is
+# crossed. A prop is emitted only when the merged cfg actually carries the key, so
+# an un-tuned render omits it and the composition's ``defaultProps`` (== the old
+# hardcoded literal) fills in, keeping un-tuned output pixel-identical.
+_EFFECT_PROP_BY_KEY: dict[str, tuple[str, Any]] = {
+    "font_scale": ("fontScale", float),
+    "accent_bar_px": ("accentBarPx", int),
+    "corner_radius": ("cornerRadius", int),
+    "anim_style": ("anim", str),
+    "anim_damping": ("animDamping", float),
+    "anim_mass": ("animMass", float),
+}
+
+
+def overlay_effect_props(cfg: Any = None) -> dict[str, Any]:
+    """Map the effect tunables shared by both overlays (font/accent-bar/corner/
+    animation) from a merged cfg to camelCase Remotion props, casting each and
+    omitting any key the cfg does not carry."""
+    props: dict[str, Any] = {}
+    for key, (prop, cast) in _EFFECT_PROP_BY_KEY.items():
+        value = _cfg(cfg, key, None)
+        if value is not None:
+            props[prop] = cast(value)
+    return props
+
+
 def render_lower_third(
     title: str,
     out_seq_dir: Path,
@@ -54,25 +81,32 @@ def render_lower_third(
     chrome: Optional[str] = None,
     cfg: Any = None,
     force: bool = False,
+    runner: Any = subprocess.run,
 ) -> Path:
     """Render the lower-third to a transparent PNG sequence in ``out_seq_dir``.
 
     Skips rendering when the sequence already exists (unless ``force``), so the
-    same title is only rendered once. Returns the sequence directory.
+    same title is only rendered once. Returns the sequence directory. The
+    Remotion invocation goes through the injected ``runner`` (default
+    ``subprocess.run``) so tests can capture the emitted ``--props`` payload
+    without a Node/Chromium subprocess — mirrors ``composite_window``.
     """
     out_seq_dir = Path(out_seq_dir)
     if not force and out_seq_dir.exists() and any(out_seq_dir.glob(_FRAME_GLOB)):
         return out_seq_dir
     out_seq_dir.mkdir(parents=True, exist_ok=True)
-    accent = str(_cfg(cfg, "lower_third_accent", accent))
-    props = json.dumps({"title": title, "accent": accent})
+    accent = str(_cfg(cfg, "lower_third_accent", _cfg(cfg, "overlay_accent", accent)))
+    prop_dict: dict[str, Any] = {"title": title, "accent": accent, **overlay_effect_props(cfg)}
+    if _cfg(cfg, "box_opacity", None) is not None:
+        prop_dict["boxOpacity"] = float(_cfg(cfg, "box_opacity", None))
+    props = json.dumps(prop_dict)
     cmd = [
         "npx", "remotion", "render", _ENTRY, _COMPOSITION_ID, str(out_seq_dir),
         f"--props={props}", "--sequence", "--image-format=png",
     ]
     if chrome:
         cmd.append(f"--browser-executable={chrome}")
-    subprocess.run(cmd, cwd=str(project_dir(cfg)), check=True, capture_output=True)
+    runner(cmd, cwd=str(project_dir(cfg)), check=True, capture_output=True)
     return out_seq_dir
 
 

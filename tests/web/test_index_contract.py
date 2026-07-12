@@ -263,3 +263,58 @@ def test_ui_status_aliases_are_known_by_backend_normalizer():
         assert normalize_reel_status(status) in {"queued", "producing", "succeeded"}
     for status in cfg["ui"]["terminalFailureStatuses"]:
         assert normalize_reel_status(status) in {"failed", "cancelled"}
+
+
+# ─────────────── Behavior 7: buildInput assembles minimal `overrides` ───────────────
+def test_build_input_includes_overrides_via_collect_overrides():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    build_input = html.split("function buildInput", 1)[1].split("function goToLogin", 1)[0]
+    # topic path is unchanged — only {topic}
+    assert "return { topic: $(\"url\").value.trim() }" in build_input
+    # composite path folds in the diffed overrides
+    assert "collectOverrides()" in build_input
+    assert "base.overrides = overrides" in build_input
+
+
+def test_collect_overrides_diffs_against_preset_default():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert "function collectOverrides" in html
+    collect = html.split("function collectOverrides", 1)[1].split("function resetTune", 1)[0]
+    # emits a key only when it differs from the selected preset default
+    assert "presetDefault(key)" in collect
+    assert "tuneValuesEqual" in collect
+
+
+# ─────────────── Behavior 8: UI tuning controls (contract) ───────────────
+def test_tune_panel_contract_exists_and_is_composite_only():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    cfg = _config(html)
+
+    assert "tunables" in cfg
+    assert 'id="tunePanel"' in html
+    assert "function renderTune" in html
+    assert "function collectOverrides" in html
+    assert "function resetTune" in html
+    assert "state.overrides" in html
+
+    # composite-only: renderJobSettings hides the tune panel for the topic preset
+    job_settings = html.split("function renderJobSettings", 1)[1].split("function", 1)[0]
+    assert "tunePanel" in job_settings
+    assert "KIND_TOPIC" in job_settings
+
+
+def test_tune_controls_use_dom_construction_not_config_innerhtml():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    render_tune = html.split("function renderTune", 1)[1].split("function tuneValuesEqual", 1)[0]
+    # controls are built via textContent/createElement, never config-sourced innerHTML
+    assert ".innerHTML" not in render_tune
+
+
+def test_tune_control_row_uses_text_content_for_labels():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    row_fn = html.split("function tuneControlRow", 1)[1].split("function renderTune", 1)[0]
+    assert ".textContent" in row_fn
+    assert ".innerHTML" not in row_fn

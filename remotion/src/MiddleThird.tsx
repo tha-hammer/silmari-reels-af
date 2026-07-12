@@ -3,45 +3,81 @@ import {
   AbsoluteFill,
   Sequence,
   interpolate,
-  spring,
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
+import { z } from "zod";
+import { AnimStyle, effectFields, enterProgress } from "./effectSchema";
 
 export type Segment = { text: string; from: number; durationInFrames: number };
-export type MiddleThirdProps = {
-  segments: Segment[];
-  accent: string;
-  // Vertical placement of the card's centre as a fraction of frame height
-  // (0 = top, 0.5 = centre, 1 = bottom). Lets the card be nudged into the gap
-  // between stacked video regions (e.g. a talking-head cam over a screenshare)
-  // per source, rather than hardcoding one position. Defaults to 0.5 (centre).
-  verticalAnchor?: number;
-};
 
-const DEFAULT_VERTICAL_ANCHOR = 0.5;
+const segmentSchema = z.object({
+  text: z.string(),
+  from: z.number(),
+  durationInFrames: z.number(),
+});
+
+// Runtime-validated prop surface. `defaultProps` (in Root.tsx) equal the old
+// hardcoded literals, so an un-tuned render is pixel-identical; a tuned
+// `--props` payload overrides individual effect props.
+export const middleThirdSchema = z.object({
+  segments: z.array(segmentSchema),
+  totalFrames: z.number(),
+  verticalAnchor: z.number(),
+  cardOpacity: z.number(),
+  textTransform: z.enum(["none", "uppercase"]),
+  ...effectFields,
+});
+
+export type MiddleThirdProps = z.infer<typeof middleThirdSchema>;
+
+type CardProps = {
+  text: string;
+  accent: string;
+  dur: number;
+  verticalAnchor: number;
+  fontScale: number;
+  cardOpacity: number;
+  accentBarPx: number;
+  cornerRadius: number;
+  anim: AnimStyle;
+  animDamping: number;
+  animMass: number;
+  textTransform: "none" | "uppercase";
+};
 
 // One script phrase as an animated card anchored in the frame: springs up
 // + fades/scales in, holds, then eases out. Transparent elsewhere.
-const Card: React.FC<{ text: string; accent: string; dur: number; verticalAnchor: number }> = ({
+const Card: React.FC<CardProps> = ({
   text,
   accent,
   dur,
   verticalAnchor,
+  fontScale,
+  cardOpacity,
+  accentBarPx,
+  cornerRadius,
+  anim,
+  animDamping,
+  animMass,
+  textTransform,
 }) => {
   const frame = useCurrentFrame();
   const { fps, height } = useVideoConfig();
 
-  const enter = spring({ frame, fps, config: { damping: 200, mass: 0.5 } });
+  const enter = enterProgress(anim, frame, fps, animDamping, animMass);
+  const flat = anim === "fade" || anim === "none";
   const outStart = Math.max(1, dur - 9);
   const exit = interpolate(frame, [outStart, dur], [0, 1], {
     extrapolateLeft: "clamp",
     extrapolateRight: "clamp",
   });
 
-  const scale = interpolate(enter, [0, 1], [0.82, 1]) * interpolate(exit, [0, 1], [1, 0.94]);
+  const enterScale = flat ? 1 : interpolate(enter, [0, 1], [0.82, 1]);
+  const scale = enterScale * interpolate(exit, [0, 1], [1, 0.94]);
   const opacity = interpolate(enter, [0, 1], [0, 1]) * (1 - exit);
-  const y = interpolate(enter, [0, 1], [34, 0]) + interpolate(exit, [0, 1], [0, -18]);
+  const enterY = flat ? 0 : interpolate(enter, [0, 1], [34, 0]);
+  const y = enterY + interpolate(exit, [0, 1], [0, -18]);
 
   return (
     <AbsoluteFill>
@@ -62,22 +98,23 @@ const Card: React.FC<{ text: string; accent: string; dur: number; verticalAnchor
             margin: "0 90px",
             transform: `translateY(${y}px) scale(${scale})`,
             opacity,
-            background: "rgba(16,16,20,0.84)",
-            borderRadius: 22,
+            background: `rgba(16,16,20,${cardOpacity})`,
+            borderRadius: cornerRadius,
             padding: "30px 44px",
-            borderBottom: `9px solid ${accent}`,
+            borderBottom: `${accentBarPx}px solid ${accent}`,
             boxShadow: "0 18px 55px rgba(0,0,0,0.5)",
           }}
         >
           <span
             style={{
               color: "#ffffff",
-              fontSize: 66,
+              fontSize: 66 * fontScale,
               fontWeight: 800,
               lineHeight: 1.16,
               letterSpacing: 0.3,
               textAlign: "center",
               display: "block",
+              textTransform,
               fontFamily: "Arial, Helvetica, sans-serif",
             }}
           >
@@ -94,7 +131,15 @@ const Card: React.FC<{ text: string; accent: string; dur: number; verticalAnchor
 export const MiddleThird: React.FC<MiddleThirdProps> = ({
   segments,
   accent,
-  verticalAnchor = DEFAULT_VERTICAL_ANCHOR,
+  verticalAnchor,
+  fontScale,
+  cardOpacity,
+  accentBarPx,
+  cornerRadius,
+  anim,
+  animDamping,
+  animMass,
+  textTransform,
 }) => {
   return (
     <AbsoluteFill style={{ backgroundColor: "transparent" }}>
@@ -105,6 +150,14 @@ export const MiddleThird: React.FC<MiddleThirdProps> = ({
             accent={accent}
             dur={s.durationInFrames}
             verticalAnchor={verticalAnchor}
+            fontScale={fontScale}
+            cardOpacity={cardOpacity}
+            accentBarPx={accentBarPx}
+            cornerRadius={cornerRadius}
+            anim={anim}
+            animDamping={animDamping}
+            animMass={animMass}
+            textTransform={textTransform}
           />
         </Sequence>
       ))}
