@@ -79,6 +79,9 @@ _CAROUSEL_CANCEL_RE = re.compile(r"^v1/carousels/([^/]+)/cancel$")
 _CAROUSEL_FINALIZE_RE = re.compile(r"^v1/carousels/([^/]+)/finalize$")
 _SLIDE_RE = re.compile(r"^v1/carousels/([^/]+)/slides/(\d+)$")
 _RESEARCH_POLL_RE = re.compile(r"^v1/research/([^/]+)$")
+# INT-04: read-only, ORG-SCOPED lineage surface (optional dashboard). GET-only.
+_LINEAGE_ENTITY_RE = re.compile(r"^v1/lineage/entity/([^/]+)$")
+_LINEAGE_RUN_RE = re.compile(r"^v1/lineage/run/([^/]+)$")
 
 
 def _load_api_messages() -> dict[str, str]:
@@ -161,6 +164,20 @@ def _research_poll_id(method: str, sub: str) -> str | None:
     if method != "GET":
         return None
     m = _RESEARCH_POLL_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _lineage_entity_id(method: str, sub: str) -> str | None:
+    if method != "GET":                                   # POST/PUT/DELETE -> not routed (no write)
+        return None
+    m = _LINEAGE_ENTITY_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _lineage_run_id(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _LINEAGE_RUN_RE.match(sub)
     return m.group(1) if m else None
 
 
@@ -499,6 +516,21 @@ def _handle_carousel_get(deps: AppDeps, carousel_id: str) -> tuple[Response, int
     return jsonify({"status": view.status, "slides": view.slides}), 200
 
 
+# ─────────── INT-04 read-only, ORG-SCOPED lineage endpoints (optional dashboard) ───────────
+# Resolve the caller's AuthContext; delegate to LineageView; NO write route. Another org's id
+# conceals to a 200 empty list (never a cross-org leak) via the org-scoped repos.
+
+
+def _handle_lineage_entity(deps: AppDeps, entity_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    return jsonify([u.to_json() for u in deps.lineage.what_produced(ctx, entity_id)]), 200
+
+
+def _handle_lineage_run(deps: AppDeps, run_id: str) -> tuple[Response, int]:
+    ctx = deps.identity.resolve(request)
+    return jsonify([d.to_json() for d in deps.lineage.what_came_from(ctx, run_id)]), 200
+
+
 def _openrouter_provider():
     import_module("reel_af.sdk_patches")
     from agentfield.media_providers import OpenRouterProvider
@@ -707,6 +739,12 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     slide = _slide_target(method, subpath)
     if slide is not None:
         return _handle_slide(deps, *slide)
+    lineage_entity = _lineage_entity_id(method, subpath)
+    if lineage_entity is not None:
+        return _handle_lineage_entity(deps, lineage_entity)
+    lineage_run = _lineage_run_id(method, subpath)
+    if lineage_run is not None:
+        return _handle_lineage_run(deps, lineage_run)
     return _not_found()
 
 

@@ -309,6 +309,52 @@ class PgReelJobRepo(_SharedSchema):
             source_research_run_id=row[7],
         )
 
+    def get(self, ctx, job_id):  # pragma: no cover - integration
+        # INT-04 forward lineage: org-scoped read-by-id of a reel job (carries provenance).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
+                    "from deepresearch.reel_job where id = %s and org_id = %s",
+                    (job_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("reel job not found")           # conceal cross-org / absent
+        return ReelJobRef(
+            job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
+            execution_id=row[4], result_ref=row[5], completed_at=row[6],
+            source_research_run_id=row[7],
+        )
+
+    def reel_jobs_by_source_run(self, ctx, run_id):  # pragma: no cover - integration
+        # INT-04 reverse lineage: reel-af-OWNED table ONLY, org-scoped by ctx (no new table).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id "
+                    "from deepresearch.reel_job "
+                    "where source_research_run_id = %s and org_id = %s",
+                    (run_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=r[0], org_id=r[1], created_by=r[2], status=r[3],
+                execution_id=r[4], result_ref=r[5], completed_at=r[6],
+                source_research_run_id=r[7],
+            )
+            for r in rows
+        ]
+
     def update_from_execution(
         self, ctx, execution_id, status: ReelJobStatus, result_ref, completed_at
     ):  # pragma: no cover - integration
@@ -471,10 +517,12 @@ class PgCarouselRepo(_SharedSchema):
         )
 
     def get(self, ctx, carousel_id):  # pragma: no cover
-        status = self._one(
-            "select status from deepresearch.carousel where id = %s and org_id = %s",
+        # source_research_run_id is surfaced so INT-04 forward lineage can resolve provenance.
+        status, source_research_run_id = self._one(
+            "select status, source_research_run_id from deepresearch.carousel "
+            "where id = %s and org_id = %s",
             (carousel_id, ctx.org_id),
-        )[0]
+        )
         conn = _connect(_database_url())
         try:
             with conn.cursor() as cur:
@@ -490,11 +538,34 @@ class PgCarouselRepo(_SharedSchema):
             conn.close()
         return SimpleNamespace(
             status=status,
+            source_research_run_id=source_research_run_id,
             slides=[
                 {"idx": idx, "image_ref": ref, "prompt": prompt, "status": slide_status}
                 for idx, ref, prompt, slide_status in rows
             ],
         )
+
+    def carousels_by_source_run(self, ctx, run_id):  # pragma: no cover - integration
+        # INT-04 reverse lineage: reel-af-OWNED carousel table ONLY, org-scoped (no new table).
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, source_research_run_id "
+                    "from deepresearch.carousel "
+                    "where source_research_run_id = %s and org_id = %s",
+                    (run_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=r[0], org_id=r[1], created_by=r[2], status=r[3],
+                execution_id=r[4], source_research_run_id=r[5],
+            )
+            for r in rows
+        ]
 
     def slide_ref(self, ctx, carousel_id, slide_idx) -> str:  # pragma: no cover
         return self._one(

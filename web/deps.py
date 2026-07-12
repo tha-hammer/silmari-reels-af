@@ -142,6 +142,9 @@ class ReelJobRepoPort(Protocol):
     def insert_or_get_queued(self, ctx, submission, job_id, now, client_request_id): ...
     def attach_execution_id(self, ctx, job_id, execution_id): ...
     def get_by_execution(self, ctx, execution_id): ...
+    # INT-04 lineage (read-only, reel-af-OWNED table): forward read-by-id + reverse provenance.
+    def get(self, ctx, job_id): ...
+    def reel_jobs_by_source_run(self, ctx, run_id): ...
     def mark_failed(self, ctx, job_id, reason, completed_at): ...
     def update_from_execution(self, ctx, execution_id, status, result_ref, completed_at): ...
     def mark_stale_queued(self, now) -> int: ...
@@ -158,6 +161,8 @@ class CarouselRepoPort(Protocol):
     def insert_or_get_draft(self, ctx, create, carousel_id, now, client_request_id): ...
     def attach_execution_id(self, ctx, carousel_id, execution_id): ...
     def get(self, ctx, carousel_id): ...
+    # INT-04 lineage (read-only, reel-af-OWNED table): reverse provenance lookup.
+    def carousels_by_source_run(self, ctx, run_id): ...
     def slide_ref(self, ctx, carousel_id, slide_idx) -> str: ...
     def replace_slide(self, ctx, carousel_id, slide_idx, ref, prompt, status): ...
     def set_status(self, ctx, carousel_id, status): ...
@@ -333,6 +338,9 @@ class AppDeps:
     clock: Clock
     uuid_factory: UuidFactory
     logger: logging.Logger
+    # INT-04: optional, read-only lineage view — self-composed over the org-scoped repos above.
+    # Wired post-construction (it references this container); ``None`` until wired.
+    lineage: "object | None" = None
 
 
 def default_deps() -> AppDeps:
@@ -363,7 +371,7 @@ def default_deps() -> AppDeps:
     # C5 effect). The event READER transport (durable /events poll vs SSE) stays an Open-Seam
     # behind EventReaderPort — fail-closed until wired, so the opt-in driver denies not leaks.
     consumer_store = PgEventConsumerStore()
-    return AppDeps(
+    deps = AppDeps(
         identity=build_identity(),                 # SuperTokens session (fail-closed) + DB reader
         access_guard=RoleAccessGuard(),
         reel_jobs=PgReelJobRepo(),                  # shared deepresearch DB; 503 until applied
@@ -385,6 +393,12 @@ def default_deps() -> AppDeps:
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,
     )
+    # INT-04: the read-only lineage view is self-composed over the org-scoped repos above
+    # (no new external client, no I/O at construction).
+    from lineage import LineageView
+
+    deps.lineage = LineageView(deps)
+    return deps
 
 
 def env(name: str, default: str = "") -> str:
