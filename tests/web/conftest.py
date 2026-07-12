@@ -23,9 +23,11 @@ if WEB not in sys.path:
 from deps import (  # noqa: E402
     AppDeps,
     AuthContext,
+    LocalRun,
     NotFound,
     RoleAccessGuard,
 )
+from events import ConsumeResult  # noqa: E402
 from reel_jobs import ReelJobRef, ResearchRunRef  # noqa: E402
 
 FIXED_JOB_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
@@ -68,6 +70,7 @@ class FakeReelJobRepo:
         self.research_runs: dict = {}    # research_run_id -> ResearchRunRef
         self._runs_by_exec: dict = {}    # execution_id -> research_run_id
         self._jobs_by_exec: dict = {}    # execution_id -> ReelJobRef
+        self._jobs_by_id: dict = {}      # INT-04 lineage: job_id -> ReelJobRef (read-by-id + reverse)
 
     def ensure_ready(self) -> None:
         pass
@@ -179,6 +182,25 @@ class FakeReelJobRepo:
             raise NotFound("research run not found")        # conceal foreign/absent
         return r
 
+    # ─────────────── INT-04 lineage: read-by-id + reverse provenance (own table) ───────────────
+
+    def seed_reel_job(self, job_id, org_id, source_research_run_id=None,
+                      created_by=None, status="queued") -> ReelJobRef:
+        ref = ReelJobRef(job_id=job_id, org_id=org_id, created_by=created_by or USER_ID,
+                         status=status, source_research_run_id=source_research_run_id)
+        self._jobs_by_id[job_id] = ref
+        return ref
+
+    def get(self, ctx, job_id):
+        ref = self._jobs_by_id.get(job_id)
+        if ref is None or ref.org_id != ctx.org_id:
+            raise NotFound("reel job not found")            # conceal cross-org/absent
+        return ref
+
+    def reel_jobs_by_source_run(self, ctx, run_id):
+        return [r for r in self._jobs_by_id.values()
+                if r.org_id == ctx.org_id and r.source_research_run_id == run_id]
+
 
 class FakeUploadStore:
     def __init__(
@@ -265,12 +287,13 @@ class FakeCarouselRepo:
     def ensure_ready(self) -> None:
         pass
 
-    def seed(self, org, cid, *, status="draft", slides=None):
+    def seed(self, org, cid, *, status="draft", slides=None, source_research_run_id=None):
         self._rows[(org, cid)] = {
             "status": status,
             "slides": list(slides or []),
             "execution_id": None,
             "hq_recreate_count": 0,
+            "source_research_run_id": source_research_run_id,   # INT-04 provenance FK
         }
 
     def _own(self, ctx, cid):
@@ -318,7 +341,20 @@ class FakeCarouselRepo:
         from types import SimpleNamespace
 
         row = self._own(ctx, carousel_id)
-        return SimpleNamespace(status=row["status"], slides=list(row["slides"]))
+        return SimpleNamespace(
+            status=row["status"],
+            slides=list(row["slides"]),
+            source_research_run_id=row.get("source_research_run_id"),   # INT-04 provenance
+        )
+
+    def carousels_by_source_run(self, ctx, run_id):
+        # INT-04 reverse provenance lookup over reel-af's OWN carousel rows, org-scoped.
+        return [
+            ReelJobRef(job_id=cid, org_id=org, created_by=USER_ID, status=row["status"],
+                       source_research_run_id=row.get("source_research_run_id"))
+            for (org, cid), row in self._rows.items()
+            if org == ctx.org_id and row.get("source_research_run_id") == run_id
+        ]
 
     def slide_ref(self, ctx, carousel_id, slide_idx) -> str:
         row = self._own(ctx, carousel_id)
@@ -402,6 +438,115 @@ class FakeResearchRunReader:
         return detail
 
 
+# ─────────────── INT-02 durable-cursor consumer fakes (B2/B4/B5) ───────────────
+
+
+def make_event(seq, *, id="ce-1", subject="exec-1", type="research.completed",
+               research_prompt="prompt", **data):
+    """Build a CloudEvent record as the durable read surface yields it (envelope +
+    monotonic ``sequence``). ``subject`` is the execution_id (C-Correlation)."""
+    payload = {"run_id": str(uuid.uuid4()), "status": "succeeded",
+               "research_prompt": research_prompt, "research_document_id": subject}
+    payload.update(data)
+    return {"id": id, "type": type, "subject": subject, "sequence": seq,
+            "time": "2026-07-12T18:00:00Z", "data": payload}
+
+
+class _ConsumerState:
+    """Shared in-memory backing store for the three consumer-store fakes, so the C5
+    one-transaction effect (dedup insert + stamp + cursor advance) mutates ONE state
+    all-or-nothing (a faithful single-tx simulation)."""
+
+    def __init__(self, cursor_start=0):
+        self.processed: set = set()               # CloudEvents ids
+        self.processed_rows: list = []            # (id, execution_id)
+        self.cursors: dict = {"reel-af": cursor_start}
+        self.local_runs: dict = {}                # execution_id -> LocalRun
+        self.reel_rows: dict = {}                 # (org_id, execution_id) -> {"source_research_run_id": ...}
+
+    def seed_local_run(self, execution_id, org_id, created_by=None) -> LocalRun:
+        run = LocalRun(id=uuid.uuid4(), org_id=org_id, created_by=created_by or USER_ID)
+        self.local_runs[execution_id] = run
+        return run
+
+    def seed_reel_row(self, org_id, execution_id):
+        self.reel_rows[(org_id, execution_id)] = {"source_research_run_id": None}
+
+    def stamp_of(self, org_id, execution_id):
+        row = self.reel_rows.get((org_id, execution_id))
+        return row["source_research_run_id"] if row else None
+
+
+class FakeEventReader:
+    """Durable read-surface fake. Records are read by cursor+type filter, in Seq order.
+    ``subscribed_bus`` stays False — a test asserts the consumer NEVER rides the in-memory
+    ``GlobalExecutionEventBus`` (A1)."""
+
+    def __init__(self, records=None):
+        self.records = list(records or [])
+        self.read_calls: list = []
+        self.subscribed_bus = False
+
+    def read_since(self, cursor, event_type, limit):
+        self.read_calls.append((cursor, event_type, limit))
+        out = [r for r in self.records
+               if r.get("sequence", 0) > cursor and r.get("type") == event_type]
+        out.sort(key=lambda r: r["sequence"])
+        return out[:limit]
+
+
+class FakeProcessedMessages:
+    """Dedup + the C5 one-tx effect over the shared ``_ConsumerState``."""
+
+    def __init__(self, state: _ConsumerState):
+        self.state = state
+
+    def already_processed(self, cloudevents_id) -> bool:
+        return cloudevents_id in self.state.processed
+
+    def mark(self, cloudevents_id, execution_id) -> None:
+        if cloudevents_id not in self.state.processed:      # ON CONFLICT DO NOTHING
+            self.state.processed.add(cloudevents_id)
+            self.state.processed_rows.append((cloudevents_id, execution_id))
+
+    def stamp_dedup_advance(self, event, consumer) -> ConsumeResult:
+        seq, cid, execution_id = event["sequence"], event["id"], event["subject"]
+        first_seen = cid not in self.state.processed
+        local_run_found = False
+        if first_seen:
+            self.state.processed.add(cid)
+            self.state.processed_rows.append((cid, execution_id))
+            run = self.state.local_runs.get(execution_id)
+            if run is not None:
+                local_run_found = True
+                row = self.state.reel_rows.get((run.org_id, execution_id))   # org-scoped
+                if row is not None and row["source_research_run_id"] is None:  # null-guard
+                    row["source_research_run_id"] = run.id                     # local UUID
+        else:
+            local_run_found = self.state.local_runs.get(execution_id) is not None
+        self.state.cursors[consumer] = seq                  # advance in the SAME (fake) tx
+        return ConsumeResult(first_seen=first_seen, local_run_found=local_run_found)
+
+
+class FakeEventCursor:
+    def __init__(self, state: _ConsumerState):
+        self.state = state
+
+    def get(self, consumer) -> int:
+        return self.state.cursors.get(consumer, 0)
+
+    def advance(self, consumer, seq) -> None:
+        self.state.cursors[consumer] = seq
+
+
+class FakeLocalRunResolver:
+    def __init__(self, state: _ConsumerState):
+        self.state = state
+
+    def resolve(self, execution_id):
+        return self.state.local_runs.get(execution_id)
+
+
 class FixedClock:
     def now(self) -> datetime:
         return datetime(2026, 7, 10, 12, 0, 0, tzinfo=timezone.utc)
@@ -417,9 +562,13 @@ def make_deps(
     storage: FakeStorage | None = None,
     slides: FakeSlideRefResolver | None = None,
     research_reader: FakeResearchRunReader | None = None,
+    events: FakeEventReader | None = None,
+    consumer_state: _ConsumerState | None = None,
     uuid_factory=None,
 ) -> AppDeps:
-    return AppDeps(
+    # INT-02: the three consumer-store fakes share ONE state so the C5 effect is atomic.
+    state = consumer_state or _ConsumerState()
+    deps = AppDeps(
         identity=identity or FakeIdentity(make_ctx()),
         access_guard=RoleAccessGuard(),
         reel_jobs=reel_jobs or FakeReelJobRepo(),
@@ -429,10 +578,19 @@ def make_deps(
         storage=storage or FakeStorage(),
         slides=slides or FakeSlideRefResolver(),
         research_reader=research_reader or FakeResearchRunReader(),
+        events=events or FakeEventReader(),
+        processed=FakeProcessedMessages(state),
+        cursor=FakeEventCursor(state),
+        local_runs=FakeLocalRunResolver(state),
         clock=FixedClock(),
         uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
     )
+    # INT-04: the lineage read model is self-composed over the same org-scoped repos.
+    from lineage import LineageView  # noqa: E402 - lazy: avoids import cycle at module load
+
+    deps.lineage = LineageView(deps)
+    return deps
 
 
 @pytest.fixture

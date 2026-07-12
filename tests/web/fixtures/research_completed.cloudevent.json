@@ -1,0 +1,15 @@
+{
+  "id": "ce-0f9b2c7a-4d1e-4a2b-9c3d-000000000001",
+  "source": "silmari-af-deep-research",
+  "type": "research.completed",
+  "subject": "exec_abc123",
+  "time": "2026-07-12T18:00:00Z",
+  "data": {
+    "run_id": "3f6d1a90-0000-4000-8000-000000000abc",
+    "status": "succeeded",
+    "title": "How short-form reels convert viewers",
+    "result_ref": "cp-execution://exec_abc123/result",
+    "research_prompt": "How do short-form reels convert viewers into subscribers?",
+    "research_document_id": "exec_abc123"
+  }
+}

@@ -52,6 +52,9 @@ from reel_jobs import (
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
+# INT-02: the durable-cursor consumer driver is opt-in (off by default) so tests and
+# request-only deployments never spawn the background thread. Prod sets this to start it.
+ENV_CONSUMER_ENABLED = "REEL_CONSUMER_ENABLED"
 API_MESSAGES_PATH = os.path.join(HERE, "api_messages.json")
 
 # Named literals introduced by this plan (§10 CodeCleanup gate) — headers, the
@@ -854,7 +857,23 @@ def create_app(
     def _on_http_error(err: HttpError):
         return jsonify({"error": err.message, "code": err.code}), err.status
 
+    _maybe_start_consumer(deps)
     return app
+
+
+def _maybe_start_consumer(deps: AppDeps):
+    """INT-02 B5 lifecycle: start the durable-cursor consumer driver on app startup and
+    stop it at process exit — but ONLY when opt-in via ``REEL_CONSUMER_ENABLED`` (off in
+    tests and request-only deploys). Background-safe: the driver uses no request ctx."""
+    if not os.getenv(ENV_CONSUMER_ENABLED):
+        return None
+    import atexit
+
+    from events import start_research_consumer
+
+    handle = start_research_consumer(deps, logger=deps.logger)
+    atexit.register(handle.stop)
+    return handle
 
 
 app = create_app()
