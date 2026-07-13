@@ -1,7 +1,7 @@
 {
   "id": "ce-0f9b2c7a-4d1e-4a2b-9c3d-000000000001",
   "source": "silmari-af-deep-research",
-  "type": "research.completed",
+  "type": "com.silmari.research.completed.v1",
   "subject": "exec_abc123",
   "time": "2026-07-12T18:00:00Z",
   "data": {

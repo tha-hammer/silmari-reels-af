@@ -29,7 +29,7 @@ from control_plane import fetch_document_by_ref
 # ─────────────────────────── named constants (no magic strings) ───────────────────────────
 
 # The single event type this consumer reacts to (C-Correlation subject = execution_id).
-RESEARCH_COMPLETED_TYPE = "research.completed"
+RESEARCH_COMPLETED_TYPE = "com.silmari.research.completed.v1"
 
 # CloudEvents record keys (the durable read surface yields these + a monotonic ``sequence``).
 EVENT_ID_KEY = "id"
@@ -236,6 +236,31 @@ class ConsumerHandle:
 
     def is_alive(self) -> bool:
         return self._thread.is_alive()
+
+
+def _build_research_handler(deps, *, consumer=DEFAULT_CONSUMER):
+    """Build the middleware-compatible handler for research.completed (B3).
+
+    Returns h(dto, fetch_body) that durable-dedups on CE id (D4), fetches by
+    reference (C-Notification, non-blocking), and stamps via stamp_dedup_advance."""
+    log = getattr(deps, "logger", None)
+
+    def _handler(dto, fetch_body):
+        if deps.processed.already_processed(dto.event_id):
+            _log(log, LOG_DEDUPED, cloudevents_id=dto.event_id)
+            return
+
+        try:
+            fetch_body(dto.execution_id)
+        except Exception as exc:  # noqa: BLE001 - fetch failure never fails the stamp
+            _log(log, LOG_SNAPSHOT_INCOMPLETE, execution_id=dto.execution_id, error=str(exc))
+
+        event_dict = {"id": dto.event_id, "subject": dto.execution_id, "sequence": dto.sequence}
+        result = deps.processed.stamp_dedup_advance(event_dict, consumer)
+        counter = LOG_STAMPED if result.local_run_found else LOG_UNMATCHED
+        _log(log, counter, cloudevents_id=dto.event_id, execution_id=dto.execution_id)
+
+    return _handler
 
 
 def start_research_consumer(deps, *, logger=None, **kwargs) -> ConsumerHandle:

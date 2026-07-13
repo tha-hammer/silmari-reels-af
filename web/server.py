@@ -900,16 +900,34 @@ def create_app(
 
 
 def _maybe_start_consumer(deps: AppDeps):
-    """INT-02 B5 lifecycle: start the durable-cursor consumer driver on app startup and
-    stop it at process exit — but ONLY when opt-in via ``REEL_CONSUMER_ENABLED`` (off in
-    tests and request-only deploys). Background-safe: the driver uses no request ctx."""
+    """INT-02 B5 lifecycle (Phase 2): start the middleware-routed consumer driver on app
+    startup and stop it at process exit — but ONLY when opt-in via ``REEL_CONSUMER_ENABLED``
+    (off in tests and request-only deploys). Fails closed if the contract registry is
+    empty or the middleware cannot subscribe."""
     if not os.getenv(ENV_CONSUMER_ENABLED):
         return None
-    import atexit
 
-    from events import start_research_consumer
+    try:
+        import atexit
 
-    handle = start_research_consumer(deps, logger=deps.logger)
+        from agentfield.handoff import HandoffMiddleware, registry
+        from events import DEFAULT_CONSUMER, _build_research_handler
+
+        mw = HandoffMiddleware(
+            cp_base_url=os.getenv("AGENTFIELD_SERVER_URL", ""),
+            cp_api_key=os.getenv("AGENTFIELD_API_KEY", ""),
+            cursor_store=deps.cursor,
+            registry=registry,
+        )
+        handle = mw.subscribe(
+            "com.silmari.research.completed.v1",
+            handler=_build_research_handler(deps),
+            consumer_name=DEFAULT_CONSUMER,
+        )
+    except Exception:
+        deps.logger.exception("handoff consumer failed to start (fail-closed)")
+        return None
+
     atexit.register(handle.stop)
     return handle
 
