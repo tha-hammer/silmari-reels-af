@@ -236,6 +236,97 @@ async def test_red_at_seam_fetch_body_unavailable(tmp_path: Path, monkeypatch):
     assert calls["n"] == 0                             # no partial reel rendered
 
 
+# ─────────────────────────── B4: announce reel.completed (fake publisher) ───────────────────────────
+
+
+class _FakePublisher:
+    def __init__(self):
+        self.published: list = []
+
+    def publish(self, record):
+        self.published.append(record)
+
+
+async def test_announces_reel_completed_with_fake_publisher(tmp_path: Path, monkeypatch):
+    """B4: after render, the reasoner announces com.silmari.reel.completed.v1 with the frozen
+    DTO via a fake publisher (the CP-side Go builder is the production producer)."""
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    renderer, _ = _make_renderer()
+    captured: dict = {}
+
+    def fake_announce(event_type, dto, *, execution_id, node_id, publisher, registry):
+        captured.update(
+            event_type=event_type,
+            dto=dto,
+            execution_id=execution_id,
+            node_id=node_id,
+            publisher=publisher,
+        )
+        return "ce-fake-id"
+
+    pub = _FakePublisher()
+    out = await app_module.research_to_reel(
+        source_execution_id="exec_abc123",
+        selected_paragraphs=[_para("0-0", "First paragraph body.", 0)],
+        source_run_id="run_abc",
+        citations=_CITATIONS,
+        out_dir=str(tmp_path),
+        fetch_body=_fetch_ok,
+        distiller=_fake_distiller,
+        composer=_fake_composer,
+        renderer=renderer,
+        publisher=pub,
+        announce_fn=fake_announce,
+    )
+
+    assert "error" not in out
+    assert captured["event_type"] == "com.silmari.reel.completed.v1"
+    assert captured["publisher"] is pub
+    dto = captured["dto"]
+    assert set(dto.keys()) == {
+        "run_id",
+        "status",
+        "reel_ref",
+        "source_execution_id",
+        "duration_s",
+        "beat_count",
+    }
+    assert dto["status"] == "succeeded"
+    assert dto["source_execution_id"] == "exec_abc123"
+    assert dto["duration_s"] == 12.0
+    assert dto["beat_count"] == 5
+    assert dto["reel_ref"].endswith("reel.mp4")
+    assert isinstance(dto["run_id"], str) and dto["run_id"]
+
+
+async def test_no_announce_when_publisher_absent(tmp_path: Path, monkeypatch):
+    """Reference surface only: with no publisher wired, announce is never attempted (and the
+    agentfield.handoff SDK — absent from this venv — is never imported)."""
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    renderer, _ = _make_renderer()
+    calls = {"n": 0}
+
+    def fake_announce(*a, **k):
+        calls["n"] += 1
+
+    out = await app_module.research_to_reel(
+        source_execution_id="exec_abc123",
+        selected_paragraphs=[_para("0-0", "First paragraph body.", 0)],
+        out_dir=str(tmp_path),
+        fetch_body=_fetch_ok,
+        distiller=_fake_distiller,
+        composer=_fake_composer,
+        renderer=renderer,
+        announce_fn=fake_announce,  # provided, but no publisher → must NOT be called
+    )
+    assert "error" not in out
+    assert calls["n"] == 0
+
+
 async def test_unknown_paragraph_id_fails_closed(tmp_path: Path, monkeypatch):
     import reel_af.app as app_module
 

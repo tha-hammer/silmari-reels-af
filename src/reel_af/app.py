@@ -1077,6 +1077,46 @@ async def _default_research_compose(node: str, essence: dict) -> dict:
     return c_out["script"]
 
 
+# MW Phase 3 B4 — the frozen reel.completed contract type (registered in agentfield.handoff).
+REEL_COMPLETED_EVENT_TYPE = "com.silmari.reel.completed.v1"
+
+
+def _announce_reel_completed(dto, *, execution_id, node_id, publisher, announce_fn, logger=None):
+    """Best-effort reference-surface announce of ``reel.completed`` (MW Phase 3 B4, Option B).
+
+    The PRODUCTION producer is the CP-side ``BuildReelCompletedOutboxRecord`` (same-tx durable
+    outbox); this SDK ``announce`` is the reference/test surface — it validates the DTO against
+    the frozen schema and is exercised in tests with a fake ``publisher``. It NEVER fails the
+    reel: no publisher wired → skip; ``agentfield.handoff`` absent → skip; any error is logged.
+    ``announce_fn`` is injectable so tests exercise the wiring without the SDK installed."""
+    if publisher is None:
+        return
+    registry = None
+    if announce_fn is None:
+        try:
+            from agentfield.handoff import announce as _imported_announce
+            from agentfield.handoff import registry as _imported_registry
+        except Exception:  # noqa: BLE001 - SDK optional at runtime; reference surface only
+            return
+        announce_fn = _imported_announce
+        registry = _imported_registry
+    try:
+        announce_fn(
+            REEL_COMPLETED_EVENT_TYPE,
+            dto,
+            execution_id=execution_id,
+            node_id=node_id,
+            publisher=publisher,
+            registry=registry,
+        )
+    except Exception as exc:  # noqa: BLE001 - announce is best-effort; never fail the reel
+        if logger is not None:
+            logger.note(
+                f"reel.completed announce failed (best-effort): {exc}",
+                tags=["reel", "announce", "error"],
+            )
+
+
 @reel.reasoner()
 async def research_to_reel(
     source_execution_id: str,
@@ -1090,6 +1130,8 @@ async def research_to_reel(
     distiller=None,
     composer=None,
     renderer=None,
+    publisher=None,
+    announce_fn=None,
 ) -> dict:
     """Research selection → grounded vertical reel (MW Phase 3 B1, contract C6).
 
@@ -1188,7 +1230,25 @@ async def research_to_reel(
         tags=["reel", "research", "done"],
     )
 
-    # B4: announce reel.completed here (coordinated CP step)
+    # B4 (Option B): announce reel.completed — SDK reference/test surface. The PRODUCTION
+    # producer is the CP-side BuildReelCompletedOutboxRecord (same-tx durable outbox). DTO is
+    # the frozen com.silmari.reel.completed.v1 shape; best-effort — never fails the reel.
+    reel_dto = {
+        "run_id": run_id,
+        "status": "succeeded",
+        "reel_ref": final.get("video_path", ""),
+        "source_execution_id": source_execution_id,
+        "duration_s": final.get("duration_s"),
+        "beat_count": final.get("beat_count"),
+    }
+    _announce_reel_completed(
+        reel_dto,
+        execution_id=run_id,
+        node_id=node,
+        publisher=publisher,
+        announce_fn=announce_fn,
+        logger=app,
+    )
 
     return {
         **final,
