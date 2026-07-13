@@ -441,7 +441,7 @@ class FakeResearchRunReader:
 # ─────────────── INT-02 durable-cursor consumer fakes (B2/B4/B5) ───────────────
 
 
-def make_event(seq, *, id="ce-1", subject="exec-1", type="research.completed",
+def make_event(seq, *, id="ce-1", subject="exec-1", type="com.silmari.research.completed.v1",
                research_prompt="prompt", **data):
     """Build a CloudEvent record as the durable read surface yields it (envelope +
     monotonic ``sequence``). ``subject`` is the execution_id (C-Correlation)."""
