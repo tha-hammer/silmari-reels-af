@@ -56,7 +56,7 @@ class _AccessSpy(dict):
 def test_envelope_type_and_subject_is_execution_id():
     event = _load("research_completed.cloudevent.json")
     snapshot = _load("execution_result.snapshot.json")
-    assert event["type"] == "research.completed"
+    assert event["type"] == "com.silmari.research.completed.v1"
     assert event["id"]  # present, non-empty
     assert event["subject"] == snapshot["execution_id"]          # C-Correlation
     assert event["data"]["research_document_id"] == snapshot["execution_id"]

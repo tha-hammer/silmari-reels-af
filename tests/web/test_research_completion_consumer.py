@@ -32,7 +32,7 @@ def test_reads_only_events_after_cursor_type_filtered_in_order():
     ])
     deps = make_deps(events=reader)
     high = consume_since(deps, cursor=4, consumer=CONSUMER)
-    assert reader.read_calls == [(4, "research.completed", 100)]
+    assert reader.read_calls == [(4, "com.silmari.research.completed.v1", 100)]
     # only research.completed with Seq > 4 processed, in order
     assert [row[0] for row in deps.processed.state.processed_rows] == ["a", "b"]
     assert high == 6
@@ -62,8 +62,8 @@ def test_downtime_catchup_reads_all_after_cursor():
 
 def test_malformed_event_marked_and_advanced_never_stalls():
     reader = __import__("conftest").FakeEventReader([
-        {"id": "", "type": "research.completed", "subject": "exec-x", "sequence": 21},  # no id
-        {"id": "noSubject", "type": "research.completed", "subject": "", "sequence": 22},  # no subj
+        {"id": "", "type": "com.silmari.research.completed.v1", "subject": "exec-x", "sequence": 21},  # no id
+        {"id": "noSubject", "type": "com.silmari.research.completed.v1", "subject": "", "sequence": 22},  # no subj
         make_event(23, id="good", subject="exec-good"),
     ])
     deps = make_deps(events=reader)
@@ -179,3 +179,82 @@ def test_consumer_store_never_writes_owner_research_run_table():
         assert forbidden not in src
     # the only research_run touch is a SELECT (resolution read).
     assert "select id, org_id, created_by from deepresearch.research_run" in src
+
+
+# ─────────────────────────── B3: middleware handler adapter ───────────────────────────
+
+
+def test_middleware_handler_stamps_via_stamp_dedup_advance():
+    """B3: _build_research_handler produces a handler that stamps like consume_since."""
+    from types import SimpleNamespace
+    from events import _build_research_handler
+
+    state = _ConsumerState()
+    run = state.seed_local_run("exec-mw", ORG_ID)
+    state.seed_reel_row(ORG_ID, "exec-mw")
+    deps = make_deps(consumer_state=state)
+
+    handler = _build_research_handler(deps)
+    dto = SimpleNamespace(
+        event_id="mw-1",
+        execution_id="exec-mw",
+        event_type="com.silmari.research.completed.v1",
+        sequence=101,
+        data={"run_id": "r1", "status": "succeeded"},
+    )
+    handler(dto, lambda eid: None)
+
+    assert state.stamp_of(ORG_ID, "exec-mw") == run.id
+    assert state.cursors["reel-af"] == 101
+    assert ("mw-1", "exec-mw") in state.processed_rows
+
+
+def test_middleware_handler_dedup_replay_is_noop():
+    """B3: handler is idempotent — already-processed events are skipped."""
+    from types import SimpleNamespace
+    from events import _build_research_handler
+
+    state = _ConsumerState()
+    state.processed.add("already")
+    deps = make_deps(consumer_state=state)
+
+    handler = _build_research_handler(deps)
+    dto = SimpleNamespace(
+        event_id="already",
+        execution_id="exec-dup",
+        event_type="com.silmari.research.completed.v1",
+        sequence=200,
+        data={},
+    )
+    handler(dto, lambda eid: None)
+
+    assert state.cursors["reel-af"] == 0
+    assert len(state.processed_rows) == 0
+
+
+def test_middleware_handler_fetch_failure_does_not_block_stamp():
+    """B3: fetch_body failure is non-blocking — stamp still applies."""
+    from types import SimpleNamespace
+    from events import _build_research_handler
+
+    state = _ConsumerState()
+    state.seed_local_run("exec-fetch-fail", ORG_ID)
+    state.seed_reel_row(ORG_ID, "exec-fetch-fail")
+    deps = make_deps(consumer_state=state)
+
+    handler = _build_research_handler(deps)
+    dto = SimpleNamespace(
+        event_id="ff-1",
+        execution_id="exec-fetch-fail",
+        event_type="com.silmari.research.completed.v1",
+        sequence=301,
+        data={},
+    )
+
+    def _boom(eid):
+        raise ConnectionError("CP unreachable")
+
+    handler(dto, _boom)
+
+    assert state.stamp_of(ORG_ID, "exec-fetch-fail") is not None
+    assert state.cursors["reel-af"] == 301
