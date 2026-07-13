@@ -10,13 +10,65 @@ in prod, called directly here).
 
 from __future__ import annotations
 
+import sys
 import threading
 import time
+import types
 
 from conftest import FakeEventReader, make_deps, make_event
 from events import LOG_READ_ERROR, run_research_consumer_loop, start_research_consumer
 
 CONSUMER = "reel-af"
+
+
+# ─────────────────────── faithful agentfield.handoff stand-in ───────────────────────
+# ``agentfield.handoff`` is an OPTIONAL runtime dependency: the reel-af image ships a
+# recent ``agentfield`` that carries it, but the pinned test-venv ``agentfield==0.1.96``
+# predates the handoff SDK. The boot path (``_maybe_start_consumer``) is fail-closed by
+# design — a missing SDK returns None rather than crashing the app. To test the boot
+# WIRING deterministically (construct middleware → subscribe → start/stoppable handle)
+# without requiring the SDK pip-installed here, we inject a stand-in whose surface
+# mirrors the real ``HandoffMiddleware`` / ``ConsumerHandle`` (verified in the Step 1
+# compat check): same ctor kwargs, same ``subscribe(event_type, handler, *,
+# consumer_name=...)``, same handle ``stop()`` / ``is_alive()`` semantics.
+
+
+class _FakeConsumerHandle:
+    """Mirrors ``agentfield.handoff.ConsumerHandle``: a stop-event + joined thread."""
+
+    def __init__(self, stop_event: threading.Event, thread: threading.Thread) -> None:
+        self._stop_event = stop_event
+        self._thread = thread
+
+    def stop(self, timeout: float = 5.0) -> None:
+        self._stop_event.set()
+        self._thread.join(timeout=timeout)
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive()
+
+
+class _FakeHandoffMiddleware:
+    """Mirrors ``agentfield.handoff.HandoffMiddleware`` — same ctor + subscribe surface."""
+
+    def __init__(self, cp_base_url, cp_api_key, cursor_store, registry):
+        self._cursor_store = cursor_store
+        self._registry = registry
+
+    def subscribe(self, event_type, handler, *, consumer_name="default", **_kwargs):
+        stop_event = threading.Event()
+        thread = threading.Thread(
+            target=stop_event.wait, name=f"fake-handoff-{consumer_name}", daemon=True
+        )
+        thread.start()
+        return _FakeConsumerHandle(stop_event, thread)
+
+
+def _fake_handoff_module() -> types.ModuleType:
+    mod = types.ModuleType("agentfield.handoff")
+    mod.HandoffMiddleware = _FakeHandoffMiddleware
+    mod.registry = object()  # opaque; the real middleware validates registry membership
+    return mod
 
 
 class _Recorder:
@@ -117,10 +169,14 @@ def test_create_app_does_not_start_consumer_by_default(monkeypatch):
 
 def test_maybe_start_consumer_starts_when_enabled(monkeypatch):
     monkeypatch.setenv("REEL_CONSUMER_ENABLED", "1")
+    # Inject the faithful SDK stand-in so the boot wiring runs deterministically
+    # regardless of whether the real ``agentfield.handoff`` is installed in the venv.
+    monkeypatch.setitem(sys.modules, "agentfield.handoff", _fake_handoff_module())
     from server import _maybe_start_consumer
 
     deps = make_deps(events=FakeEventReader([]))
     handle = _maybe_start_consumer(deps)
     assert handle is not None
+    assert handle.is_alive()
     handle.stop(timeout=2)
     assert not handle.is_alive()
