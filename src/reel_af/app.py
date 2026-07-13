@@ -997,6 +997,212 @@ async def regenerate_slide(
 
 
 # ════════════════════════════════════════════════════════════════════
+# ENTRY REASONER — Research selection → Reel  (MW Phase 3 B1, contract C6)
+# ════════════════════════════════════════════════════════════════════
+
+_RESEARCH_PACKAGE_KEY = "research_package"
+_SECTIONS_KEY = "sections"
+_SECTION_CONTENT_KEY = "content"
+_PARAGRAPH_SEP = "\n\n"
+
+
+def _research_package_of(record) -> dict | None:
+    """The research document nested at ``record.result["research_package"]``.
+
+    Accepts an ``agentfield.handoff`` ``ExecutionRecord``-like object (attribute
+    ``result``) or a plain dict; returns ``None`` when absent."""
+    result = getattr(record, "result", None)
+    if result is None and isinstance(record, dict):
+        result = record.get("result")
+    if not isinstance(result, dict):
+        return None
+    pkg = result.get(_RESEARCH_PACKAGE_KEY)
+    return pkg if isinstance(pkg, dict) else None
+
+
+def _paragraph_from_package(pkg: dict | None, paragraph_id) -> str | None:
+    """Resolve ``"{sectionIndex}-{paragraphIndex}"`` against the research package:
+    ``sections[sectionIndex].content`` split on double-newline (spec §4)."""
+    if not pkg or not isinstance(paragraph_id, str) or "-" not in paragraph_id:
+        return None
+    sec_s, _, par_s = paragraph_id.partition("-")
+    try:
+        sec_i, par_i = int(sec_s), int(par_s)
+    except ValueError:
+        return None
+    sections = pkg.get(_SECTIONS_KEY) or []
+    if not 0 <= sec_i < len(sections):
+        return None
+    paras = str(sections[sec_i].get(_SECTION_CONTENT_KEY, "")).split(_PARAGRAPH_SEP)
+    if not 0 <= par_i < len(paras):
+        return None
+    return paras[par_i]
+
+
+def _resolve_selected_text(selected_paragraphs, pkg) -> tuple[str, str | None]:
+    """Concatenate the selected paragraph text in document order (sorted by
+    ``position``). Prefer the inline ``text`` sent by the DR side; fall back to
+    resolving the paragraph id against the fetched research package (source of
+    truth). Returns ``(selected_text, error_code_or_None)``."""
+    if not selected_paragraphs:
+        return "", None
+    ordered = sorted(selected_paragraphs, key=lambda p: p.get("position", 0))
+    texts: list[str] = []
+    for p in ordered:
+        text = p.get("text")
+        if not text:
+            text = _paragraph_from_package(
+                pkg, p.get("paragraph_id") or p.get("paragraphId")
+            )
+        if not text:
+            return "", "unknown_paragraph_id"
+        texts.append(text)
+    return _PARAGRAPH_SEP.join(texts), None
+
+
+def _default_research_fetch_body(execution_id: str):
+    """Production fetch-by-reference seam. Lazily builds an ``agentfield.handoff``
+    ``ControlPlaneSource`` from env so importing this module never requires the
+    handoff SDK to be installed (tests inject a fake ``fetch_body``)."""
+    from agentfield.handoff.control_plane_source import ControlPlaneSource
+
+    base_url = os.getenv("AGENTFIELD_SERVER_URL", "") or os.getenv("AGENTFIELD_SERVER", "")
+    source = ControlPlaneSource(base_url, os.getenv("AGENTFIELD_API_KEY", ""))
+    return source.fetch_body(execution_id)
+
+
+async def _default_research_compose(node: str, essence: dict) -> dict:
+    """Production compose seam — the REQUIRED essence→script stage (do not skip)."""
+    c_out = await app.call(f"{node}.reel_compose_script", essence=essence)
+    return c_out["script"]
+
+
+@reel.reasoner()
+async def research_to_reel(
+    source_execution_id: str,
+    selected_paragraphs: list[dict] | None = None,
+    source_run_id: str | None = None,
+    source_package_ref: str | None = None,
+    citations: list[dict] | None = None,
+    out_dir: str | None = None,
+    *,
+    fetch_body=None,
+    distiller=None,
+    composer=None,
+    renderer=None,
+) -> dict:
+    """Research selection → grounded vertical reel (MW Phase 3 B1, contract C6).
+
+    Text front-door onto the shared video pipeline: fetch the source research
+    document BY REFERENCE (single source of truth), ground essence on the
+    SELECTED paragraph text (skip URL fetch), compose a script (REQUIRED stage),
+    and render via the shared ``_render_downstream``. Provenance (``source_run_id``
+    + ``citations``) rides into the reel metadata.
+
+    Mirrors ``article_to_reel`` (compose + render half) and ``research_to_carousel``
+    (text front-door via ``essence_from_text``). The four keyword seams
+    (``fetch_body`` / ``distiller`` / ``composer`` / ``renderer``) default to
+    production and are injected in tests so the behavior runs with no live infra.
+
+    Example:
+      curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_research_to_reel \\
+        -H 'Content-Type: application/json' \\
+        -d '{"input":{"source_execution_id":"exec_...","selected_paragraphs":[{"paragraph_id":"0-0","text":"...","position":0}],"source_run_id":"run_..."}}'
+    """
+    if not _has_openrouter_api_key():
+        return {"error": "OPENROUTER_API_KEY not set in env."}
+
+    fetch_body = fetch_body or _default_research_fetch_body
+    distiller = distiller or (lambda text: essence_from_text(app, text))
+    composer = composer or _default_research_compose
+    renderer = renderer or _render_downstream
+
+    node = app.node_id
+
+    # Phase 0 — fetch the research document by reference (source of truth; the
+    # red-at-seam boundary). A 404 / unreachable CP fails closed — no partial reel.
+    try:
+        record = await _maybe_await(fetch_body(source_execution_id))
+    except Exception as exc:  # noqa: BLE001 - any fetch failure is a closed failure
+        app.note(
+            f"reel-af research: fetch_body failed for {source_execution_id}: {exc}",
+            tags=["reel", "research", "source_unavailable"],
+        )
+        return {"error": "source_unavailable", "source_execution_id": source_execution_id}
+    if record is None:
+        return {"error": "source_unavailable", "source_execution_id": source_execution_id}
+
+    pkg = _research_package_of(record)
+
+    # Phase 0b — resolve the grounding text (selected paragraphs, document order).
+    selected_text, resolve_err = _resolve_selected_text(selected_paragraphs, pkg)
+    if resolve_err is not None:
+        return {"error": resolve_err, "source_execution_id": source_execution_id}
+    if not selected_text.strip():
+        return {"error": "empty_selection", "source_execution_id": source_execution_id}
+
+    run_id = uuid.uuid4().hex[:8]
+    out_path = (
+        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"research-{run_id}")
+    )
+    out_path.mkdir(parents=True, exist_ok=True)
+    media_dir = out_path / "media"
+    media_dir.mkdir(parents=True, exist_ok=True)
+
+    timings: dict[str, float] = {}
+    app.note(
+        f"reel-af research: starting run {run_id} from {source_execution_id}",
+        tags=["reel", "research", "start"],
+    )
+    t_pipeline = time.time()
+
+    # Phase 1 — essence, grounded on the SELECTED text (skip URL fetch)
+    t = time.time()
+    essence_obj = await _maybe_await(distiller(selected_text))
+    essence = (
+        essence_obj.model_dump() if hasattr(essence_obj, "model_dump") else essence_obj
+    )
+    timings["extract"] = round(time.time() - t, 1)
+
+    # Phase 2 — compose script (REQUIRED — do NOT skip; see article_to_reel)
+    t = time.time()
+    script = await _maybe_await(composer(node, essence))
+    timings["compose"] = round(time.time() - t, 1)
+
+    # Phase 3 — shared downstream render (audio → beats → visuals → stitch)
+    final = await _maybe_await(
+        renderer(
+            node=node,
+            essence=essence,
+            script=script,
+            out_path=out_path,
+            media_dir=media_dir,
+            run_id=run_id,
+            timings=timings,
+        )
+    )
+
+    timings["total"] = round(time.time() - t_pipeline, 1)
+    app.note(
+        f"reel-af research: run {run_id} done → {final['video_path']}",
+        tags=["reel", "research", "done"],
+    )
+
+    # B4: announce reel.completed here (coordinated CP step)
+
+    return {
+        **final,
+        "source": "research",
+        "source_run_id": source_run_id,
+        "source_execution_id": source_execution_id,
+        "source_package_ref": source_package_ref,
+        "citations": citations or [],
+        "run_id": run_id,
+        "timings_s": timings,
+    }
+
+
+# ════════════════════════════════════════════════════════════════════
 # Shared downstream orchestrator
 # ════════════════════════════════════════════════════════════════════
 
