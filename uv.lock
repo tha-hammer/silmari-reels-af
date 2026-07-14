@@ -4,14 +4,15 @@ requires-python = ">=3.10"
 
 [[package]]
 name = "agentfield"
-version = "0.1.96"
-source = { registry = "https://pypi.org/simple" }
+version = "0.1.108rc4"
+source = { git = "https://github.com/tha-hammer/agentfield.git?subdirectory=sdk%2Fpython&rev=main#20a7e0db19a583116a91bb01eed02ce6ce168b82" }
 dependencies = [
     { name = "aiohttp" },
     { name = "cryptography" },
     { name = "fal-client" },
     { name = "fastapi" },
     { name = "joserfc" },
+    { name = "jsonschema" },
     { name = "litellm" },
     { name = "psutil" },
     { name = "pydantic" },
@@ -19,10 +20,6 @@ dependencies = [
     { name = "requests" },
     { name = "uvicorn" },
     { name = "websockets" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/54/53/50fae5e238d1a88f073243a71ec8d1d8fe918bd6f1b1b95143f2b2f9e935/agentfield-0.1.96.tar.gz", hash = "sha256:e5db1f3d2980b72a27d77512f592416e8f30ee03930da693f50b2e16dd056af0", size = 254082, upload-time = "2026-06-29T17:55:42.257Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/6d/64/a825f3042deb5aa2a532b676aac2c8507cc5e227a83dd8c51badaae31ae1/agentfield-0.1.96-py3-none-any.whl", hash = "sha256:6e71c361f1e8f273f460c96440c531e371ae8450ec32ac66134c1c8ddaa88819", size = 282268, upload-time = "2026-06-29T17:55:41.137Z" },
 ]
 
 [[package]]
@@ -2414,7 +2411,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agentfield", specifier = "==0.1.96" },
+    { name = "agentfield", git = "https://github.com/tha-hammer/agentfield.git?subdirectory=sdk%2Fpython&rev=main" },
     { name = "aiohttp", specifier = ">=3.9" },
     { name = "boto3", specifier = ">=1.34" },
     { name = "lxml", extras = ["html-clean"], specifier = ">=5.0" },
