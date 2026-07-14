@@ -1197,6 +1197,7 @@ async def research_to_reel(
     renderer=None,
     publisher=None,
     announce_fn=None,
+    uploader=None,
 ) -> dict:
     """Research selection → grounded vertical reel (MW Phase 3 B1, contract C6).
 
@@ -1290,8 +1291,17 @@ async def research_to_reel(
     )
 
     timings["total"] = round(time.time() - t_pipeline, 1)
+
+    # T10: the reel is on the node's ephemeral fs — deliver it out via the shared bucket and
+    # hand the browser a presigned GET url (mirror composite_to_reel). Fail-soft: None if the
+    # bucket is unset, so the reel still surfaces its local video_path.
+    if uploader is None:
+        from reel_af.storage import upload_reel as uploader
+    download_url = await asyncio.to_thread(uploader, final["video_path"], run_id=run_id)
+    delivered = {"download_url": download_url} if download_url else {}
     app.note(
-        f"reel-af research: run {run_id} done → {final['video_path']}",
+        f"reel-af research: run {run_id} done → {final['video_path']} "
+        f"(delivered={bool(download_url)})",
         tags=["reel", "research", "done"],
     )
 
@@ -1301,7 +1311,7 @@ async def research_to_reel(
     reel_dto = {
         "run_id": run_id,
         "status": "succeeded",
-        "reel_ref": final.get("video_path", ""),
+        "reel_ref": download_url or final.get("video_path", ""),
         "source_execution_id": source_execution_id,
         "duration_s": final.get("duration_s"),
         "beat_count": final.get("beat_count"),
@@ -1317,6 +1327,7 @@ async def research_to_reel(
 
     return {
         **final,
+        **delivered,
         "source": "research",
         "source_run_id": source_run_id,
         "source_execution_id": source_execution_id,

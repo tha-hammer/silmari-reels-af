@@ -344,3 +344,98 @@ async def test_unknown_paragraph_id_fails_closed(tmp_path: Path, monkeypatch):
     )
     assert out["error"] == "unknown_paragraph_id"
     assert calls["n"] == 0
+
+
+# ─────────────────────────── T10: S3 delivery (upload_reel + download_url) ───────────────────────────
+
+
+async def test_delivers_reel_and_sets_download_url_and_reel_ref(tmp_path: Path, monkeypatch):
+    """Given a produced reel, When the bucket is configured (uploader returns a URL),
+    Then result.download_url + the announced reel_ref are the bucket URL; video_path stays local."""
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    renderer, _ = _make_renderer()
+    seen: dict = {}
+
+    def fake_uploader(local_path, *, run_id):
+        seen["path"] = local_path
+        seen["run_id"] = run_id
+        return f"https://s3.example/bkt/outputs/{run_id}/reel.mp4?X-Amz-Expires=86400"
+
+    captured: dict = {}
+
+    def fake_announce(event_type, dto, **kwargs):
+        captured["dto"] = dto
+
+    out = await app_module.research_to_reel(
+        source_execution_id="exec_abc123",
+        selected_paragraphs=[_para("0-0", "First paragraph body.", 0)],
+        source_run_id="run_abc",
+        out_dir=str(tmp_path),
+        fetch_body=_fetch_ok,
+        distiller=_fake_distiller,
+        composer=_fake_composer,
+        renderer=renderer,
+        publisher=_FakePublisher(),
+        announce_fn=fake_announce,
+        uploader=fake_uploader,
+    )
+
+    assert out["download_url"].startswith("https://s3.example/")   # bucket URL surfaced
+    assert out["video_path"].endswith("reel.mp4")                  # local path preserved (mirror composite)
+    assert seen["path"] == out["video_path"]                       # uploaded the produced reel
+    assert seen["run_id"] == out["run_id"]                         # keyed by the reasoner's run_id
+    assert captured["dto"]["reel_ref"] == out["download_url"]      # announced DTO carries the bucket URL
+
+
+async def test_fail_soft_keeps_local_path_when_bucket_unset(tmp_path: Path, monkeypatch):
+    """Given the bucket is unset (uploader returns None), When it completes, Then no download_url,
+    video_path stays local, reel_ref falls back to the local path, no crash."""
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    renderer, _ = _make_renderer()
+    captured: dict = {}
+
+    def fake_announce(event_type, dto, **kwargs):
+        captured["dto"] = dto
+
+    out = await app_module.research_to_reel(
+        source_execution_id="exec_abc123",
+        selected_paragraphs=[_para("0-0", "First paragraph body.", 0)],
+        out_dir=str(tmp_path),
+        fetch_body=_fetch_ok,
+        distiller=_fake_distiller,
+        composer=_fake_composer,
+        renderer=renderer,
+        publisher=_FakePublisher(),
+        announce_fn=fake_announce,
+        uploader=lambda p, *, run_id: None,            # bucket unset → None (fail-soft)
+    )
+
+    assert "download_url" not in out                   # no bucket URL surfaced
+    assert out["video_path"].endswith("reel.mp4")      # local path preserved
+    assert captured["dto"]["reel_ref"] == out["video_path"]  # reel_ref falls back to local
+
+
+async def test_default_uploader_is_real_upload_reel(tmp_path: Path, monkeypatch):
+    """With no uploader injected and no bucket configured, the default upload_reel fail-softs to
+    None (no download_url) — proving the production default is wired, not a test-only path."""
+    import reel_af.app as app_module
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
+    monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)   # real upload_reel → None
+    renderer, _ = _make_renderer()
+
+    out = await app_module.research_to_reel(
+        source_execution_id="exec_abc123",
+        selected_paragraphs=[_para("0-0", "First paragraph body.", 0)],
+        out_dir=str(tmp_path),
+        fetch_body=_fetch_ok,
+        distiller=_fake_distiller,
+        composer=_fake_composer,
+        renderer=renderer,
+    )
+    assert "download_url" not in out
+    assert out["video_path"].endswith("reel.mp4")
