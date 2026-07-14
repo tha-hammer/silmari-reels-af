@@ -11,10 +11,12 @@ authors = [{ name = "AgentField Contributors" }]
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    # Pinned to the control-plane-compatible SDK (the deployed control-plane +
-    # sibling agents run 0.1.96; the fast-lifecycle registration handshake changed
-    # in later releases → 401 on register). Bump only in lockstep with the plane.
-    "agentfield==0.1.96",
+    # Installed from OUR fork (tha-hammer/agentfield), not PyPI — PyPI is the
+    # upstream (Agent-Field) distribution channel we don't control, and the fork
+    # carries the handoff SDK (fetch_body/announce/registry + frozen contracts)
+    # that upstream releases don't. Track the fork's main in lockstep with the
+    # deployed control-plane; pin a specific rev here if you need an exact match.
+    "agentfield @ git+https://github.com/tha-hammer/agentfield.git@main#subdirectory=sdk/python",
     "pydantic>=2.0",
     "python-dotenv>=1.0",
     "aiohttp>=3.9",

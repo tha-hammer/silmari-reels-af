@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         fonts-dejavu-core \
         chromium \
         curl \
+        git \
         gnupg \
         ca-certificates \
         unzip \
