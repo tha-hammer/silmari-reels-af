@@ -190,11 +190,15 @@ def build_footage_filtergraph(reel: FootageReel, segment_assets: SegmentAssetMap
 
         trim_start_s = max(0.0, _float_attr(segment, "start_s") - _float_attr(asset, "source_start_s", 0.0))
         trim_end_s = trim_start_s + duration_s
+        pre_normalized = bool(_attr(asset, "pre_normalized", False))
         filters.append(
-            f"[{input_idx}:v]trim=start={trim_start_s:.3f}:end={trim_end_s:.3f},"
-            "setpts=PTS-STARTPTS,"
-            f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
-            f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},setsar=1,fps={FPS},format=yuv420p[v{idx}]"
+            _source_video_fragment(
+                input_idx,
+                idx,
+                trim_start_s,
+                trim_end_s,
+                pre_normalized=pre_normalized,
+            )
         )
         filters.append(
             f"[{input_idx}:a]atrim=start={trim_start_s:.3f}:end={trim_end_s:.3f},"
@@ -345,6 +349,36 @@ async def stitch_footage_reel(
         raise
 
     return final_path
+
+
+def _source_video_fragment(
+    input_idx: int,
+    idx: int,
+    trim_start_s: float,
+    trim_end_s: float,
+    *,
+    pre_normalized: bool,
+) -> str:
+    """Build the per-source-segment video filter fragment.
+
+    ``pre_normalized`` inputs (already 1080×1920 from the overlay pass) keep
+    timing, SAR, fps, and pixel format but skip a second spatial ``scale``/
+    ``crop`` so the canvas is spatially normalized exactly once.
+    """
+
+    spatial = (
+        ""
+        if pre_normalized
+        else (
+            f"scale={CANVAS_WIDTH}:{CANVAS_HEIGHT}:force_original_aspect_ratio=increase,"
+            f"crop={CANVAS_WIDTH}:{CANVAS_HEIGHT},"
+        )
+    )
+    return (
+        f"[{input_idx}:v]trim=start={trim_start_s:.3f}:end={trim_end_s:.3f},"
+        "setpts=PTS-STARTPTS,"
+        f"{spatial}setsar=1,fps={FPS},format=yuv420p[v{idx}]"
+    )
 
 
 def _ffmpeg_cmd(graph: FootageFilterGraph, final_path: Path) -> list[str]:
