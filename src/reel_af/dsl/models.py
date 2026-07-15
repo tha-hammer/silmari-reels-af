@@ -6,8 +6,9 @@ carry ``schema_version="1"`` and ``dsl_version="2"``.
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Mapping, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -33,6 +34,28 @@ FFPROBE_DURATION_EPSILON_S: float = 0.15
 FFMPEG_TIMEOUT_S: float = 120.0
 DOWNLOAD_TIMEOUT_S: float = 60.0
 
+# ── A1 DSL-hooks workflow (Slice A) ───────────────────────────────
+# Hook clip duration bounds for the A1 DSL-hooks workflow (research lines 128-130).
+A1_MIN_HOOK_CLIP_S: float = 10.0
+A1_MAX_HOOK_CLIP_S: float = 180.0
+
+# Workflow identifier carried on CompileContext. Keys the workflow-scoped marker
+# rejection policy (B3) — rejection is per-workflow, never global, because
+# [insert relevant] / [insert file] / [find relevant] are supported features on
+# the default workflow (see tests/dsl/test_compile_unsupported.py).
+DSL_HOOKS_WORKFLOW: str = "dsl_hooks"
+DEFAULT_WORKFLOW: str = "default"
+
+# Terminal error code when a produced reel has no browser-deliverable URL. This
+# is an ERROR CODE, never a DB status — the terminal status set is hardcoded in
+# SQL (web/pg.py update_from_execution), so a new status would need a root-owned
+# schema change. Missing delivery is terminal for the DSL-hooks workflow: a
+# node-local path is never presented as success.
+A1_DELIVERY_UNAVAILABLE: str = "delivery_unavailable"
+
+# Browser-deliverable schemes for the DSL-hooks delivery contract.
+BROWSER_DELIVERABLE_SCHEMES: tuple[str, ...] = ("http", "https")
+
 # ── XfadeEffect type ──────────────────────────────────────────────
 
 XfadeEffect = Literal[
@@ -52,6 +75,15 @@ XfadeEffect = Literal[
 ]
 
 FADE_TO_COLOR_EFFECTS: frozenset[str] = frozenset({"fade", "fadeblack", "fadewhite"})
+
+# Allowed transition primitives, derived from XfadeEffect so the two can never
+# drift. Used by validate_renderable's renderability postcondition (B6).
+XFADE_EFFECT_VALUES: frozenset[str] = frozenset(get_args(XfadeEffect))
+
+# Persisted version pins for FootageReel — externally-owned values; do not
+# reorder or repurpose without migration notes.
+FOOTAGE_REEL_SCHEMA_VERSION: str = "1"
+FOOTAGE_REEL_DSL_VERSION: str = "2"
 
 # ── Words and Alignment ───────────────────────────────────────────
 
@@ -176,6 +208,58 @@ class SourceRef(BaseModel):
 
     source_url: str
     source_id: str | None = None
+
+
+# ── Compile context (Slice A, research C27) ───────────────────────
+
+CutInKind = Literal["zoom", "visual"]
+
+
+class CutInSpec(BaseModel):
+    """An A1 hook-plan cut-in, in ABSOLUTE SOURCE TIME.
+
+    Mirrors ``render.overlays.CutInOverlay``'s field shape and time base so the
+    B9a mapper is validation + typing, not arithmetic. The absolute -> relative
+    conversion is the render library's job (``overlays._relative_window``), not
+    this model's.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: CutInKind
+    at_s: float = Field(ge=0)
+    until_s: float = Field(gt=0)
+    line: str | None = None
+    image_prompt: str | None = None
+    zoom_focus: str = "center"
+
+    @model_validator(mode="after")
+    def _valid_window_and_payload(self) -> "CutInSpec":
+        if self.until_s <= self.at_s:
+            raise ValueError("cut-in until_s must be greater than at_s")
+        if self.type == "visual" and not self.image_prompt:
+            raise ValueError("visual cut-ins require image_prompt")
+        return self
+
+
+class CompileContext(BaseModel):
+    """Data the .ts.md + words sidecar cannot supply (research C27).
+
+    Optional on ``compile_composite``: ``context=None`` reproduces today's
+    behavior exactly, so no existing caller or test changes (D1).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    workflow: str = DSL_HOOKS_WORKFLOW
+    source_url: str
+    video_id: str | None = None
+    delivery_required: bool = True
+    canvas_width: int = CANVAS_WIDTH
+    canvas_height: int = CANVAS_HEIGHT
+    min_hook_clip_s: float = A1_MIN_HOOK_CLIP_S
+    max_hook_clip_s: float = A1_MAX_HOOK_CLIP_S
+    cut_ins: list[CutInSpec] = Field(default_factory=list)
 
 
 class SourceSegment(BaseModel):
@@ -373,11 +457,80 @@ class RenderabilityError(Exception):
     pass
 
 
+def _require_finite(value: Any, label: str) -> float:
+    """Guard: a span/duration must be a finite real number.
+
+    Field(ge=0)/Field(gt=0) admit float('inf') and float('nan'), so finiteness is
+    unchecked at construction. ffmpeg cannot render a non-finite span.
+    """
+
+    try:
+        number = float(value)
+    except (TypeError, ValueError) as exc:
+        raise RenderabilityError(f"{label} must be a finite number, got {value!r}") from exc
+    if not math.isfinite(number):
+        raise RenderabilityError(f"{label} must be a finite number, got {number!r}")
+    return number
+
+
+def _validate_segment_renderable(segment: Any, index: int) -> None:
+    """Postconditions for one segment. Stronger than the field bounds.
+
+    SourceSegment bounds start_s >= 0 and end_s > 0 INDEPENDENTLY, so it admits
+    start_s == end_s and start_s > end_s. A zero-length or inverted span is not
+    stitchable.
+    """
+
+    kind = getattr(segment, "kind", None)
+
+    if kind == "black":
+        duration_s = _require_finite(getattr(segment, "duration_s", None),
+                                     f"segment[{index}].duration_s")
+        if duration_s <= 0:
+            raise RenderabilityError(
+                f"segment[{index}] black duration must be positive, got {duration_s}"
+            )
+        return
+
+    if kind != "source":
+        raise RenderabilityError(f"segment[{index}] has unsupported kind: {kind!r}")
+
+    start_s = _require_finite(getattr(segment, "start_s", None), f"segment[{index}].start_s")
+    end_s = _require_finite(getattr(segment, "end_s", None), f"segment[{index}].end_s")
+    if start_s >= end_s:
+        raise RenderabilityError(
+            f"segment[{index}] start_s must be < end_s, got start_s={start_s} end_s={end_s}"
+        )
+
+
+def _validate_transition_renderable(transition: Any, index: int) -> None:
+    """Postconditions for one transition: allowed primitive + finite duration."""
+
+    effect = getattr(transition, "effect", None)
+    if effect not in XFADE_EFFECT_VALUES:
+        raise RenderabilityError(
+            f"transition[{index}] uses disallowed primitive: {effect!r}"
+        )
+    duration_s = _require_finite(getattr(transition, "duration_s", None),
+                                 f"transition[{index}].duration_s")
+    if duration_s < 0:
+        raise RenderabilityError(
+            f"transition[{index}] duration must be >= 0, got {duration_s}"
+        )
+
+
 def validate_renderable(reel: FootageReel | Any) -> None:
     """Raise ``RenderabilityError`` for any reel that cannot be rendered.
 
     This function checks invariants that do not fit cleanly in field validators.
     Production code must never use Python ``assert`` for validation.
+
+    Additive by construction: ``FootageReel._validate_reel`` is a pydantic
+    model_validator that runs at CONSTRUCTION, strictly earlier — adjacency and
+    xfade-vs-segment-duration bounds are already guaranteed for any real reel that
+    reaches here. This adds only the postconditions construction does not cover:
+    finite spans, start_s < end_s, allowed primitives, supported segment kinds,
+    and the persisted version pins.
     """
     segments = getattr(reel, "segments", None)
     if not segments:
@@ -395,7 +548,27 @@ def validate_renderable(reel: FootageReel | Any) -> None:
             f"got {len(transitions)}"
         )
 
-    duration_s = getattr(reel, "duration_s", 0)
+    schema_version = getattr(reel, "schema_version", FOOTAGE_REEL_SCHEMA_VERSION)
+    if schema_version != FOOTAGE_REEL_SCHEMA_VERSION:
+        raise RenderabilityError(
+            f"unsupported schema_version: {schema_version!r} "
+            f"(expected {FOOTAGE_REEL_SCHEMA_VERSION!r})"
+        )
+
+    dsl_version = getattr(reel, "dsl_version", FOOTAGE_REEL_DSL_VERSION)
+    if dsl_version != FOOTAGE_REEL_DSL_VERSION:
+        raise RenderabilityError(
+            f"unsupported dsl_version: {dsl_version!r} "
+            f"(expected {FOOTAGE_REEL_DSL_VERSION!r})"
+        )
+
+    for index, segment in enumerate(segments):
+        _validate_segment_renderable(segment, index)
+
+    for index, transition in enumerate(transitions):
+        _validate_transition_renderable(transition, index)
+
+    duration_s = _require_finite(getattr(reel, "duration_s", 0), "reel duration")
     if duration_s <= 0:
         raise RenderabilityError(f"reel duration must be positive, got {duration_s}")
 

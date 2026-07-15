@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from deps import BadRequest
 from tunables import validate_overrides
@@ -24,6 +24,18 @@ ReelJobStatus = Literal["queued", "producing", "succeeded", "failed", "cancelled
 TARGET_TOPIC = "reel-af.reel_topic_to_reel"
 TARGET_COMPOSITE = "reel-af.reel_composite_to_reel"
 TARGET_ARTICLE = "reel-af.reel_article_to_reel"  # future; not visible/allowlisted yet
+# A1 DSL-hooks target. The reasoner is app.dsl_hooks_to_reels — the SDK derives
+# the id as "<node>.<router prefix>_<func name>", so this string and that function
+# name are coupled. Externally owned: do not rename without migration notes.
+TARGET_DSL_HOOKS = "reel-af.reel_dsl_hooks_to_reels"
+DSL_HOOKS_SOURCE_MODE = "dsl_hooks"
+# Query keys that mark the historical deterministic clip-plan article seed
+# (plan_clips.py emitted `?t=<start>&reel_end=<end>`). Not a DSL-hooks input.
+_ARTICLE_SEED_QUERY_KEYS = frozenset({"t", "reel_end"})
+# Artifact refs must be opaque a1://-style or http(s) refs — never a filesystem
+# path a worker could be coerced into reading.
+_ARTIFACT_REF_SCHEMES = ("a1://", "http://", "https://")
+DSL_HOOKS_CLIP_IDX_DEFAULT = 1
 
 # Cross-node deep-research target (Plan 4, ISC-22). Byte-exact node.reasoner —
 # dispatched via a dedicated /api/v1/research/run route, NOT the reel allowlist.
@@ -56,10 +68,22 @@ RESEARCH_DEFAULTS = _load_research_defaults()
 # Only targets with a visible preset in web/index.html are allowlisted (plan §1).
 # Plan 5 adds the two text targets used by the create-from-research fan-out.
 ALLOWLISTED_TARGETS = frozenset(
-    {TARGET_TOPIC, TARGET_COMPOSITE, TARGET_TEXT_REEL, TARGET_TEXT_CAROUSEL}
+    {TARGET_TOPIC, TARGET_COMPOSITE, TARGET_TEXT_REEL, TARGET_TEXT_CAROUSEL, TARGET_DSL_HOOKS}
 )
 
 TITLE_MAX = 120
+
+# ── Delivery-required policy (Slice A, B14) ────────────────────────
+# Targets whose result MUST carry a browser-deliverable http(s) URL to count as
+# delivered. Scoped to the DSL-hooks target ON PURPOSE: composite/topic/research
+# keep today's fail-soft behavior (they succeed with only a node-local
+# video_path), so this adds no regression to live targets.
+DELIVERY_REQUIRED_TARGETS = frozenset({TARGET_DSL_HOOKS})
+
+# An ERROR CODE, never a DB status. The terminal status set is hardcoded in SQL
+# (pg.update_from_execution: `status not in ('succeeded','failed','cancelled')`),
+# so a new status would need a root-owned schema change. Status stays "failed".
+A1_DELIVERY_UNAVAILABLE = "delivery_unavailable"
 
 # Composite "count" contract — how many composite reels to cut (plan Behavior 1).
 # Kept next to the target constants; mirrored by CFG.ui in web/index.html.
@@ -75,6 +99,30 @@ _METADATA_INPUT_KEYS = frozenset(
 # Target-specific allowed input keys (plan Behavior 2). Anything else under
 # ``input`` is an authenticated UI-boundary hardening reject (unsupported_input_field).
 TOPIC_ALLOWED_INPUT_KEYS = frozenset({"topic"}) | _METADATA_INPUT_KEYS
+# A1 DSL-hooks target (Slice A). Accepts ONLY the A1 artifact refs + source_url +
+# clip_idx, plus explicitly-allowlisted finish render overrides. Article/topic/
+# clip-plan shapes (topic/url/text/preset/count/source) are deliberately absent —
+# the DSL-hooks target fails closed against them before any row or CP dispatch.
+DSL_HOOKS_ALLOWED_INPUT_KEYS = (
+    frozenset({"source_url", "composite_ref", "words_ref", "hook_ref", "clip_idx", "overrides"})
+    | _METADATA_INPUT_KEYS
+)
+# Finish/render overrides allowlisted for this workflow — a SUBSET of web
+# tunables.TUNABLES (the single source of truth for override validation), so the
+# two can never disagree about a key's type/bounds. `raw`/`fast` are deliberately
+# absent: the A1 DSL hook workflow has NO raw opt-out (research: finish runs by
+# default with hook banner, captions and cut-ins).
+DSL_HOOKS_FINISH_OVERRIDE_KEYS = frozenset(
+    {
+        "font_scale",
+        "box_opacity",
+        "overlay_accent",
+        "phrase_uppercase",
+        "phrase_max_words",
+        "accent_bar_px",
+        "corner_radius",
+    }
+)
 # URL mode carries a legacy duplicate ``source`` (compat-only; must equal ``url``).
 # ``overrides`` is the per-job tuning object (plan Behavior 5) — composite-only;
 # the topic set above deliberately excludes it (Behavior 6).
@@ -146,6 +194,59 @@ def _reject_forbidden_identity(payload: dict) -> None:
     for key in payload:
         if key in FORBIDDEN_IDENTITY_FIELDS:
             raise BadRequest(f"forbidden identity field: {key}", code="forbidden_field")
+
+
+def _reject_article_seed_url(url: str) -> None:
+    """Guard: the historical `?t=&reel_end=` clip-plan seed is not a DSL-hooks input.
+
+    Pure question then raise — no side effects in the condition.
+    """
+
+    query = parse_qs(urlparse(url).query)
+    seed_keys = _ARTICLE_SEED_QUERY_KEYS & set(query)
+    if seed_keys:
+        raise BadRequest(
+            f"source_url carries article-seed query keys {sorted(seed_keys)}; "
+            f"the DSL hooks target takes an unscoped source URL",
+            code="unsupported_input_field",
+        )
+
+
+def _validated_artifact_ref(raw_input: dict, key: str) -> str:
+    """Guard: artifact refs are opaque owned refs, never client filesystem paths."""
+
+    value = raw_input.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise BadRequest(f"{key} is required", code="missing_input")
+    ref = value.strip()
+    if not ref.startswith(_ARTIFACT_REF_SCHEMES):
+        raise BadRequest(
+            f"{key} must be an a1:// or http(s) ref, not a filesystem path",
+            code="invalid_artifact_ref",
+        )
+    return ref
+
+
+def _parse_clip_idx(raw_input: dict) -> int:
+    value = raw_input.get("clip_idx", DSL_HOOKS_CLIP_IDX_DEFAULT)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise BadRequest("clip_idx must be an integer >= 1", code="invalid_clip_idx")
+    return value
+
+
+def _validated_dsl_hooks_overrides(raw_overrides) -> dict:
+    """Finish overrides allowlisted for this workflow (no raw/fast opt-out)."""
+
+    if raw_overrides is None:
+        return {}
+    if not isinstance(raw_overrides, dict):
+        raise BadRequest("overrides must be an object", code="invalid_override")
+    unknown = sorted(set(raw_overrides) - DSL_HOOKS_FINISH_OVERRIDE_KEYS)
+    if unknown:
+        raise BadRequest(
+            f"unsupported override field(s): {unknown}", code="unsupported_override_field"
+        )
+    return validate_overrides(raw_overrides)
 
 
 def _is_valid_url(value: str) -> bool:
@@ -346,6 +447,43 @@ def build_submission(
             ),
             cp_input=cp_input,
             source_handle=handle,
+        )
+
+    if target == TARGET_DSL_HOOKS:
+        # A1 DSL-hooks: artifact refs + source_url only. Every guard below runs
+        # before the caller inserts a row or dispatches (server.py ordering).
+        _reject_unsupported_fields(raw_input, DSL_HOOKS_ALLOWED_INPUT_KEYS)
+
+        raw_url = raw_input.get("source_url")
+        if not isinstance(raw_url, str) or not _is_valid_url(raw_url.strip()):
+            raise BadRequest(
+                "source_url must be a non-empty http(s) URL", code="invalid_url"
+            )
+        source_url = raw_url.strip()
+        _reject_article_seed_url(source_url)
+
+        refs = {
+            key: _validated_artifact_ref(raw_input, key)
+            for key in ("composite_ref", "words_ref", "hook_ref")
+        }
+        clip_idx = _parse_clip_idx(raw_input)
+        overrides = _validated_dsl_hooks_overrides(raw_input.get("overrides"))
+
+        cp_input = {"source_url": source_url, **refs, "clip_idx": clip_idx}
+        if overrides:
+            cp_input["overrides"] = overrides
+        return ReelSubmission(
+            target=target,
+            title=f"dsl-hooks clip {clip_idx}"[:TITLE_MAX],
+            source_url=source_url,
+            topic=None,
+            source_research_run_id=source_research_run_id,
+            params={
+                "target": target,
+                "source_mode": DSL_HOOKS_SOURCE_MODE,
+                "clip_idx": clip_idx,
+            },
+            cp_input=cp_input,
         )
 
     # Unreachable: target is allowlisted above. Guard against a future target

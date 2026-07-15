@@ -40,6 +40,20 @@ class CompositeSegment(BaseModel):
     trailing_markers: list[MarkerAttachment] = Field(default_factory=list)
 
 
+class InvalidMarker(BaseModel):
+    """A marker that failed to parse, preserved so the compiler can diagnose it.
+
+    Without this the MarkerError is swallowed and the malformed marker is silently
+    dropped — the reel then renders without the directive and nothing reports it.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str
+    message: str
+    source: SourceLocus
+
+
 class CompositeDoc(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -48,6 +62,7 @@ class CompositeDoc(BaseModel):
     source_path: Path | None = None
     segments: list[CompositeSegment] = Field(default_factory=list)
     markers: list[MarkerAttachment] = Field(default_factory=list)
+    invalid_markers: list[InvalidMarker] = Field(default_factory=list)
 
 
 def _parse_timecode(tc: str) -> float:
@@ -62,9 +77,26 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _record_invalid_marker(
+    invalid_markers: list[InvalidMarker],
+    marker_text: str,
+    error: MarkerError,
+    src: SourceLocus,
+) -> None:
+    """Preserve a marker that failed to parse, so the compiler can diagnose it.
+
+    Shared by both swallow sites (inline + standalone) — one helper, not two copies.
+    """
+
+    invalid_markers.append(
+        InvalidMarker(text=marker_text, message=str(error), source=src)
+    )
+
+
 def read_composite(text: str, *, source_path: Path | None = None) -> CompositeDoc:
     segments: list[CompositeSegment] = []
     markers: list[MarkerAttachment] = []
+    invalid_markers: list[InvalidMarker] = []
     pending: list[tuple[SourceLocus, Marker, int]] = []
     seg_index = 0
     trailing_ok = False
@@ -97,8 +129,8 @@ def read_composite(text: str, *, source_path: Path | None = None) -> CompositeDo
                     )
                     trailing_markers.append(att)
                     markers.append(att)
-                except MarkerError:
-                    pass
+                except MarkerError as exc:
+                    _record_invalid_marker(invalid_markers, marker_text, exc, src)
 
             seg_locus = SourceLocus(path=source_path, line=line_no, col=1, raw=stripped)
             seg = CompositeSegment(
@@ -120,7 +152,8 @@ def read_composite(text: str, *, source_path: Path | None = None) -> CompositeDo
             src = SourceLocus(path=source_path, line=line_no, col=1, raw=stripped)
             try:
                 parsed = parse_marker(marker_text, source=src)
-            except MarkerError:
+            except MarkerError as exc:
+                _record_invalid_marker(invalid_markers, marker_text, exc, src)
                 trailing_ok = False
                 continue
 
@@ -178,6 +211,7 @@ def read_composite(text: str, *, source_path: Path | None = None) -> CompositeDo
         source_path=source_path,
         segments=segments,
         markers=markers,
+        invalid_markers=invalid_markers,
     )
 
 

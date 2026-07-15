@@ -1,10 +1,16 @@
 """Composite Transcript DSL v2 package."""
 
+from reel_af.dsl.composite import CompositeDoc, InvalidMarker
 from reel_af.dsl.models import (
+    A1_MAX_HOOK_CLIP_S,
+    A1_MIN_HOOK_CLIP_S,
+    DSL_HOOKS_WORKFLOW,
     AlignedSpan,
     AlignResult,
     BlackSegment,
+    CompileContext,
     CompileResult,
+    CutInSpec,
     Diagnostic,
     DiagnosticCode,
     DownloadedSegment,
@@ -32,10 +38,17 @@ _rebuild_forward_refs()
 del _rebuild_forward_refs
 
 __all__ = [
+    "A1_MAX_HOOK_CLIP_S",
+    "A1_MIN_HOOK_CLIP_S",
+    "DSL_HOOKS_WORKFLOW",
     "AlignedSpan",
     "AlignResult",
     "BlackSegment",
+    "CompileContext",
     "CompileResult",
+    "CompositeDoc",
+    "CutInSpec",
+    "InvalidMarker",
     "Diagnostic",
     "DiagnosticCode",
     "DownloadedSegment",

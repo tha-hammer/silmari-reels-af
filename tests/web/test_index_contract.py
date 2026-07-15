@@ -238,6 +238,7 @@ def test_visible_preset_targets_match_backend_allowlist():
     from reel_jobs import (
         ALLOWLISTED_TARGETS,
         TARGET_COMPOSITE,
+        TARGET_DSL_HOOKS,
         TARGET_TEXT_CAROUSEL,
         TARGET_TEXT_REEL,
         TARGET_TOPIC,
@@ -245,12 +246,22 @@ def test_visible_preset_targets_match_backend_allowlist():
 
     targets = {p["target"] for p in cfg["presets"]}
     assert targets == {TARGET_COMPOSITE, TARGET_TOPIC}
+    # Allowlisted but deliberately NOT visible presets: the text targets are
+    # dispatched by the create-from-research fan-out route, and TARGET_DSL_HOOKS
+    # is a hidden API target for the A1 orchestrator (Slice A) — A1 calls it
+    # server-side, so it has no browser preset by design.
     assert set(ALLOWLISTED_TARGETS) == {
         TARGET_COMPOSITE,
         TARGET_TOPIC,
         TARGET_TEXT_CAROUSEL,
         TARGET_TEXT_REEL,
+        TARGET_DSL_HOOKS,
     }
+    # Every visible preset must be allowlisted (the parity that matters), and the
+    # hidden targets must stay out of the browser config.
+    assert targets <= set(ALLOWLISTED_TARGETS)
+    assert TARGET_DSL_HOOKS not in targets
+    assert TARGET_DSL_HOOKS not in html
 
 
 def test_ui_status_aliases_are_known_by_backend_normalizer():
