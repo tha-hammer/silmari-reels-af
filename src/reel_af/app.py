@@ -1522,6 +1522,56 @@ def _default_segment_fetch(request):
     return request.target_path
 
 
+# --- A1 artifact resolution -------------------------------------------------
+# reel-af runs on Railway (remote), so A1's artifacts are NOT on this node's
+# filesystem. Refs arrive as http(s):// (A1-served or presigned bucket URLs — the
+# production path, reachable from Railway) or a1://<rel> (co-located dev, mapped
+# under $A1_ARTIFACTS_BASE). Bare local paths are for tests/fixtures only;
+# reel-af's submit canonicalization forbids them in production.
+A1_ARTIFACT_SCHEME = "a1://"
+A1_ARTIFACTS_BASE_ENV = "A1_ARTIFACTS_BASE"
+_ARTIFACT_FETCH_TIMEOUT_S = 30
+
+
+def _default_artifact_fetch(url: str) -> bytes:
+    """Fetch an artifact over HTTP(S) — the Railway worker pulling an A1-served or
+    presigned-bucket URL. Network/HTTP failure is terminal (→ dsl_artifact_unavailable)."""
+    import requests
+
+    try:
+        resp = requests.get(url, timeout=_ARTIFACT_FETCH_TIMEOUT_S)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise OSError(f"artifact fetch failed: {url}: {exc}") from exc
+    return resp.content
+
+
+def _resolve_artifact_ref(ref: str, dest_dir: Path, name: str, fetch) -> Path:
+    """Resolve an A1 artifact ref to a local readable path.
+
+    - ``http(s)://`` → fetch bytes into ``dest_dir/name`` (the Railway production path;
+      covers A1-served URLs and presigned shared-bucket URLs).
+    - ``a1://<rel>`` → ``$A1_ARTIFACTS_BASE/<rel>`` (co-located dev only; unset base
+      is terminal).
+    - otherwise → treat as a local path (tests/fixtures).
+
+    Raises OSError/ValueError on an unresolvable ref (mapped to dsl_artifact_unavailable).
+    """
+    parsed = urlparse(ref) if isinstance(ref, str) else urlparse("")
+    if parsed.scheme in BROWSER_DELIVERABLE_SCHEMES and parsed.netloc:
+        dest = dest_dir / name
+        dest.write_bytes(fetch(ref))
+        return dest
+    if isinstance(ref, str) and ref.startswith(A1_ARTIFACT_SCHEME):
+        base = os.getenv(A1_ARTIFACTS_BASE_ENV)
+        if not base:
+            raise ValueError(
+                f"a1:// artifact ref but {A1_ARTIFACTS_BASE_ENV} is unset: {ref}"
+            )
+        return Path(base) / ref[len(A1_ARTIFACT_SCHEME) :]
+    return Path(ref)
+
+
 def _load_hook_clip(hook_ref: str, clip_idx: int) -> dict:
     """Read one clip out of an A1 hook-plan.json v1 artifact."""
     plan = json.loads(Path(hook_ref).read_text(encoding="utf-8"))
@@ -1544,6 +1594,7 @@ async def dsl_hooks_to_reels(
     uploader=None,
     text_provider=None,
     image_provider=None,
+    artifact_fetch=None,
 ) -> dict:
     """A1 DSL hook clip → real-footage vertical reel → browser-deliverable URL.
 
@@ -1570,6 +1621,7 @@ async def dsl_hooks_to_reels(
         from reel_af.storage import upload_reel as uploader
     text_provider = text_provider or app
     image_provider = image_provider if image_provider is not None else _media_provider()
+    artifact_fetch = artifact_fetch or _default_artifact_fetch
 
     run_id = uuid.uuid4().hex[:12]
     work = Path(out_dir) if out_dir else Path(f"/tmp/reel-af/dsl-hooks/{run_id}")
@@ -1579,11 +1631,15 @@ async def dsl_hooks_to_reels(
     if not _is_browser_deliverable_url(source_url):
         return {"error": DSL_HOOKS_ERROR_INVALID_SOURCE_URL, "source_url": source_url}
 
-    # Steps 1-2 — load the A1 artifacts. Missing/unreadable is terminal, pre-render.
+    # Steps 1-2 — resolve refs (remote-fetch for the Railway worker), then load the
+    # A1 artifacts. Unresolvable/missing/unreadable is terminal, pre-render.
     try:
-        doc = read_composite_file(Path(composite_ref))
-        words = load_words(words_ref)
-        clip = _load_hook_clip(hook_ref, clip_idx)
+        composite_path = _resolve_artifact_ref(composite_ref, work, "composite.ts.md", artifact_fetch)
+        words_path = _resolve_artifact_ref(words_ref, work, "words.json", artifact_fetch)
+        hook_path = _resolve_artifact_ref(hook_ref, work, "hook-plan.json", artifact_fetch)
+        doc = read_composite_file(composite_path)
+        words = load_words(words_path)
+        clip = _load_hook_clip(str(hook_path), clip_idx)
     except (OSError, ValueError, KeyError, FileNotFoundError) as exc:
         return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
 

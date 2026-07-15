@@ -281,6 +281,29 @@ def test_worker_missing_artifact_fails_closed_before_render(a1_refs, tmp_path):
     assert result["error"] == "dsl_artifact_unavailable"
 
 
+def test_worker_remote_artifact_fetch_failure_fails_closed(a1_refs, tmp_path):
+    """reel-af on Railway pulls A1 artifacts over http(s); a failed fetch is
+    terminal dsl_artifact_unavailable, not a crash — before any render side effect."""
+    remote = {
+        **a1_refs,
+        "composite_ref": "https://a1.example/runs/x/composite.ts.md",
+        "words_ref": "https://a1.example/runs/x/words.json",
+        "hook_ref": "https://a1.example/runs/x/hook-plan.json",
+    }
+    result = asyncio.run(
+        dsl_hooks_to_reels(
+            **remote,
+            out_dir=str(tmp_path / "work"),
+            artifact_fetch=lambda url: (_ for _ in ()).throw(OSError("502 from A1")),
+            fetch_segment=lambda req: pytest.fail("must not fetch segment"),
+            uploader=lambda *a, **k: pytest.fail("must not upload"),
+        )
+    )
+
+    assert result["error"] == "dsl_artifact_unavailable"
+    assert "502 from A1" in result["detail"]
+
+
 def test_worker_rejects_non_http_source_url(a1_refs, tmp_path):
     result = asyncio.run(
         dsl_hooks_to_reels(
