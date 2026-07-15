@@ -12,8 +12,10 @@ consumer (footage_stitch overlay integration) to land before being wired in.
 from __future__ import annotations
 
 import asyncio
+import os
 import shlex
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any, Iterable, Literal, Mapping, Sequence
 
@@ -22,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 CANVAS_WIDTH = 1080
 CANVAS_HEIGHT = 1920
 FPS = 30
+AUDIO_SAMPLE_RATE = 48_000
 DEFAULT_ZOOM = 1.5
 OVERLAY_TIMEOUT_S = 120.0
 
@@ -71,6 +74,25 @@ def normalize_cut_ins(cut_ins: Iterable[CutInOverlay | Mapping[str, Any]]) -> li
         for item in cut_ins
     ]
     return sorted(normalized, key=lambda cut_in: (cut_in.at_s, cut_in.until_s, cut_in.type))
+
+
+def active_cut_ins_for_segment(
+    cut_ins: Iterable[CutInOverlay | Mapping[str, Any]],
+    segment_start_s: float,
+    segment_duration_s: float,
+) -> list[CutInOverlay]:
+    """Normalize, sort, and keep only cut-ins whose window intersects the segment.
+
+    This is the single active-window rule shared by ``build_overlay_filtergraph``
+    (graph input counts) and ``apply_overlays`` (image-prompt derivation) so the
+    two never disagree on how many visual images a segment needs.
+    """
+
+    return [
+        cut_in
+        for cut_in in normalize_cut_ins(cut_ins)
+        if _relative_window(cut_in, segment_start_s, segment_duration_s) is not None
+    ]
 
 
 def visual_prompts(cut_ins: Iterable[CutInOverlay | Mapping[str, Any]]) -> list[str]:
@@ -133,12 +155,7 @@ def build_overlay_filtergraph(
     if visual_input_start < 1:
         raise ValueError("visual_input_start must be at least 1")
 
-    cut_in_list = normalize_cut_ins(cut_ins)
-    active_cut_ins = [
-        cut_in
-        for cut_in in cut_in_list
-        if _relative_window(cut_in, segment_start_s, segment_duration_s) is not None
-    ]
+    active_cut_ins = active_cut_ins_for_segment(cut_ins, segment_start_s, segment_duration_s)
 
     fc: list[str] = [
         (
@@ -230,14 +247,30 @@ async def render_overlay_clip(
 
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Render to a unique temp path beside the final, then atomically publish only
+    # after ffmpeg succeeds. A failed/timed-out/cancelled render unlinks the temp
+    # and leaves any pre-existing final output untouched.
+    has_audio = _has_audio_stream(segment_path)
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{out_path.stem}-", suffix=out_path.suffix, dir=out_path.parent
+    )
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
     cmd = build_overlay_ffmpeg_cmd(
         segment_path,
         visual_images,
         graph,
-        out_path,
+        tmp_path,
         duration_s=duration_s,
+        has_audio=has_audio,
     )
-    await _run_ffmpeg(cmd, timeout_s=timeout_s)
+    try:
+        await _run_ffmpeg(cmd, timeout_s=timeout_s)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    os.replace(tmp_path, out_path)
     return out_path
 
 
@@ -248,8 +281,15 @@ def build_overlay_ffmpeg_cmd(
     out_path: Path,
     *,
     duration_s: float,
+    has_audio: bool,
+    audio_sample_rate: int = AUDIO_SAMPLE_RATE,
 ) -> list[str]:
-    """Build the ffmpeg command for a precomputed overlay graph."""
+    """Build the ffmpeg command for a precomputed overlay graph.
+
+    The output always carries a stereo audio stream so the footage stitcher can
+    consume ``[input_idx:a]``: source audio is preserved when present, otherwise
+    stereo silence is synthesized for the clip duration.
+    """
 
     if duration_s <= 0:
         raise ValueError("duration_s must be greater than zero")
@@ -257,13 +297,26 @@ def build_overlay_ffmpeg_cmd(
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(segment_path)]
     for image in visual_images:
         cmd += ["-loop", "1", "-i", str(image)]
+    if has_audio:
+        audio_map = "0:a"
+    else:
+        anullsrc_idx = 1 + len(visual_images)
+        cmd += [
+            "-f",
+            "lavfi",
+            "-t",
+            f"{duration_s:.3f}",
+            "-i",
+            f"anullsrc=channel_layout=stereo:sample_rate={audio_sample_rate}",
+        ]
+        audio_map = f"{anullsrc_idx}:a"
     cmd += [
         "-filter_complex",
         graph.filter_complex,
         "-map",
         graph.video_label,
         "-map",
-        "0:a?",
+        audio_map,
         "-c:v",
         "libx264",
         "-preset",
@@ -274,6 +327,8 @@ def build_overlay_ffmpeg_cmd(
         "aac",
         "-b:a",
         "160k",
+        "-ar",
+        str(audio_sample_rate),
         "-t",
         f"{duration_s:.3f}",
         "-movflags",
@@ -281,6 +336,28 @@ def build_overlay_ffmpeg_cmd(
         str(out_path),
     ]
     return cmd
+
+
+def _has_audio_stream(path: Path) -> bool:
+    """Return True when ``path`` has at least one audio stream (via ffprobe)."""
+
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "a",
+            "-show_entries",
+            "stream=index",
+            "-of",
+            "csv=p=0",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return bool(proc.stdout.strip())
 
 
 def probe_duration(path: Path) -> float:
@@ -328,6 +405,10 @@ async def _run_ffmpeg(cmd: Sequence[str], *, timeout_s: float) -> None:
         proc.kill()
         await proc.communicate()
         raise TimeoutError(f"overlay ffmpeg timed out after {timeout_s:.1f}s") from None
+    except BaseException:
+        proc.kill()
+        await proc.communicate()
+        raise
 
     if proc.returncode != 0:
         raise OverlayError(
@@ -346,6 +427,7 @@ __all__ = [
     "CutInOverlay",
     "OverlayError",
     "OverlayFilterGraph",
+    "active_cut_ins_for_segment",
     "build_overlay_ffmpeg_cmd",
     "build_overlay_filtergraph",
     "normalize_cut_ins",

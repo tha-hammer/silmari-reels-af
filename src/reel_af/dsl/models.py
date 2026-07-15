@@ -312,6 +312,7 @@ class DownloadedSegment(BaseModel):
     path: Path
     source_start_s: float
     source_end_s: float
+    pre_normalized: bool = False
 
 
 SegmentAssetMap = Mapping[str, DownloadedSegment]

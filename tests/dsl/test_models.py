@@ -574,3 +574,49 @@ def test_hole_context_source_accepts_source_locus():
         source=locus,
     )
     assert isinstance(ctx.source, SourceLocus)
+
+
+# ── DownloadedSegment.pre_normalized (overlay-stitch seam) ────────
+
+def test_downloaded_segment_pre_normalized_defaults_false():
+    from pathlib import Path
+
+    from reel_af.dsl.models import DownloadedSegment
+    ds = DownloadedSegment(
+        segment_id="seg-001",
+        path=Path("/tmp/clip.mp4"),
+        source_start_s=0.0,
+        source_end_s=1.0,
+    )
+    assert ds.pre_normalized is False
+
+
+def test_downloaded_segment_pre_normalized_roundtrips():
+    from pathlib import Path
+
+    from reel_af.dsl.models import DownloadedSegment
+    ds = DownloadedSegment(
+        segment_id="seg-001",
+        path=Path("/tmp/clip.mp4"),
+        source_start_s=0.0,
+        source_end_s=1.0,
+        pre_normalized=True,
+    )
+    dumped = ds.model_dump()
+    assert dumped["pre_normalized"] is True
+    restored = DownloadedSegment.model_validate(dumped)
+    assert restored.pre_normalized is True
+
+
+def test_downloaded_segment_forbids_extra_fields():
+    from pathlib import Path
+
+    from reel_af.dsl.models import DownloadedSegment
+    with pytest.raises(ValidationError):
+        DownloadedSegment(
+            segment_id="seg-001",
+            path=Path("/tmp/clip.mp4"),
+            source_start_s=0.0,
+            source_end_s=1.0,
+            bogus=True,
+        )
