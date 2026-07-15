@@ -40,8 +40,20 @@ def _client(client_factory=None):
     )
 
 
-def upload_reel(local_path, *, run_id: str, client_factory=None, ttl_s: int | None = None) -> str | None:
+def upload_reel(
+    local_path,
+    *,
+    run_id: str,
+    filename: str | None = None,
+    client_factory=None,
+    ttl_s: int | None = None,
+) -> str | None:
     """Upload a produced reel to the shared bucket and return a presigned GET url.
+
+    ``filename`` overrides the delivered object-key basename (and thus the browser's
+    download name, since the presign carries no Content-Disposition); its own basename
+    is taken (``Path(filename).name``) so it can never escape the ``outputs/{run_id}/``
+    prefix. ``None`` (default) keeps the local ``path.name``.
 
     Returns ``None`` (fail-soft) when the bucket is unconfigured or the file is
     missing, so the caller can still surface the local ``video_path``.
@@ -50,7 +62,8 @@ def upload_reel(local_path, *, run_id: str, client_factory=None, ttl_s: int | No
     path = Path(local_path)
     if not bucket or not path.is_file():
         return None
-    key = f"outputs/{run_id}/{path.name}"
+    basename = Path(filename).name if filename else path.name
+    key = f"outputs/{run_id}/{basename}"
     client = _client(client_factory)
     client.upload_file(str(path), bucket, key)
     return client.generate_presigned_url(

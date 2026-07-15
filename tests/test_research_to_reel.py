@@ -358,10 +358,11 @@ async def test_delivers_reel_and_sets_download_url_and_reel_ref(tmp_path: Path, 
     renderer, _ = _make_renderer()
     seen: dict = {}
 
-    def fake_uploader(local_path, *, run_id):
+    def fake_uploader(local_path, *, run_id, filename=None):
         seen["path"] = local_path
         seen["run_id"] = run_id
-        return f"https://s3.example/bkt/outputs/{run_id}/reel.mp4?X-Amz-Expires=86400"
+        seen["filename"] = filename
+        return f"https://s3.example/bkt/outputs/{run_id}/{filename or 'reel.mp4'}?X-Amz-Expires=86400"
 
     captured: dict = {}
 
@@ -386,6 +387,10 @@ async def test_delivers_reel_and_sets_download_url_and_reel_ref(tmp_path: Path, 
     assert out["video_path"].endswith("reel.mp4")                  # local path preserved (mirror composite)
     assert seen["path"] == out["video_path"]                       # uploaded the produced reel
     assert seen["run_id"] == out["run_id"]                         # keyed by the reasoner's run_id
+    # descriptive, collision-safe delivered basename (essence.core_claim "c" → "c-YYYYMMDD-<run_id>.mp4")
+    assert seen["filename"].endswith(f"-{out['run_id']}.mp4")      # descriptive name + run_id
+    assert seen["filename"] != "reel.mp4"                          # NOT the generic local basename
+    assert out["download_url"].split("?")[0].endswith(seen["filename"])  # the URL path carries the descriptive name
     assert captured["dto"]["reel_ref"] == out["download_url"]      # announced DTO carries the bucket URL
 
 
@@ -411,7 +416,7 @@ async def test_fail_soft_keeps_local_path_when_bucket_unset(tmp_path: Path, monk
         renderer=renderer,
         publisher=_FakePublisher(),
         announce_fn=fake_announce,
-        uploader=lambda p, *, run_id: None,            # bucket unset → None (fail-soft)
+        uploader=lambda p, *, run_id, filename=None: None,   # bucket unset → None (fail-soft)
     )
 
     assert "download_url" not in out                   # no bucket URL surfaced

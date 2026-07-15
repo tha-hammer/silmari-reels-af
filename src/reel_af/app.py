@@ -48,6 +48,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -65,6 +66,7 @@ from agentfield.media_providers import OpenRouterProvider  # noqa: E402
 import reel_af.sdk_patches  # noqa: E402, F401
 from reel_af.agents.extract import essence_from_text  # noqa: E402
 from reel_af.models import Essence  # noqa: E402
+from reel_af.naming import reel_output_name  # noqa: E402
 from reel_af.render.images import generate_first_frame  # noqa: E402
 from reel_af.render.presets import load_preset  # noqa: E402
 
@@ -477,10 +479,16 @@ async def article_to_reel(
         f"reel-af article: run {run_id} done → {final['video_path']}",
         tags=["reel", "article", "done"],
     )
-    # T10: deliver the reel out via the shared bucket so the browser can download it.
+    # T10: deliver the reel out via the shared bucket so the browser can download it,
+    # under a descriptive, collision-safe basename derived from the article's core claim.
     from reel_af.storage import upload_reel
 
-    download_url = await asyncio.to_thread(upload_reel, final["video_path"], run_id=run_id)
+    filename = reel_output_name(
+        essence.get("core_claim") or essence.get("domain"), run_id, datetime.now(timezone.utc).date()
+    )
+    download_url = await asyncio.to_thread(
+        upload_reel, final["video_path"], run_id=run_id, filename=filename
+    )
     return {
         **final,
         "source": "article",
@@ -627,10 +635,14 @@ async def topic_to_reel(
         f"reel-af topic: run {run_id} done → {final['video_path']}",
         tags=["reel", "topic", "done"],
     )
-    # T10: deliver the reel out via the shared bucket so the browser can download it.
+    # T10: deliver the reel out via the shared bucket so the browser can download it,
+    # under a descriptive, collision-safe basename derived from the topic.
     from reel_af.storage import upload_reel
 
-    download_url = await asyncio.to_thread(upload_reel, final["video_path"], run_id=run_id)
+    filename = reel_output_name(topic, run_id, datetime.now(timezone.utc).date())
+    download_url = await asyncio.to_thread(
+        upload_reel, final["video_path"], run_id=run_id, filename=filename
+    )
     return {
         **final,
         "source": "topic",
@@ -827,7 +839,12 @@ async def composite_to_reel(
     # bucket and hand the browser a presigned GET url. Fail-soft: None if unconfigured.
     from reel_af.storage import upload_reel
 
-    download_url = await asyncio.to_thread(upload_reel, result["video_path"], run_id=run_id)
+    # Decision C: use the public `preset` as the descriptive source (the source url is
+    # intentionally not surfaced here for privacy).
+    filename = reel_output_name(preset, run_id, datetime.now(timezone.utc).date())
+    download_url = await asyncio.to_thread(
+        upload_reel, result["video_path"], run_id=run_id, filename=filename
+    )
     delivered = {"download_url": download_url} if download_url else {}
     app.note(f"reel-af composite: run {run_id} done → {result['video_path']} "
              f"(delivered={bool(download_url)}, {took}s)",
@@ -1297,7 +1314,12 @@ async def research_to_reel(
     # bucket is unset, so the reel still surfaces its local video_path.
     if uploader is None:
         from reel_af.storage import upload_reel as uploader
-    download_url = await asyncio.to_thread(uploader, final["video_path"], run_id=run_id)
+    filename = reel_output_name(
+        essence.get("core_claim") or source_execution_id, run_id, datetime.now(timezone.utc).date()
+    )
+    download_url = await asyncio.to_thread(
+        uploader, final["video_path"], run_id=run_id, filename=filename
+    )
     delivered = {"download_url": download_url} if download_url else {}
     app.note(
         f"reel-af research: run {run_id} done → {final['video_path']} "

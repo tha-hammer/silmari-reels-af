@@ -71,16 +71,21 @@ async def _produce(tmp_path, monkeypatch, uploader):
 async def test_result_ref_is_bucket_url_when_delivered(tmp_path, monkeypatch):
     result = await _produce(
         tmp_path, monkeypatch,
-        uploader=lambda p, *, run_id: f"https://s3.example/bkt/outputs/{run_id}/reel.mp4?X-Amz-Expires=1",
+        uploader=lambda p, *, run_id, filename=None: (
+            f"https://s3.example/bkt/outputs/{run_id}/{filename or 'reel.mp4'}?X-Amz-Expires=1"
+        ),
     )
     # OBSERVE via the production read path (never a raw store read).
     ref = _resolve_result_ref(_EXEC_ID, {"result": result})
     assert ref.startswith("https://")            # downloadable bucket URL
+    # ...carrying the descriptive, collision-safe basename (not the generic reel.mp4).
+    assert ref.split("?")[0].endswith(f"-{result['run_id']}.mp4")
+    assert not ref.split("?")[0].endswith("/reel.mp4")
 
 
 async def test_result_ref_is_placeholder_when_delivery_disabled(tmp_path, monkeypatch):
     # RED-AT-SEAM: disable delivery → no download_url → placeholder, not a bucket URL.
-    result = await _produce(tmp_path, monkeypatch, uploader=lambda p, *, run_id: None)
+    result = await _produce(tmp_path, monkeypatch, uploader=lambda p, *, run_id, filename=None: None)
     ref = _resolve_result_ref(_EXEC_ID, {"result": result})
     assert ref == f"cp-execution://{_EXEC_ID}/result/video_path"
     assert not ref.startswith("http")
