@@ -55,6 +55,26 @@ class FakeIdentity:
         return self._ctx
 
 
+class FakeMembershipReader:
+    """In-memory ``MembershipReader`` seeded with SuperTokens id → identity, so the
+    REAL ``ResolverIdentity`` can be driven end-to-end without Postgres. Injected
+    one level BELOW ``deps.identity`` (unlike ``FakeIdentity``) to exercise the
+    session-provider seam. ``ensure_ready`` is a no-op; an unseeded id resolves to
+    ``None`` (→ ``Forbidden``), never synthesized."""
+
+    def __init__(self, seed: dict | None = None):
+        # supertokens_user_id -> (user_id, org_id, role)
+        self._seed = dict(seed or {})
+        self.calls: list = []
+
+    def ensure_ready(self) -> None:
+        pass
+
+    def resolve_active(self, supertokens_user_id, email, claimed_org_id):
+        self.calls.append((supertokens_user_id, email, claimed_org_id))
+        return self._seed.get(supertokens_user_id)
+
+
 class FakeReelJobRepo:
     def __init__(self, job: ReelJobRef | None = None, get_error: Exception | None = None):
         self.inserted: list = []

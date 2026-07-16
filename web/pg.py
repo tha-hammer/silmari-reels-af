@@ -829,9 +829,27 @@ class PgEventConsumerStore(_SharedSchema):
 
 
 def build_identity(reader: PgMembershipReader | None = None):
-    """Wire the production identity resolver: real SuperTokens session provider
-    (reads the verified session off Flask ``g``) + the DB membership reader with
-    JIT bootstrap. Fail-closed: no session → 401; schema unavailable → 503."""
-    from auth import ResolverIdentity, SuperTokensSessions
+    """Wire the production identity resolver: an ordered ``CompositeSessions`` of
+    the machine-token provider (checked first) then the real SuperTokens session
+    provider (reads the verified session off Flask ``g``), over the DB membership
+    reader with JIT bootstrap. Fail-closed: no session → 401; schema unavailable
+    → 503. The service seam is disabled (no-op) when ``REEL_AF_SERVICE_TOKEN`` is
+    unset, so resolution is byte-identical to the pure-SuperTokens path."""
+    from auth import (
+        REEL_AF_SERVICE_TOKEN_ENV,
+        SERVICE_EMAIL,
+        SERVICE_USER_ID,
+        CompositeSessions,
+        ResolverIdentity,
+        ServiceTokenSessions,
+        SuperTokensSessions,
+    )
 
-    return ResolverIdentity(SuperTokensSessions(), reader or PgMembershipReader())
+    service_token = os.getenv(REEL_AF_SERVICE_TOKEN_ENV)
+    sessions = CompositeSessions(
+        [
+            ServiceTokenSessions(service_token, SERVICE_USER_ID, SERVICE_EMAIL),
+            SuperTokensSessions(),
+        ]
+    )
+    return ResolverIdentity(sessions, reader or PgMembershipReader())
