@@ -52,6 +52,7 @@ from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
@@ -65,8 +66,24 @@ from agentfield.media_providers import OpenRouterProvider  # noqa: E402
 # the fixed behaviour. Module is idempotent.
 import reel_af.sdk_patches  # noqa: E402, F401
 from reel_af.agents.extract import essence_from_text  # noqa: E402
+from reel_af.dsl.compile import compile_composite, load_words  # noqa: E402
+from reel_af.dsl.composite import read_composite_file  # noqa: E402
+from reel_af.dsl.cutins import map_cut_ins  # noqa: E402
+from reel_af.dsl.models import (  # noqa: E402
+    A1_DELIVERY_UNAVAILABLE,
+    BROWSER_DELIVERABLE_SCHEMES,
+    DSL_HOOKS_WORKFLOW,
+    CompileContext,
+    CutInSpec,
+    RenderabilityError,
+    SourceRef,
+    validate_renderable,
+)
 from reel_af.models import Essence  # noqa: E402
 from reel_af.naming import reel_output_name  # noqa: E402
+from reel_af.render.finish import FinishContext, finish_reel  # noqa: E402
+from reel_af.render.finish_config import ReelFinishConfig  # noqa: E402
+from reel_af.render.footage_stitch import download_segments, stitch_footage_reel  # noqa: E402
 from reel_af.render.images import generate_first_frame  # noqa: E402
 from reel_af.render.presets import load_preset  # noqa: E402
 
@@ -1462,6 +1479,288 @@ async def _render_downstream(
 
 
 app.include_router(reel)
+
+
+# ─────────────────── A1 DSL-hooks target (Slice A, B16) ───────────────────
+#
+# Target id derivation: the SDK builds reasoner_id as "<router prefix>_<func
+# name>" and the call target as "<node_id>.<reasoner_id>". Router prefix is
+# "reel", node is "reel-af" — so this function MUST be named dsl_hooks_to_reels
+# to expose "reel-af.reel_dsl_hooks_to_reels". Renaming it silently changes the
+# public target id.
+
+DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE = "dsl_artifact_unavailable"
+DSL_HOOKS_ERROR_INVALID_SOURCE_URL = "invalid_source_url"
+DSL_HOOKS_ERROR_COMPILE_FAILED = "dsl_compile_failed"
+DSL_HOOKS_ERROR_CUTIN_INVALID = "dsl_cutin_invalid"
+DSL_HOOKS_ERROR_RENDER_FAILED = "dsl_render_failed"
+
+
+def _diag_dicts(diagnostics) -> list[dict]:
+    return [
+        {"code": d.code, "message": d.message, "severity": d.severity}
+        for d in diagnostics
+    ]
+
+
+def _is_browser_deliverable_url(ref: Any) -> bool:
+    """Pure question: is this a browser-fetchable http(s) URL with a host?"""
+    if not isinstance(ref, str) or not ref:
+        return False
+    parsed = urlparse(ref)
+    return parsed.scheme in BROWSER_DELIVERABLE_SCHEMES and bool(parsed.netloc)
+
+
+def _default_segment_fetch(request):
+    """Production segment fetcher: pull the source span with the crisp downloader.
+
+    Mirrors the `uploader` seam — a production default that tests replace.
+    """
+    from reel_af.render.video import download_crisp_source
+
+    download_crisp_source(request.source_url, str(request.target_path))
+    return request.target_path
+
+
+# --- A1 artifact resolution -------------------------------------------------
+# reel-af runs on Railway (remote), so A1's artifacts are NOT on this node's
+# filesystem. Refs arrive as http(s):// (A1-served or presigned bucket URLs — the
+# production path, reachable from Railway) or a1://<rel> (co-located dev, mapped
+# under $A1_ARTIFACTS_BASE). Bare local paths are for tests/fixtures only;
+# reel-af's submit canonicalization forbids them in production.
+A1_ARTIFACT_SCHEME = "a1://"
+A1_ARTIFACTS_BASE_ENV = "A1_ARTIFACTS_BASE"
+_ARTIFACT_FETCH_TIMEOUT_S = 30
+
+
+def _default_artifact_fetch(url: str) -> bytes:
+    """Fetch an artifact over HTTP(S) — the Railway worker pulling an A1-served or
+    presigned-bucket URL. Network/HTTP failure is terminal (→ dsl_artifact_unavailable)."""
+    import requests
+
+    try:
+        resp = requests.get(url, timeout=_ARTIFACT_FETCH_TIMEOUT_S)
+        resp.raise_for_status()
+    except requests.RequestException as exc:
+        raise OSError(f"artifact fetch failed: {url}: {exc}") from exc
+    return resp.content
+
+
+def _resolve_artifact_ref(ref: str, dest_dir: Path, name: str, fetch) -> Path:
+    """Resolve an A1 artifact ref to a local readable path.
+
+    - ``http(s)://`` → fetch bytes into ``dest_dir/name`` (the Railway production path;
+      covers A1-served URLs and presigned shared-bucket URLs).
+    - ``a1://<rel>`` → ``$A1_ARTIFACTS_BASE/<rel>`` (co-located dev only; unset base
+      is terminal).
+    - otherwise → treat as a local path (tests/fixtures).
+
+    Raises OSError/ValueError on an unresolvable ref (mapped to dsl_artifact_unavailable).
+    """
+    parsed = urlparse(ref) if isinstance(ref, str) else urlparse("")
+    if parsed.scheme in BROWSER_DELIVERABLE_SCHEMES and parsed.netloc:
+        dest = dest_dir / name
+        dest.write_bytes(fetch(ref))
+        return dest
+    if isinstance(ref, str) and ref.startswith(A1_ARTIFACT_SCHEME):
+        base = os.getenv(A1_ARTIFACTS_BASE_ENV)
+        if not base:
+            raise ValueError(
+                f"a1:// artifact ref but {A1_ARTIFACTS_BASE_ENV} is unset: {ref}"
+            )
+        return Path(base) / ref[len(A1_ARTIFACT_SCHEME) :]
+    return Path(ref)
+
+
+def _load_hook_clip(hook_ref: str, clip_idx: int) -> dict:
+    """Read one clip out of an A1 hook-plan.json v1 artifact."""
+    plan = json.loads(Path(hook_ref).read_text(encoding="utf-8"))
+    for clip in plan.get("clips", []):
+        if clip.get("idx") == clip_idx:
+            return clip
+    raise FileNotFoundError(f"hook plan has no clip_idx={clip_idx}")
+
+
+@reel.reasoner()
+async def dsl_hooks_to_reels(
+    source_url: str,
+    composite_ref: str,
+    words_ref: str,
+    hook_ref: str,
+    clip_idx: int = 1,
+    out_dir: str | None = None,
+    *,
+    fetch_segment=None,
+    uploader=None,
+    text_provider=None,
+    image_provider=None,
+    artifact_fetch=None,
+) -> dict:
+    """A1 DSL hook clip → real-footage vertical reel → browser-deliverable URL.
+
+    The A1 artifact set (composite.ts.md + transcript.words.json + hook-plan.json)
+    is the ONLY input: no article readability, no topic generation, no clip-plan.
+
+    Worker contract (research steps 1-11): read composite/words → parse markers →
+    resolve/align → compile with CompileContext → reject compile errors → validate
+    renderability → map cut-ins (B9a: validated, NOT rendered — B9b deferred) →
+    download segments → stitch 1080x1920 → finish (banner/captions/image cut-ins,
+    no raw opt-out) → deliver.
+
+    Delivery is REQUIRED: unlike the other reasoners, a missing browser URL is
+    terminal ``delivery_unavailable``. A node-local ``video_path`` is never
+    presented as success and never returned.
+
+    Example:
+      curl -X POST http://localhost:8080/api/v1/execute/async/reel-af.reel_dsl_hooks_to_reels \\
+        -H 'Content-Type: application/json' \\
+        -d '{"input":{"source_url":"https://www.youtube.com/watch?v=abc123","composite_ref":"a1://.../composite.ts.md","words_ref":"a1://.../transcript.words.json","hook_ref":"a1://.../hook-plan.json","clip_idx":1}}'
+    """
+    fetch_segment = fetch_segment or _default_segment_fetch
+    if uploader is None:
+        from reel_af.storage import upload_reel as uploader
+    text_provider = text_provider or app
+    image_provider = image_provider if image_provider is not None else _media_provider()
+    artifact_fetch = artifact_fetch or _default_artifact_fetch
+
+    run_id = uuid.uuid4().hex[:12]
+    work = Path(out_dir) if out_dir else Path(f"/tmp/reel-af/dsl-hooks/{run_id}")
+    work.mkdir(parents=True, exist_ok=True)
+
+    # Guard: reject a non-HTTP(S) source before ANY artifact read or side effect.
+    if not _is_browser_deliverable_url(source_url):
+        return {"error": DSL_HOOKS_ERROR_INVALID_SOURCE_URL, "source_url": source_url}
+
+    # Steps 1-2 — resolve refs (remote-fetch for the Railway worker), then load the
+    # A1 artifacts. Unresolvable/missing/unreadable is terminal, pre-render.
+    try:
+        composite_path = _resolve_artifact_ref(composite_ref, work, "composite.ts.md", artifact_fetch)
+        words_path = _resolve_artifact_ref(words_ref, work, "words.json", artifact_fetch)
+        hook_path = _resolve_artifact_ref(hook_ref, work, "hook-plan.json", artifact_fetch)
+        doc = read_composite_file(composite_path)
+        words = load_words(words_path)
+        clip = _load_hook_clip(str(hook_path), clip_idx)
+    except (OSError, ValueError, KeyError, FileNotFoundError) as exc:
+        return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
+
+    # Steps 3-5 — parse/resolve/align/compile. CompileContext supplies what the
+    # .ts.md and words sidecar cannot (research C27).
+    context = CompileContext(
+        workflow=DSL_HOOKS_WORKFLOW,
+        source_url=source_url,
+        video_id=clip.get("source_id") or None,
+        delivery_required=True,
+        cut_ins=[CutInSpec.model_validate(c) for c in clip.get("cut_ins", [])]
+        if _cut_ins_are_wellformed(clip.get("cut_ins", []))
+        else [],
+    )
+    result = compile_composite(
+        doc, words, SourceRef(source_url=source_url), context=context
+    )
+
+    # Step 6 — guard clause BEFORE any render side effect.
+    if result.status == "error" or result.plan is None:
+        return {
+            "error": DSL_HOOKS_ERROR_COMPILE_FAILED,
+            "diagnostics": _diag_dicts(result.diagnostics),
+        }
+
+    # Step 7 — renderability postconditions stronger than the schema.
+    try:
+        validate_renderable(result.plan)
+    except RenderabilityError as exc:
+        return {"error": DSL_HOOKS_ERROR_COMPILE_FAILED, "detail": str(exc),
+                "diagnostics": _diag_dicts(result.diagnostics)}
+
+    # B9a — map/validate A1 cut-ins. An unanchored cut-in fails closed rather than
+    # being silently dropped. Slice A does NOT render them (B9b deferred).
+    cut_ins, cut_in_diags = map_cut_ins(clip.get("cut_ins", []), reel=result.plan)
+    if cut_in_diags:
+        return {
+            "error": DSL_HOOKS_ERROR_CUTIN_INVALID,
+            "diagnostics": _diag_dicts(cut_in_diags),
+        }
+
+    # Steps 8-10 — fetch real footage, stitch vertical, finish by default.
+    try:
+        assets = await asyncio.to_thread(
+            download_segments, result.plan, work / "segments", fetch_segment
+        )
+        base = await stitch_footage_reel(
+            result.plan, assets, work / "base", run_id=run_id
+        )
+        transcript = " ".join(s.text for s in result.plan.segments
+                              if getattr(s, "kind", None) == "source")
+        final = await finish_reel(
+            base,
+            FinishContext(transcript=transcript, text_provider=text_provider,
+                          image_provider=image_provider, source_url=source_url,
+                          run_id=run_id),
+            cfg=_finish_config_for(image_provider),
+            out_dir=work / "final",
+            raw=False,  # no raw/fast opt-out on this workflow
+        )
+    except Exception as exc:  # noqa: BLE001 — reasoners return errors, never raise
+        return {"error": DSL_HOOKS_ERROR_RENDER_FAILED, "detail": str(exc)}
+
+    # Step 11 — delivery is REQUIRED. Missing/non-browser-deliverable is terminal.
+    filename = reel_output_name(clip.get("title") or clip.get("hook"), run_id,
+                                datetime.now(timezone.utc).date())
+    download_url = await asyncio.to_thread(
+        uploader, str(final), run_id=run_id, filename=filename
+    )
+    if not _is_browser_deliverable_url(download_url):
+        app.note(
+            f"reel-af dsl-hooks: run {run_id} produced a reel with no browser-deliverable "
+            f"URL — terminal {A1_DELIVERY_UNAVAILABLE}",
+            tags=["reel", "dsl-hooks", "delivery"],
+        )
+        return {"error": A1_DELIVERY_UNAVAILABLE, "run_id": run_id}
+
+    return {
+        "download_url": download_url,
+        "run_id": run_id,
+        "target_workflow": DSL_HOOKS_WORKFLOW,
+        "clip_idx": clip_idx,
+        "segment_count": len(result.plan.segments),
+        "cut_in_count": len(cut_ins),
+        "duration_s": result.plan.duration_s,
+        "source": "dsl_hooks",
+    }
+
+
+def _cut_ins_are_wellformed(raw_cut_ins: list) -> bool:
+    """Pure question: can every raw cut-in be typed? Malformed ones are surfaced
+    by map_cut_ins as CUTIN_INVALID rather than exploding CompileContext."""
+    try:
+        for cut_in in raw_cut_ins:
+            CutInSpec.model_validate(cut_in)
+    except Exception:  # noqa: BLE001
+        return False
+    return True
+
+
+def _media_provider():
+    try:
+        return OpenRouterProvider()
+    except Exception:  # noqa: BLE001 — image cut-ins degrade, they don't fail the reel
+        return None
+
+
+def _finish_config_for(image_provider: Any) -> ReelFinishConfig:
+    """Finish config for the DSL-hooks workflow.
+
+    Guard: image cut-ins REQUIRE an image provider — ``generate_image_cutins``
+    calls ``provider.generate_image`` unconditionally. With no provider,
+    ``image_count=0`` degrades cut-ins out rather than crashing the whole reel.
+    The hook banner and safe-zone captions still burn, so the reel stays valid.
+    There is no raw/fast opt-out on this workflow either way.
+    """
+
+    cfg = ReelFinishConfig()
+    if image_provider is None:
+        return cfg.model_copy(update={"image_count": 0})
+    return cfg
 
 
 def _health() -> dict:

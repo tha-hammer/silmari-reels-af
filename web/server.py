@@ -41,10 +41,13 @@ from deps import (
 )
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
 from reel_jobs import (
+    A1_DELIVERY_UNAVAILABLE,
+    DELIVERY_REQUIRED_TARGETS,
     FORBIDDEN_IDENTITY_FIELDS,
     TERMINAL_STATUSES,
     TEXT_TARGET_BY_OUTPUT,
     ReelJobStatus,
+    _is_valid_url,
     build_research_dispatch,
     build_submission,
     normalize_reel_status,
@@ -257,12 +260,53 @@ def _normalize_execution_status(cp_body: dict) -> ReelJobStatus:
     return normalized
 
 
-def _poll_response_body(cp_body: dict, normalized: ReelJobStatus, job=None) -> dict:
+def _is_browser_deliverable(ref: str | None) -> bool:
+    """Pure question: is this ref a browser-fetchable http(s) URL?
+
+    Delegates to reel_jobs._is_valid_url (scheme AND netloc) rather than a
+    startswith check, which would accept "https://" with no host.
+    """
+
+    return isinstance(ref, str) and _is_valid_url(ref)
+
+
+def _delivery_error(job, normalized: ReelJobStatus, result_ref: str | None) -> str | None:
+    """The locally-derived delivery error for this job, or None.
+
+    Pure question — no writes. Scoped to DELIVERY_REQUIRED_TARGETS so
+    composite/topic/research keep today's fail-soft behavior unchanged.
+    """
+
+    target = (getattr(job, "params", None) or {}).get("target")
+    if target not in DELIVERY_REQUIRED_TARGETS:
+        return None
+    if normalized != "succeeded":
+        return None
+    if _is_browser_deliverable(result_ref):
+        return None
+    return A1_DELIVERY_UNAVAILABLE
+
+
+def _poll_response_body(
+    cp_body: dict,
+    normalized: ReelJobStatus,
+    job=None,
+    *,
+    local_error: str | None = None,
+) -> dict:
     payload = dict(cp_body)
     payload["status"] = normalized
     source_run_id = getattr(job, "source_research_run_id", None)
     if source_run_id is not None:
         payload["source_research_run_id"] = str(source_run_id)
+    if local_error is not None:
+        # A locally-derived terminal failure (e.g. delivery_unavailable). The CP
+        # reported success, so `error` is absent from cp_body and _execution_error
+        # cannot supply it. Strip the whole `result` dict: `dict(cp_body)` above
+        # copies it wholesale, which would leak the node-local video_path.
+        payload.pop("result", None)
+        payload["error"] = local_error
+        return payload
     if normalized == "failed" and "error" not in payload:
         error = _execution_error(cp_body)
         if error is not None:
@@ -307,6 +351,28 @@ def _source_research_run_id(deps: AppDeps, ctx, body: dict | None) -> uuid.UUID 
     return run_id
 
 
+def _log_orphaned_dispatch(deps: AppDeps, ctx, *, job_id, execution_id, crid, target, exc) -> None:
+    """Operator-visible record of a CP dispatch that was accepted but not attached.
+
+    Shared by BOTH dispatch paths (_handle_submit and the fan-out _dispatch_one) —
+    one helper, not two copies. Carries `target` so an operator can tell which
+    reasoner owns the orphaned execution.
+
+    This is log-only ON PURPOSE (B15a). The durable record + repair path (B15b) is
+    deferred: the trigger IS database unavailability, so a Postgres row would be
+    unreachable exactly when it matters, and this repo owns no migrations. The
+    recommended repair is a CP-reconciling sweep over mark_stale_queued's existing
+    `status='queued' AND execution_id IS NULL` predicate — the reel_job row already
+    IS the durable record.
+    """
+
+    deps.logger.error(
+        "orphaned_dispatch job_id=%s execution_id=%s org_id=%s created_by=%s "
+        "client_request_id=%s target=%s err=%s",
+        job_id, execution_id, ctx.org_id, ctx.user_id, crid, target, exc,
+    )
+
+
 def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)            # 401 / 403 / 503, before any CP call
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
@@ -339,10 +405,9 @@ def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     try:
         deps.reel_jobs.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
     except HttpError as exc:
-        deps.logger.error(
-            "orphaned_dispatch job_id=%s execution_id=%s org_id=%s created_by=%s "
-            "client_request_id=%s err=%s",
-            ref.job_id, cp_body["execution_id"], ctx.org_id, ctx.user_id, crid, exc,
+        _log_orphaned_dispatch(
+            deps, ctx, job_id=ref.job_id, execution_id=cp_body["execution_id"],
+            crid=crid, target=target, exc=exc,
         )
         raise RepositoryUnavailable("dispatch accepted but ownership attach failed") from exc
     payload = dict(cp_body)
@@ -440,7 +505,18 @@ def _dispatch_one(deps: AppDeps, ctx, target, submission, job_id, crid, now) -> 
     if "execution_id" not in cp_body:
         deps.reel_jobs.mark_failed(ctx, ref.job_id, "no_execution_id", now)
         return _DispatchOutcome(False, None, "no_execution_id")
-    deps.reel_jobs.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
+    try:
+        deps.reel_jobs.attach_execution_id(ctx, ref.job_id, cp_body["execution_id"])
+    except HttpError as exc:
+        # Was unguarded: an HttpError here escaped the function entirely, breaching
+        # this function's own "returns a disposition instead of raising" contract
+        # and aborting every sibling leg of the fan-out. The CP has already
+        # accepted the work, so record the orphan and report the disposition.
+        _log_orphaned_dispatch(
+            deps, ctx, job_id=ref.job_id, execution_id=cp_body["execution_id"],
+            crid=crid, target=target, exc=exc,
+        )
+        return _DispatchOutcome(False, None, "attach_failed")
     return _DispatchOutcome(True, cp_body["execution_id"], "enqueued")
 
 
@@ -695,9 +771,18 @@ def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
         return resp, status
     normalized = _normalize_execution_status(cp_body)          # 2xx only: reconcile (T6)
     result_ref = _resolve_result_ref(execution_id, cp_body) if normalized == "succeeded" else None
+    # Delivery-required policy (B14): for DELIVERY_REQUIRED_TARGETS a "succeeded"
+    # execution whose result is not browser-deliverable is TERMINAL FAILED with a
+    # delivery_unavailable error code — a node-local path is never success. Pure
+    # question first; the writes below stay outside the condition.
+    local_error = _delivery_error(job, normalized, result_ref)
+    if local_error is not None:
+        normalized, result_ref = "failed", None
     completed_at = deps.clock.now() if normalized in TERMINAL_STATUSES else None
     deps.reel_jobs.update_from_execution(ctx, execution_id, normalized, result_ref, completed_at)
-    return jsonify(_poll_response_body(cp_body, normalized, job)), status
+    return jsonify(
+        _poll_response_body(cp_body, normalized, job, local_error=local_error)
+    ), status
 
 
 def _not_found() -> tuple[Response, int]:

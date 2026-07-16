@@ -17,3 +17,25 @@ _TESTS = Path(__file__).resolve().parent
 for _p in (str(_SRC), str(_TESTS)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+
+def pytest_addoption(parser) -> None:
+    """--regenerate-golden: rewrite generated snapshot fixtures from live output.
+
+    Makes "regenerated, not hand-edited" a mechanical step rather than a
+    discipline (B17 / R5). Without this flag the golden fixtures are read-only
+    and any drift fails the parity test.
+    """
+
+    parser.addoption(
+        "--regenerate-golden",
+        action="store_true",
+        default=False,
+        help="Rewrite golden snapshot fixtures from a live invocation.",
+    )
+
+
+def pytest_configure(config) -> None:
+    config.addinivalue_line(
+        "markers", "regenerates_golden: writes a golden fixture under --regenerate-golden"
+    )

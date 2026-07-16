@@ -26,13 +26,15 @@ from reel_af.dsl.aligner import (
     snap_edge,
     word_boundaries,
 )
-from reel_af.dsl.ast import Extend, Hole, Insert, Join, Trans
+from reel_af.dsl.ast import Extend, Find, Hole, Insert, Join, Trans
 from reel_af.dsl.composite import CompositeDoc, CompositeSegment
 from reel_af.dsl.models import (
+    DSL_HOOKS_WORKFLOW,
     FADE_TO_COLOR_EFFECTS,
     JOIN_GAP_LIMIT_S,
     SNAP_TOLERANCE_S,
     BlackSegment,
+    CompileContext,
     CompileResult,
     Diagnostic,
     FootageReel,
@@ -46,6 +48,14 @@ from reel_af.dsl.models import (
 )
 from reel_af.dsl.relevant import load_candidate, search_relevant
 
+# Workflow-scoped unsupported verbs (B3/D3). Keyed by workflow — NEVER a global
+# set: [insert relevant] / [insert file] / [find relevant] are supported features
+# on the default workflow. The A1 DSL-hooks workflow sources footage from the one
+# A1 video, so corpus-sourced inserts and candidate search are out of contract.
+UNSUPPORTED_VERBS_BY_WORKFLOW: dict[str, frozenset[str]] = {
+    DSL_HOOKS_WORKFLOW: frozenset({"insert_corpus", "find"}),
+}
+
 
 def compile_composite(
     doc: CompositeDoc,
@@ -53,13 +63,18 @@ def compile_composite(
     source: SourceRef,
     *,
     relevant_dir: Path | None = None,
+    context: CompileContext | None = None,
 ) -> CompileResult:
     diagnostics: list[Diagnostic] = []
 
     if not doc.segments:
         return _error_result("EMPTY_COMPOSITE", "composite document has no segments", diagnostics)
 
-    unsupported = _check_unsupported(doc, diagnostics)
+    invalid = _check_invalid_markers(doc, diagnostics)
+    if invalid:
+        return _error_result_from(diagnostics)
+
+    unsupported = _check_unsupported(doc, diagnostics, context=context)
     if unsupported:
         return _error_result_from(diagnostics)
 
@@ -129,8 +144,83 @@ def _error_result_from(diagnostics: list[Diagnostic]) -> CompileResult:
     return CompileResult(status="error", plan=None, diagnostics=diagnostics)
 
 
-def _check_unsupported(doc: CompositeDoc, diagnostics: list[Diagnostic]) -> bool:
-    return False
+def _check_invalid_markers(doc: CompositeDoc, diagnostics: list[Diagnostic]) -> bool:
+    """Emit INVALID_MARKER for every marker read_composite could not parse.
+
+    Without this the malformed marker is silently dropped and the reel renders
+    without the directive — no diagnostic, no warning (the defect B2 closes).
+    Mirrors _check_unresolved's shape.
+    """
+
+    found = False
+    for invalid in doc.invalid_markers:
+        diagnostics.append(Diagnostic(
+            code="INVALID_MARKER",
+            message=f"invalid marker {invalid.text!r}: {invalid.message}",
+            severity="error",
+            source=invalid.source,
+        ))
+        found = True
+    return found
+
+
+def _unsupported_code_for(marker: Any, workflow: str) -> str | None:
+    """Pure lookup: the diagnostic code for a marker on a workflow, or None.
+
+    No side effects — the caller owns diagnostic emission (CodeCleanup: control
+    expressions stay pure questions).
+    """
+
+    if workflow not in UNSUPPORTED_VERBS_BY_WORKFLOW:
+        return None
+    unsupported = UNSUPPORTED_VERBS_BY_WORKFLOW[workflow]
+    if isinstance(marker, Find):
+        return "UNSUPPORTED_FIND" if "find" in unsupported else None
+    if isinstance(marker, Insert) and _is_corpus_insert(marker):
+        return "UNSUPPORTED_INSERT" if "insert_corpus" in unsupported else None
+    return None
+
+
+def _is_corpus_insert(marker: Insert) -> bool:
+    """True for [insert relevant ...] / [insert file ...] — corpus-sourced inserts.
+
+    [insert black N] is a pure black segment and stays supported everywhere.
+    """
+
+    return marker.kind == "insert" and getattr(marker, "target", None) != "black"
+
+
+def _check_unsupported(
+    doc: CompositeDoc,
+    diagnostics: list[Diagnostic],
+    *,
+    context: CompileContext | None = None,
+) -> bool:
+    """Workflow-scoped marker rejection.
+
+    ``context is None`` -> ``False``: byte-for-byte the default-workflow behavior.
+    UNSUPPORTED_INSERT / UNSUPPORTED_FIND are vestigial on the default workflow —
+    ``[insert relevant]``, ``[insert file]`` and ``[find relevant]`` are supported,
+    tested features (tests/dsl/test_compile_unsupported.py). Rejection is a
+    per-workflow policy, never a global set.
+    """
+
+    if context is None:
+        return False
+
+    found = False
+    for att in doc.markers:
+        code = _unsupported_code_for(att.marker, context.workflow)
+        if code is None:
+            continue
+        diagnostics.append(Diagnostic(
+            code=code,
+            message=f"marker unsupported on workflow {context.workflow}: {att.marker.kind}",
+            severity="error",
+            source=att.source,
+        ))
+        found = True
+    return found
 
 
 def _check_unresolved(doc: CompositeDoc, diagnostics: list[Diagnostic]) -> bool:

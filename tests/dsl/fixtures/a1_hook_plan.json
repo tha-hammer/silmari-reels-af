@@ -1,0 +1,38 @@
+{
+  "schema_version": "1",
+  "workflow": "dsl_hooks",
+  "source_url": "https://www.youtube.com/watch?v=abc123",
+  "source_id": "abc123",
+  "model": "deepseek/deepseek-v4-pro",
+  "duration_bounds_s": {"min": 10, "max": 180},
+  "clips": [
+    {
+      "idx": 1,
+      "title": "pattern-matching is not reasoning",
+      "idea": "models pattern-match at a scale that feels like reasoning, and trusting that feeling ships bugs",
+      "hook": "They don't reason. They pattern-match at a scale that feels like reasoning.",
+      "start_s": 4.12,
+      "end_s": 79.5,
+      "excerpt": "They don't reason. They pattern-match at a scale that feels like reasoning. And the moment you trust the feeling, you ship the bug. So the fix isn't a smarter model. It's a tighter loop.",
+      "composite_ref": "a1://runs/20260715T093000Z-abc123-7f3a9c/composite.ts.md#clip-1",
+      "target": "reel-af.reel_dsl_hooks_to_reels",
+      "idempotency_key": "a1:20260715T093000Z-abc123-7f3a9c:clip:1",
+      "cut_ins": [
+        {
+          "type": "zoom",
+          "at_s": 5.34,
+          "until_s": 7.0,
+          "line": "They pattern-match at a scale that feels like reasoning.",
+          "zoom_focus": "upper"
+        },
+        {
+          "type": "visual",
+          "at_s": 22.5,
+          "until_s": 25.0,
+          "line": "And the moment you trust the feeling, you ship the bug.",
+          "image_prompt": "single subject, cinematic editorial photograph, no text"
+        }
+      ]
+    }
+  ]
+}
