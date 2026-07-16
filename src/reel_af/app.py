@@ -1478,7 +1478,10 @@ async def _render_downstream(
 # ════════════════════════════════════════════════════════════════════
 
 
-app.include_router(reel)
+# NOTE: `app.include_router(reel)` is intentionally deferred to the BOTTOM of this
+# module (after every @reel.reasoner is defined). Mounting it here would snapshot
+# the router early and silently drop any reasoner defined below this point — which
+# is exactly how Slice A's dsl_hooks_to_reels went unregistered on the agent.
 
 
 # ─────────────────── A1 DSL-hooks target (Slice A, B16) ───────────────────
@@ -1765,6 +1768,11 @@ def _finish_config_for(image_provider: Any) -> ReelFinishConfig:
 
 def _health() -> dict:
     return {"status": "ok", "service": "reel-af", "version": "1.0.0"}
+
+
+# Mount the reel router AFTER every @reel.reasoner above (incl. dsl_hooks_to_reels)
+# so ALL reasoners propagate into the served app and the control-plane registration.
+app.include_router(reel)
 
 
 from typing import cast as _cast  # noqa: E402
