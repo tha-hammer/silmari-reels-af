@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "words": [],
+  "segments": [
+    { "text": "alpha alpha alpha phrase one", "start_s": 412.0, "end_s": 440.0 },
+    { "text": "bravo bravo bravo phrase two", "start_s": 432.0, "end_s": 458.0 },
+    { "text": "charlie charlie charlie phrase three", "start_s": 452.0, "end_s": 460.0 }
+  ]
+}

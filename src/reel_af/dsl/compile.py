@@ -93,6 +93,10 @@ def compile_composite(
 
     _apply_extends(doc, aligned, words, diagnostics)
 
+    # Tile segments contiguously in source time (end_s -> next start_s) so no source
+    # moment — and no spoken phrase — plays twice at a seam (AF-e1x).
+    _clamp_contiguous_spans(aligned)
+
     segments_and_markers = _build_segment_list(
         doc, aligned, source, diagnostics, words, relevant_dir,
     )
@@ -329,6 +333,22 @@ def _verify_injective_spans(
                 "monotonicity",
             )
     return False
+
+
+def _clamp_contiguous_spans(aligned: list[_AlignedSegment]) -> None:
+    """Tile source segments contiguously so no source moment plays twice.
+
+    The aligner gives each segment its full caption-cue span, whose ``end_s`` can
+    overrun the next segment's ``start_s``. Rendered, that replays the overlap —
+    audibly re-speaking the tail of every clip into the head of the next (AF-e1x).
+    Clamp each segment's ``end_s`` down to the next segment's ``start_s``; the last
+    segment keeps its cue end. Runs AFTER ``_apply_extends`` (which already clamps
+    extend growth to neighbor edges) so it only trims the base-cue overruns and never
+    inverts a span (guarded on ``next.start_s > cur.start_s``; starts are already
+    non-decreasing per ``_verify_injective_spans``)."""
+    for cur, nxt in zip(aligned, aligned[1:]):
+        if nxt.start_s > cur.start_s and cur.end_s > nxt.start_s:
+            cur.end_s = nxt.start_s
 
 
 def _apply_extends(
