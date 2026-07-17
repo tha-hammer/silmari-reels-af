@@ -1,0 +1,9 @@
+{
+  "schema_version": "1",
+  "words": [],
+  "segments": [
+    { "text": "intro clip one", "start_s": 400.0, "end_s": 406.0 },
+    { "text": "you know what I mean", "start_s": 412.0, "end_s": 415.0 },
+    { "text": "later bridge closing", "start_s": 448.0, "end_s": 451.0 }
+  ]
+}

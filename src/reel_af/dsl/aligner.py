@@ -195,6 +195,69 @@ def _is_better_fuzzy_span(
     return span[0] < best_span[0]
 
 
+# Half-window (seconds) around a segment's ``timecode_s`` within which a caption cue
+# is eligible to match it. Externalized tunable: it must be smaller than the minimum
+# gap between two cues carrying the *same* phrase, or injectivity degrades to the
+# proximity tie-break in ``_beats_fallback``. Validated against A1 caption-cue spacing.
+FALLBACK_TIMECODE_WINDOW_S = 12.0
+
+
+def _midpoint(start_s: float, end_s: float) -> float:
+    return (start_s + end_s) / 2
+
+
+def _time_distance(seg: FallbackSegment, timecode_s: float) -> float:
+    return abs(_midpoint(seg.start_s, seg.end_s) - timecode_s)
+
+
+def _candidate_indices(
+    segments: list[FallbackSegment], timecode_s: float | None
+) -> list[int]:
+    """Cue indices eligible for trigram matching.
+
+    With a timecode anchor, restrict to cues whose span lies within
+    ``FALLBACK_TIMECODE_WINDOW_S`` of ``timecode_s`` — a temporally distant identical
+    phrase can never win (a Sakoe-Chiba-band / ``min_window_size`` idea). If no cue
+    falls in the window, snap to the single nearest cue. Without an anchor, all cues
+    are eligible (unchanged global behavior)."""
+    if timecode_s is None:
+        return list(range(len(segments)))
+    window = [
+        i
+        for i, seg in enumerate(segments)
+        if seg.start_s - FALLBACK_TIMECODE_WINDOW_S
+        <= timecode_s
+        <= seg.end_s + FALLBACK_TIMECODE_WINDOW_S
+    ]
+    if window:
+        return window
+    if not segments:
+        return []
+    return [min(range(len(segments)), key=lambda i: _time_distance(segments[i], timecode_s))]
+
+
+def _beats_fallback(
+    q: float,
+    idx: int,
+    best_quality: float,
+    best_idx: int | None,
+    segments: list[FallbackSegment],
+    timecode_s: float | None,
+) -> bool:
+    """Does cue ``idx`` (trigram score ``q``) beat the incumbent best cue? Higher
+    score wins; on a tie the cue temporally nearer ``timecode_s`` wins. Without an
+    anchor a tie keeps the first-seen cue (legacy global-argmax behavior)."""
+    if best_idx is None:
+        return True
+    if q != best_quality:
+        return q > best_quality
+    if timecode_s is None:
+        return False
+    return _time_distance(segments[idx], timecode_s) < _time_distance(
+        segments[best_idx], timecode_s
+    )
+
+
 def _align_fallback(
     query_norm: list[str],
     raw_text: str,
@@ -205,14 +268,13 @@ def _align_fallback(
     best_quality = 0.0
     best_idx: int | None = None
 
-    for i, seg in enumerate(segments):
-        seg_norm = _normalize_words(seg.text)
+    for i in _candidate_indices(segments, timecode_s):
+        seg_norm = _normalize_words(segments[i].text)
         if not seg_norm:
             continue
         q = _trigram_cosine(query_norm, seg_norm)
-        if q > best_quality:
-            best_quality = q
-            best_idx = i
+        if _beats_fallback(q, i, best_quality, best_idx, segments, timecode_s):
+            best_quality, best_idx = q, i
 
     if best_quality >= MATCH_QUALITY_FLOOR and best_idx is not None:
         seg = segments[best_idx]
@@ -275,13 +337,13 @@ def _find_exact_cue_span(
 
     def _distance(span: tuple[int, int]) -> float:
         i0, i1 = span
-        midpoint = (segments[i0].start_s + segments[i1].end_s) / 2
-        return abs(midpoint - timecode_s)
+        return abs(_midpoint(segments[i0].start_s, segments[i1].end_s) - timecode_s)
 
     return min(matches, key=_distance)
 
 
 __all__ = [
+    "FALLBACK_TIMECODE_WINDOW_S",
     "align",
     "sentence_boundaries",
     "snap_edge",

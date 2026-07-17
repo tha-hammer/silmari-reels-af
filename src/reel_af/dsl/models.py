@@ -187,6 +187,7 @@ DiagnosticCode = Literal[
     "CUTIN_INVALID",
     "RELEVANT_NO_MATCH",
     "CANDIDATE_NOT_FOUND",
+    "SEGMENT_SPAN_COLLAPSE",
 ]
 
 

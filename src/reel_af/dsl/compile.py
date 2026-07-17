@@ -86,6 +86,11 @@ def compile_composite(
     if aligned is None:
         return _error_result_from(diagnostics)
 
+    # Verify raw aligner output BEFORE _apply_extends/_apply_joins — joins legitimately
+    # collapse spans, so checking after them would false-positive.
+    if _verify_injective_spans(aligned, diagnostics):
+        return _error_result_from(diagnostics)
+
     _apply_extends(doc, aligned, words, diagnostics)
 
     segments_and_markers = _build_segment_list(
@@ -284,6 +289,46 @@ def _align_segments(
             return None
         aligned.append(_AlignedSegment(seg, result.start_s, result.end_s, seg.normalized_text))
     return aligned
+
+
+def _verify_injective_spans(
+    aligned: list[_AlignedSegment], diagnostics: list[Diagnostic]
+) -> bool:
+    """Degenerate-plan guard: distinct composite segments must map to distinct,
+    non-decreasing source spans. A duplicate span means the aligner collapsed
+    several segments onto one cue (the ``bd ate`` defect); never render it. Returns
+    True (and emits a diagnostic) when the plan is degenerate.
+
+    Runs on RAW aligner output, BEFORE ``_apply_extends``/``_apply_joins``:
+    ``_apply_joins`` legitimately merges adjacent segments (intentional span
+    reduction), so checking injectivity downstream of it would false-positive.
+    """
+
+    def _collapse(message: str, kind: str) -> bool:
+        diagnostics.append(Diagnostic(
+            code="SEGMENT_SPAN_COLLAPSE",
+            message=message,
+            severity="error",
+            context={"kind": kind},
+        ))
+        return True
+
+    spans = [(a.start_s, a.end_s) for a in aligned]
+    if len(set(spans)) != len(spans):
+        idxs = [a.seg.index for a in aligned]
+        return _collapse(
+            f"{len(spans)} segments collapsed to {len(set(spans))} distinct source "
+            f"spans (segments {idxs}); alignment is non-injective",
+            "injectivity",
+        )
+    for prev, cur in zip(aligned, aligned[1:]):
+        if cur.start_s < prev.start_s:
+            return _collapse(
+                f"segment {cur.seg.index} aligns before segment {prev.seg.index} "
+                f"({cur.start_s} < {prev.start_s})",
+                "monotonicity",
+            )
+    return False
 
 
 def _apply_extends(
