@@ -15,6 +15,7 @@ import pytest
 
 from reel_af.render.hooks import (
     CRISP_YTDLP_FORMAT,
+    DOWNLOAD_MAX_ATTEMPTS,
     GENERIC_YTDLP_FORMAT,
     YTDLP_COOKIES_FILE_ENV,
     YTDLP_DOWNLOAD_TIMEOUT_S,
@@ -232,6 +233,53 @@ def test_timeout_removes_partial_and_raises_runtime_error(tmp_path, monkeypatch)
         download_crisp_source("https://vimeo.com/1", out, runner=runner)
     assert not out.exists()
     assert not part.exists()
+
+
+# ── Behavior 5b: transient datacenter-IP 403s are retried; hard failures are not ──
+
+
+def test_transient_403_is_retried_then_succeeds(tmp_path, monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setattr("reel_af.render.hooks.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def runner(cmd, **kwargs):
+        calls["n"] += 1
+        if calls["n"] < 3:  # flaky googlevideo 403 on the first two attempts
+            return _Proc(1, "ERROR: unable to download video data: HTTP Error 403: Forbidden")
+        return _Proc(0)
+
+    out = download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    assert out == tmp_path / "s.mp4"
+    assert calls["n"] == 3
+
+
+def test_persistent_403_exhausts_attempts_then_raises(tmp_path, monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setattr("reel_af.render.hooks.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def runner(cmd, **kwargs):
+        calls["n"] += 1
+        return _Proc(1, "ERROR: unable to download video data: HTTP Error 403: Forbidden")
+
+    with pytest.raises(RuntimeError, match="403"):
+        download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    assert calls["n"] == DOWNLOAD_MAX_ATTEMPTS
+
+
+def test_bot_check_failure_is_not_retried(tmp_path, monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setattr("reel_af.render.hooks.time.sleep", lambda _s: None)
+    calls = {"n": 0}
+
+    def runner(cmd, **kwargs):
+        calls["n"] += 1
+        return _Proc(1, "ERROR: Sign in to confirm you're not a bot. Use --cookies")
+
+    with pytest.raises(RuntimeError, match=YTDLP_COOKIES_FILE_ENV):
+        download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    assert calls["n"] == 1  # not transient → single attempt, no wasted retries
 
 
 # ── Behavior 6: App/API surface translates ingest errors to {"error": ...} ──

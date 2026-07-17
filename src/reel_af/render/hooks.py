@@ -8,6 +8,7 @@ import math
 import os
 import re
 import subprocess
+import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -36,6 +37,22 @@ YTDLP_DOWNLOAD_TIMEOUT_S = 600.0
 YTDLP_ERROR_TAIL_CHARS = 1200
 _BOT_MARKERS = ("sign in to confirm", "not a bot", "--cookies")
 _JS_RUNTIME_MARKERS = ("no supported javascript runtime", "--js-runtimes")
+# googlevideo intermittently 403s media fetches from datacenter IPs (~1 in 5); these
+# are transient and clear on a fresh attempt, unlike bot-check / js-runtime failures.
+DOWNLOAD_MAX_ATTEMPTS = 4
+DOWNLOAD_RETRY_BACKOFF_S = 2.0
+_TRANSIENT_DOWNLOAD_MARKERS = (
+    "http error 403",
+    "403: forbidden",
+    "unable to download video data",
+    "unable to download webpage",
+    "connection reset",
+    "connection aborted",
+    "read timed out",
+    "temporary failure",
+    "unable to connect",
+    "giving up after",
+)
 DEFAULT_HOOK_MAX_WORDS = 8
 DEFAULT_IMAGE_COUNT = 3
 DEFAULT_IMAGE_MOMENT_EDGE_S = 2.0
@@ -184,6 +201,18 @@ def _remove_partial_outputs(target: Path) -> None:
             pass
 
 
+def _is_transient_download_error(stderr: str) -> bool:
+    """A failure worth re-attempting: datacenter-IP 403s and transient network
+    errors clear on a fresh yt-dlp invocation. Bot-check and js-runtime failures
+    do NOT — retrying them just wastes the render budget (they need cookies/deno)."""
+    lower = stderr.lower()
+    if any(marker in lower for marker in _BOT_MARKERS):
+        return False
+    if any(marker in lower for marker in _JS_RUNTIME_MARKERS):
+        return False
+    return any(marker in lower for marker in _TRANSIENT_DOWNLOAD_MARKERS)
+
+
 def download_crisp_source(
     source_url: str,
     output_path: str | Path,
@@ -203,23 +232,36 @@ def download_crisp_source(
     target.parent.mkdir(parents=True, exist_ok=True)
     cookies_file = _resolve_cookies_file_from_env()
     cmd = build_crisp_ytdlp_command(source_url, target, cookies_file=cookies_file)
-    try:
-        proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
-    except subprocess.TimeoutExpired as exc:
-        _remove_partial_outputs(target)
-        timeout_label = "the configured timeout" if timeout_s is None else f"{timeout_s:g}s"
-        raise RuntimeError(f"yt-dlp crisp download timed out after {timeout_label}") from exc
 
-    if getattr(proc, "returncode", 0) != 0:
+    last_stderr = ""
+    last_returncode: Any = "unknown"
+    for attempt in range(1, DOWNLOAD_MAX_ATTEMPTS + 1):
+        try:
+            proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
+        except subprocess.TimeoutExpired as exc:
+            _remove_partial_outputs(target)
+            timeout_label = "the configured timeout" if timeout_s is None else f"{timeout_s:g}s"
+            raise RuntimeError(
+                f"yt-dlp crisp download timed out after {timeout_label}"
+            ) from exc
+
+        if getattr(proc, "returncode", 0) == 0:
+            return target
+
         _remove_partial_outputs(target)
-        stderr = str(getattr(proc, "stderr", ""))
-        tail = stderr[-YTDLP_ERROR_TAIL_CHARS:]
-        hint = _download_failure_hint(stderr)
-        raise RuntimeError(
-            "yt-dlp crisp download failed "
-            f"(exit {getattr(proc, 'returncode', 'unknown')}): {tail}{hint}"
-        )
-    return target
+        last_stderr = str(getattr(proc, "stderr", ""))
+        last_returncode = getattr(proc, "returncode", "unknown")
+        if attempt < DOWNLOAD_MAX_ATTEMPTS and _is_transient_download_error(last_stderr):
+            time.sleep(DOWNLOAD_RETRY_BACKOFF_S)  # let the transient 403/throttle clear
+            continue
+        break
+
+    tail = last_stderr[-YTDLP_ERROR_TAIL_CHARS:]
+    hint = _download_failure_hint(last_stderr)
+    raise RuntimeError(
+        f"yt-dlp crisp download failed after {attempt} attempt(s) "
+        f"(exit {last_returncode}): {tail}{hint}"
+    )
 
 
 async def generate_hook(
