@@ -272,7 +272,7 @@ def _align_segments(
 ) -> list[_AlignedSegment] | None:
     aligned: list[_AlignedSegment] = []
     for seg in doc.segments:
-        result = align(seg.normalized_text, words, source=seg.source)
+        result = align(seg.normalized_text, words, source=seg.source, timecode_s=seg.timecode_s)
         if isinstance(result, UnmatchedSpan):
             diagnostics.append(Diagnostic(
                 code="UNMATCHED_SEGMENT",

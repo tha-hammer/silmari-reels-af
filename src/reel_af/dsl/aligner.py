@@ -83,6 +83,7 @@ def align(
     words: WordsSidecar,
     *,
     source: object | None = None,
+    timecode_s: float | None = None,
 ) -> AlignedSpan | UnmatchedSpan:
     query_norm = _normalize_words(text)
     if not query_norm:
@@ -99,7 +100,7 @@ def align(
             return result
 
     if words.segments:
-        result = _align_fallback(query_norm, text, words.segments, source)
+        result = _align_fallback(query_norm, text, words.segments, source, timecode_s)
         if result is not None:
             return result
 
@@ -199,6 +200,7 @@ def _align_fallback(
     raw_text: str,
     segments: list[FallbackSegment],
     source: object | None,
+    timecode_s: float | None = None,
 ) -> AlignedSpan | UnmatchedSpan | None:
     best_quality = 0.0
     best_idx: int | None = None
@@ -222,12 +224,61 @@ def _align_fallback(
             method="cue_fallback",
         )
 
+    # Rescue: exact token-subsequence match across cues. Trigram cosine is empty for
+    # sub-3-char queries (no character trigrams), so degenerate fillers like "uh"/"um"
+    # score 0.0 against every cue even when the cue exists verbatim in the transcript.
+    # Disambiguated by the composite segment's own timecode when several cues match.
+    exact = _find_exact_cue_span(query_norm, segments, timecode_s)
+    if exact is not None:
+        i0, i1 = exact
+        return AlignedSpan(
+            start_s=segments[i0].start_s,
+            end_s=segments[i1].end_s,
+            quality=1.0,
+            fallback_segment_range=(i0, i1),
+            method="cue_exact",
+        )
+
     return UnmatchedSpan(
         normalized_text=" ".join(query_norm),
         best_quality=best_quality,
         reason="below_floor",
         source=source,
     )
+
+
+def _find_exact_cue_span(
+    query_norm: list[str],
+    segments: list[FallbackSegment],
+    timecode_s: float | None,
+) -> tuple[int, int] | None:
+    """Find a contiguous cue-index span whose concatenated tokens contain
+    ``query_norm`` as a contiguous subsequence. Returns the (first_cue, last_cue)
+    index range; when several occurrences exist, the one nearest ``timecode_s``
+    (else the earliest). This is the exact analogue of ``_find_exact_run`` for the
+    word path, so short/degenerate queries that yield no trigrams still align."""
+    flat: list[tuple[int, str]] = [
+        (i, tok) for i, seg in enumerate(segments) for tok in _normalize_words(seg.text)
+    ]
+    n = len(query_norm)
+    if n == 0 or n > len(flat):
+        return None
+
+    matches: list[tuple[int, int]] = []
+    for start in range(len(flat) - n + 1):
+        if all(flat[start + k][1] == query_norm[k] for k in range(n)):
+            matches.append((flat[start][0], flat[start + n - 1][0]))
+    if not matches:
+        return None
+    if timecode_s is None:
+        return matches[0]
+
+    def _distance(span: tuple[int, int]) -> float:
+        i0, i1 = span
+        midpoint = (segments[i0].start_s + segments[i1].end_s) / 2
+        return abs(midpoint - timecode_s)
+
+    return min(matches, key=_distance)
 
 
 __all__ = [

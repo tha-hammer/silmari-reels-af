@@ -154,7 +154,7 @@ class AlignedSpan(BaseModel):
     quality: float = Field(ge=0, le=1)
     word_range: tuple[int, int] | None = None
     fallback_segment_range: tuple[int, int] | None = None
-    method: Literal["exact", "fuzzy", "cue_fallback"]
+    method: Literal["exact", "fuzzy", "cue_fallback", "cue_exact"]
 
 
 class UnmatchedSpan(BaseModel):
