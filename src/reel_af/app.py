@@ -1514,16 +1514,31 @@ def _is_browser_deliverable_url(ref: Any) -> bool:
     return parsed.scheme in BROWSER_DELIVERABLE_SCHEMES and bool(parsed.netloc)
 
 
+def _shared_source_path(source_url: str, work_dir) -> Path:
+    """Render-dir-scoped cache path for a source download — one file per distinct
+    ``source_url`` so N segments of the same source download it once, not N times."""
+    import hashlib
+
+    digest = hashlib.sha1(source_url.encode("utf-8")).hexdigest()[:12]
+    return Path(work_dir) / f"_source-{digest}.mp4"
+
+
 def _default_segment_fetch(request):
-    """Production segment fetcher: acquire the source by the right strategy —
-    a direct media URL (Path A) is streamed with a plain GET; otherwise the crisp
-    yt-dlp path with env-driven cookies (Path B) and proxy (Path C).
+    """Production segment fetcher: download the shared source ONCE (per render dir),
+    then cut this segment's ``[start_s, end_s]`` span out of it.
 
-    Mirrors the `uploader` seam — a production default that tests replace.
+    Cutting the real span — rather than downloading the full source and mislabelling
+    it as the segment — is what makes each clip its own range instead of the source
+    intro (``source_start_s=start_s`` then trims ``[0, duration]`` of the cut). The
+    source is acquired by the right strategy (Path A direct GET / Path B cookies /
+    Path C proxy). Mirrors the `uploader` seam — a production default tests replace.
     """
-    from reel_af.render.hooks import download_source
+    from reel_af.render.hooks import cut_source_span, download_source
 
-    download_source(request.source_url, str(request.target_path))
+    full = _shared_source_path(request.source_url, request.target_path.parent)
+    if not full.exists():
+        download_source(request.source_url, str(full))
+    cut_source_span(str(full), request.start_s, request.end_s, str(request.target_path))
     return request.target_path
 
 

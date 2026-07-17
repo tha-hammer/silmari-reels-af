@@ -340,6 +340,51 @@ def download_source(source_url: str, output_path: str | Path, **kwargs: Any) -> 
     return download_crisp_source(source_url, output_path, **kwargs)
 
 
+def cut_source_span(
+    source_path: str | Path,
+    start_s: float,
+    end_s: float,
+    output_path: str | Path,
+    *,
+    timeout_s: float | None = YTDLP_DOWNLOAD_TIMEOUT_S,
+    runner: Any = subprocess.run,
+) -> Path:
+    """Cut the ``[start_s, end_s]`` span out of an already-downloaded source file.
+
+    Accurate input-seek + re-encode so the output's frame 0 is source time
+    ``start_s``. The caller labels the asset ``source_start_s=start_s``, so the stitch
+    trims ``[0, duration]`` of this cut = exactly the ``[start_s, end_s]`` span (and
+    the cut-in overlay reads ``source_end_s - source_start_s = duration`` correctly).
+    Cutting the real span — instead of downloading the full source and mislabelling
+    it — is what makes each segment its own range rather than the source intro."""
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise RuntimeError("cut_source_span requires ffmpeg on PATH")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    duration_s = max(0.0, end_s - start_s)
+    cmd = [
+        ffmpeg, "-y", "-loglevel", "error",
+        "-ss", f"{start_s:.3f}", "-i", str(source_path),
+        "-t", f"{duration_s:.3f}",
+        "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        str(target),
+    ]
+    try:
+        proc = runner(cmd, capture_output=True, text=True, timeout=timeout_s)
+    except subprocess.TimeoutExpired as exc:
+        _remove_partial_outputs(target)
+        raise RuntimeError(f"cut_source_span timed out after {timeout_s}s") from exc
+    if getattr(proc, "returncode", 0) != 0:
+        _remove_partial_outputs(target)
+        tail = str(getattr(proc, "stderr", ""))[-YTDLP_ERROR_TAIL_CHARS:]
+        raise RuntimeError(
+            f"cut_source_span ffmpeg failed (exit {getattr(proc, 'returncode', '?')}): {tail}"
+        )
+    return target
+
+
 async def generate_hook(
     transcript: str,
     provider: Any,
