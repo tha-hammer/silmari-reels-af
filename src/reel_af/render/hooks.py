@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import base64
 import inspect
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import time
+import urllib.request
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, NamedTuple
@@ -33,6 +36,18 @@ YOUTUBE_JS_RUNTIME = "deno"
 
 # Environment/filesystem resolution lives in the wrapper, not the builder.
 YTDLP_COOKIES_FILE_ENV = "YTDLP_COOKIES_FILE"
+# Base64 of a Netscape cookies.txt, materialized to a temp file at download time.
+# The secret-friendly alternative to YTDLP_COOKIES_FILE for volume-less containers
+# (Path B): store the export as a Railway secret, no on-disk/volume file to manage.
+YTDLP_COOKIES_B64_ENV = "YTDLP_COOKIES_B64"
+# Full proxy URL (e.g. http://user:pass@brd.superproxy.io:33335) routing the fetch
+# through a residential/ISP egress IP — the datacenter-IP 403/429 fix (Path C).
+YTDLP_PROXY_ENV = "YTDLP_PROXY_URL"
+_MATERIALIZED_COOKIES_PATH = "/tmp/reel-af-ytdlp-cookies.txt"
+# A source that is already a direct media file (e.g. a presigned bucket object A1
+# pre-downloaded on a residential machine) is fetched with a plain GET — no
+# extractor, no bot-check (Path A).
+_DIRECT_MEDIA_EXTENSIONS = (".mp4", ".mkv", ".webm", ".mov", ".m4v")
 YTDLP_DOWNLOAD_TIMEOUT_S = 600.0
 YTDLP_ERROR_TAIL_CHARS = 1200
 _BOT_MARKERS = ("sign in to confirm", "not a bot", "--cookies")
@@ -140,6 +155,7 @@ def build_crisp_ytdlp_command(
     format_selector: str | None = None,
     merge_output_format: str = YTDLP_MERGE_OUTPUT_FORMAT,
     cookies_file: str | Path | None = None,
+    proxy: str | None = None,
 ) -> list[str]:
     """Build the vertical-safe yt-dlp command used by the real-footage path."""
 
@@ -151,12 +167,14 @@ def build_crisp_ytdlp_command(
         else _FORMAT_BY_HOST.get(host_kind, GENERIC_YTDLP_FORMAT)
     )
     target = Path(output_path)
+    proxy_flags = ["--proxy", proxy] if proxy else []
     return [
         "yt-dlp",
         "-f",
         selected_format,
         "--merge-output-format",
         merge_output_format,
+        *proxy_flags,
         *_host_flags(host_kind, cookies_file),
         "-o",
         str(target),
@@ -164,17 +182,36 @@ def build_crisp_ytdlp_command(
     ]
 
 
-def _resolve_cookies_file_from_env() -> Path | None:
-    """Resolve ``YTDLP_COOKIES_FILE`` to an existing file, or raise if configured-but-missing."""
-    configured = (os.getenv(YTDLP_COOKIES_FILE_ENV) or "").strip()
-    if not configured:
-        return None
+def _resolve_proxy_from_env() -> str | None:
+    """The residential/ISP proxy URL to egress through, or ``None`` (direct)."""
+    proxy = (os.getenv(YTDLP_PROXY_ENV) or "").strip()
+    return proxy or None
 
-    cookies_path = Path(configured)
-    cookies_exists = cookies_path.is_file()
-    if not cookies_exists:
-        raise RuntimeError(f"{YTDLP_COOKIES_FILE_ENV} is set but not a file: {configured!r}")
-    return cookies_path
+
+def _resolve_cookies_file_from_env() -> Path | None:
+    """Resolve cookies for yt-dlp, or ``None`` (no cookies).
+
+    ``YTDLP_COOKIES_FILE`` (a path) takes precedence and raises if set-but-missing.
+    Otherwise ``YTDLP_COOKIES_B64`` (base64 of a Netscape cookies.txt) is decoded and
+    materialized to a temp file (Path B) — the secret-friendly source for volume-less
+    containers, where the export lives in a Railway secret, not on disk."""
+    configured = (os.getenv(YTDLP_COOKIES_FILE_ENV) or "").strip()
+    if configured:
+        cookies_path = Path(configured)
+        if not cookies_path.is_file():
+            raise RuntimeError(f"{YTDLP_COOKIES_FILE_ENV} is set but not a file: {configured!r}")
+        return cookies_path
+
+    encoded = (os.getenv(YTDLP_COOKIES_B64_ENV) or "").strip()
+    if not encoded:
+        return None
+    try:
+        decoded = base64.b64decode(encoded, validate=True)
+    except ValueError as exc:  # binascii.Error subclasses ValueError
+        raise RuntimeError(f"{YTDLP_COOKIES_B64_ENV} is not valid base64") from exc
+    materialized = Path(_MATERIALIZED_COOKIES_PATH)
+    materialized.write_bytes(decoded)
+    return materialized
 
 
 def _download_failure_hint(stderr: str) -> str:
@@ -231,7 +268,8 @@ def download_crisp_source(
     target = Path(output_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     cookies_file = _resolve_cookies_file_from_env()
-    cmd = build_crisp_ytdlp_command(source_url, target, cookies_file=cookies_file)
+    proxy = _resolve_proxy_from_env()
+    cmd = build_crisp_ytdlp_command(source_url, target, cookies_file=cookies_file, proxy=proxy)
 
     last_stderr = ""
     last_returncode: Any = "unknown"
@@ -262,6 +300,44 @@ def download_crisp_source(
         f"yt-dlp crisp download failed after {attempt} attempt(s) "
         f"(exit {last_returncode}): {tail}{hint}"
     )
+
+
+def _is_direct_media_url(source_url: str) -> bool:
+    """True when the source is already a direct media file (generic host + media
+    extension) — a pre-fetched clip to GET, not a page to run an extractor on."""
+    normalized = _normalize_source_url(source_url)
+    path = urlparse(normalized).path.lower()
+    return _classify_host(normalized) == "generic" and path.endswith(_DIRECT_MEDIA_EXTENSIONS)
+
+
+def download_direct_source(
+    source_url: str,
+    output_path: str | Path,
+    *,
+    timeout_s: float | None = YTDLP_DOWNLOAD_TIMEOUT_S,
+    opener: Any = urllib.request.urlopen,
+) -> Path:
+    """Stream a direct media URL to disk (Path A). No yt-dlp / extractor / cookies /
+    bot-check — the bytes were already fetched residentially and uploaded."""
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    normalized = _normalize_source_url(source_url)
+    try:
+        with opener(normalized, timeout=timeout_s) as response, open(target, "wb") as handle:
+            shutil.copyfileobj(response, handle)
+    except Exception as exc:  # noqa: BLE001 - any network/HTTP error is a bounded failure
+        _remove_partial_outputs(target)
+        raise RuntimeError(f"direct source download failed: {exc}") from exc
+    return target
+
+
+def download_source(source_url: str, output_path: str | Path, **kwargs: Any) -> Path:
+    """Acquire the source video by the right strategy: a direct media URL (Path A)
+    is streamed with a plain GET; anything else goes through the crisp yt-dlp path
+    (with its env-driven cookies (Path B) and proxy (Path C))."""
+    if _is_direct_media_url(source_url):
+        return download_direct_source(source_url, output_path)
+    return download_crisp_source(source_url, output_path, **kwargs)
 
 
 async def generate_hook(
@@ -715,6 +791,8 @@ __all__ = [
     "ImageMoment",
     "build_crisp_ytdlp_command",
     "download_crisp_source",
+    "download_direct_source",
+    "download_source",
     "generate_hook",
     "pick_image_moments",
 ]

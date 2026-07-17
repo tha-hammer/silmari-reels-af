@@ -17,12 +17,18 @@ from reel_af.render.hooks import (
     CRISP_YTDLP_FORMAT,
     DOWNLOAD_MAX_ATTEMPTS,
     GENERIC_YTDLP_FORMAT,
+    YTDLP_COOKIES_B64_ENV,
     YTDLP_COOKIES_FILE_ENV,
     YTDLP_DOWNLOAD_TIMEOUT_S,
+    YTDLP_PROXY_ENV,
     _classify_host,
+    _is_direct_media_url,
     _normalize_source_url,
+    _resolve_cookies_file_from_env,
     build_crisp_ytdlp_command,
     download_crisp_source,
+    download_direct_source,
+    download_source,
 )
 
 # ── Behavior 1: URL normalization and host classification ──────────────────
@@ -280,6 +286,142 @@ def test_bot_check_failure_is_not_retried(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match=YTDLP_COOKIES_FILE_ENV):
         download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
     assert calls["n"] == 1  # not transient → single attempt, no wasted retries
+
+
+# ── Path C: BrightData/residential proxy via YTDLP_PROXY_URL ──────────────────
+
+
+def test_proxy_flag_added_when_env_set(tmp_path, monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setenv(YTDLP_PROXY_ENV, "http://u:p@brd.superproxy.io:33335")
+    captured = {}
+
+    def runner(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    cmd = captured["cmd"]
+    assert "--proxy" in cmd
+    assert cmd[cmd.index("--proxy") + 1] == "http://u:p@brd.superproxy.io:33335"
+
+
+def test_no_proxy_flag_when_env_unset(tmp_path, monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.delenv(YTDLP_PROXY_ENV, raising=False)
+    captured = {}
+
+    def runner(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    assert "--proxy" not in captured["cmd"]
+
+
+# ── Path B: cookies materialized from a base64 secret (YTDLP_COOKIES_B64) ──────
+
+
+def test_cookies_materialized_from_b64_secret(tmp_path, monkeypatch):
+    import base64
+
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    raw = b"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tsecret\n"
+    monkeypatch.setenv(YTDLP_COOKIES_B64_ENV, base64.b64encode(raw).decode())
+
+    path = _resolve_cookies_file_from_env()
+    assert path is not None
+    assert path.read_bytes() == raw  # decoded verbatim
+
+
+def test_cookies_file_env_takes_precedence_over_b64(tmp_path, monkeypatch):
+    import base64
+
+    real = tmp_path / "cookies.txt"
+    real.write_text("from-file")
+    monkeypatch.setenv(YTDLP_COOKIES_FILE_ENV, str(real))
+    monkeypatch.setenv(YTDLP_COOKIES_B64_ENV, base64.b64encode(b"from-b64").decode())
+
+    assert _resolve_cookies_file_from_env() == real
+
+
+def test_invalid_b64_cookies_raises(monkeypatch):
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setenv(YTDLP_COOKIES_B64_ENV, "!!!not base64!!!")
+    with pytest.raises(RuntimeError, match=YTDLP_COOKIES_B64_ENV):
+        _resolve_cookies_file_from_env()
+
+
+def test_b64_cookies_reach_the_command(tmp_path, monkeypatch):
+    import base64
+
+    monkeypatch.delenv(YTDLP_COOKIES_FILE_ENV, raising=False)
+    monkeypatch.setenv(YTDLP_COOKIES_B64_ENV, base64.b64encode(b"cookie").decode())
+    captured = {}
+
+    def runner(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    download_crisp_source("https://youtu.be/x", tmp_path / "s.mp4", runner=runner)
+    assert "--cookies" in captured["cmd"]
+
+
+# ── Path A: a pre-fetched direct media URL is streamed, not run through yt-dlp ──
+
+
+@pytest.mark.parametrize(
+    "url,direct",
+    [
+        ("https://bucket.example/a1/clip.mp4?sig=xyz", True),
+        ("https://cdn.example.com/source.mov", True),
+        ("https://cdn.example.com/source.webm", True),
+        ("https://www.youtube.com/watch?v=abc", False),
+        ("https://youtu.be/abc", False),
+        ("https://vimeo.com/123", False),
+        ("https://cdn.example.com/page", False),  # generic host, but not a media file
+    ],
+)
+def test_is_direct_media_url(url, direct):
+    assert _is_direct_media_url(url) is direct
+
+
+def test_download_direct_source_streams_bytes(tmp_path):
+    import io
+
+    def opener(url, timeout=None):
+        return io.BytesIO(b"VIDEO-BYTES")
+
+    out = download_direct_source("https://bucket.example/clip.mp4", tmp_path / "s.mp4", opener=opener)
+    assert out.read_bytes() == b"VIDEO-BYTES"
+
+
+def test_download_source_routes_direct_url_to_http(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "reel_af.render.hooks.download_direct_source",
+        lambda u, o, **k: calls.append(("direct", u)) or o,
+    )
+    monkeypatch.setattr(
+        "reel_af.render.hooks.download_crisp_source",
+        lambda u, o, **k: calls.append(("crisp", u)) or o,
+    )
+    download_source("https://bucket.example/clip.mp4?sig=x", tmp_path / "s.mp4")
+    assert calls == [("direct", "https://bucket.example/clip.mp4?sig=x")]
+
+
+def test_download_source_routes_youtube_to_ytdlp(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "reel_af.render.hooks.download_direct_source",
+        lambda u, o, **k: calls.append(("direct", u)) or o,
+    )
+    monkeypatch.setattr(
+        "reel_af.render.hooks.download_crisp_source",
+        lambda u, o, **k: calls.append(("crisp", u)) or o,
+    )
+    download_source("https://youtu.be/abc", tmp_path / "s.mp4")
+    assert calls == [("crisp", "https://youtu.be/abc")]
 
 
 # ── Behavior 6: App/API surface translates ingest errors to {"error": ...} ──

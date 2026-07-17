@@ -1515,13 +1515,15 @@ def _is_browser_deliverable_url(ref: Any) -> bool:
 
 
 def _default_segment_fetch(request):
-    """Production segment fetcher: pull the source span with the crisp downloader.
+    """Production segment fetcher: acquire the source by the right strategy —
+    a direct media URL (Path A) is streamed with a plain GET; otherwise the crisp
+    yt-dlp path with env-driven cookies (Path B) and proxy (Path C).
 
     Mirrors the `uploader` seam — a production default that tests replace.
     """
-    from reel_af.render.hooks import download_crisp_source
+    from reel_af.render.hooks import download_source
 
-    download_crisp_source(request.source_url, str(request.target_path))
+    download_source(request.source_url, str(request.target_path))
     return request.target_path
 
 
