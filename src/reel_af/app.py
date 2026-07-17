@@ -1519,7 +1519,7 @@ def _default_segment_fetch(request):
 
     Mirrors the `uploader` seam — a production default that tests replace.
     """
-    from reel_af.render.video import download_crisp_source
+    from reel_af.render.hooks import download_crisp_source
 
     download_crisp_source(request.source_url, str(request.target_path))
     return request.target_path
