@@ -382,7 +382,25 @@ def _source_video_fragment(
 
 
 def _ffmpeg_cmd(graph: FootageFilterGraph, final_path: Path) -> list[str]:
-    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    # Bound peak memory on a multi-input filtergraph. On a many-core box ffmpeg
+    # auto-threads (~1.5x cores) and every thread carries its own decoded-frame /
+    # buffer pools; on a 9-input stitch that spike OOM-killed the agent (exit -9).
+    # Single-threading kills the per-thread pools (the biggest knob), and a short
+    # x264 lookahead with no B-frames / single ref removes the largest encoder
+    # buffers. Filter-graph semantics are unchanged. (Durable fix = pairwise fold
+    # with intermediate files; this bounds the current single-graph path.)
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-filter_complex_threads",
+        "1",
+    ]
     for input_path in graph.input_paths:
         cmd += ["-i", str(input_path)]
     cmd += [
@@ -396,6 +414,8 @@ def _ffmpeg_cmd(graph: FootageFilterGraph, final_path: Path) -> list[str]:
         "libx264",
         "-preset",
         "veryfast",
+        "-x264-params",
+        "rc-lookahead=5:bframes=0:ref=1",
         "-pix_fmt",
         "yuv420p",
         "-r",

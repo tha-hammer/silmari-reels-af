@@ -12,9 +12,33 @@ from reel_af.dsl.models import (
     Transition,
 )
 from reel_af.render.footage_stitch import (
+    FootageFilterGraph,
     SegmentAssetValidationError,
+    _ffmpeg_cmd,
     build_footage_filtergraph,
 )
+
+
+def test_ffmpeg_cmd_is_memory_bounded():
+    """The stitch command single-threads and trims x264 buffers so a multi-input
+    filtergraph can't OOM-kill the agent (regression for the 9-input exit -9)."""
+    graph = FootageFilterGraph(
+        input_paths=(Path("/tmp/a.mp4"), Path("/tmp/b.mp4")),
+        filter_complex="[0:v]null[v0];[1:v]null[v1];[v0][v1]concat=n=2:v=1:a=0[v]",
+        video_label="[v]",
+        audio_label="[a]",
+        duration_s=3.0,
+    )
+    cmd = _ffmpeg_cmd(graph, Path("/tmp/out.mp4"))
+    # single-threading kills the per-thread buffer pools (dominant on a many-core box)
+    assert cmd[cmd.index("-threads") + 1] == "1"
+    assert cmd[cmd.index("-filter_threads") + 1] == "1"
+    assert cmd[cmd.index("-filter_complex_threads") + 1] == "1"
+    # short lookahead / no B-frames / single ref removes the largest encoder buffers
+    assert "rc-lookahead=5:bframes=0:ref=1" in cmd
+    # still a real stitch: both inputs and the graph are present
+    assert cmd.count("-i") == 2
+    assert graph.filter_complex in cmd
 
 
 def _asset(segment_id: str, path: Path, start_s: float, end_s: float) -> DownloadedSegment:
