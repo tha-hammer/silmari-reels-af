@@ -73,13 +73,49 @@ class FFmpegProcessError(FootageStitchError):
 
 @dataclass(frozen=True)
 class FootageFilterGraph:
-    """Pure ffmpeg graph plus ordered media inputs."""
+    """Pure ffmpeg graph plus ordered media inputs (legacy single-graph path;
+    retained as the reference math + for graph tests). Execution uses the pairwise
+    plan below, which bounds peak memory to ~2 inputs regardless of clip count."""
 
     input_paths: tuple[Path, ...]
     filter_complex: str
     video_label: str
     audio_label: str
     duration_s: float
+
+
+@dataclass(frozen=True)
+class _NormStep:
+    """Normalize one segment (source fragment or synthetic black) to a standalone,
+    canvas-uniform mp4 — a single-input pass so memory stays bounded."""
+
+    idx: int
+    kind: str  # "source" | "black"
+    input_path: Path | None
+    trim_start_s: float
+    trim_end_s: float
+    duration_s: float
+    pre_normalized: bool
+
+
+@dataclass(frozen=True)
+class _FoldStep:
+    """Fold the accumulated reel with the next normalized segment via a 2-input
+    transition (xfade / fade-to-color / concat) into a fresh intermediate mp4."""
+
+    next_idx: int
+    effect: str
+    transition_duration_s: float
+    current_duration_s: float  # accumulated duration of the reel BEFORE this fold
+    audio_fade: bool
+    result_duration_s: float
+
+
+@dataclass(frozen=True)
+class _PairwisePlan:
+    norm_steps: tuple[_NormStep, ...]
+    fold_steps: tuple[_FoldStep, ...]
+    total_duration_s: float
 
 
 SegmentFetchFn = Callable[[SegmentFetchRequest], DownloadedSegment | Path | str]
@@ -327,28 +363,294 @@ async def stitch_footage_reel(
     *,
     timeout_s: float = FFMPEG_TIMEOUT_S,
 ) -> Path:
-    """Render ``reel`` to an mp4 using ffmpeg."""
+    """Render ``reel`` to an mp4 by normalizing each segment then folding transitions
+    pairwise through intermediate files. Every ffmpeg pass opens ≤2 inputs, so peak
+    memory is bounded regardless of clip count (the single-graph path OOM-killed the
+    agent once the reel grew past ~16 segments)."""
 
     if shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None:
         raise RuntimeError("footage stitch requires ffmpeg and ffprobe on PATH")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    graph = build_footage_filtergraph(reel, segment_assets)
-    final_path = out_dir / f"{_safe_run_id(run_id)}.mp4"
-    cmd = _ffmpeg_cmd(graph, final_path)
+    plan = plan_pairwise_stitch(reel, segment_assets)
+    safe_run_id = _safe_run_id(run_id)
+    work_dir = out_dir / f"{safe_run_id}-stitch"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    final_path = out_dir / f"{safe_run_id}.mp4"
 
     try:
-        await _run_ffmpeg(cmd, timeout_s=timeout_s)
+        norm_paths: list[Path] = []
+        for step in plan.norm_steps:
+            norm_path = work_dir / f"norm-{step.idx:03d}.mp4"
+            await _run_ffmpeg(_normalize_cmd(step, norm_path), timeout_s=timeout_s)
+            norm_paths.append(norm_path)
+
+        current = norm_paths[0]
+        last = len(plan.fold_steps)
+        for position, fold in enumerate(plan.fold_steps, start=1):
+            clamp = plan.total_duration_s if position == last else None
+            fold_path = work_dir / f"fold-{position:03d}.mp4"
+            cmd = _fold_cmd(current, norm_paths[fold.next_idx], fold, fold_path, duration_clamp=clamp)
+            await _run_ffmpeg(cmd, timeout_s=timeout_s)
+            current = fold_path
+
+        shutil.move(str(current), str(final_path))
     except BaseException as exc:
-        (out_dir / f"{_safe_run_id(run_id)}.filtergraph.txt").write_text(graph.filter_complex)
         stderr = getattr(exc, "stderr", "")
         if stderr:
-            (out_dir / f"{_safe_run_id(run_id)}.stderr.txt").write_text(stderr)
+            (out_dir / f"{safe_run_id}.stderr.txt").write_text(stderr)
         final_path.unlink(missing_ok=True)
         raise
 
     return final_path
+
+
+def plan_pairwise_stitch(reel: FootageReel, segment_assets: SegmentAssetMap) -> _PairwisePlan:
+    """Pure planner: validate the reel and derive the per-segment normalization steps
+    and per-transition fold steps (durations, offsets, effects) — no I/O or subprocess.
+    Mirrors ``build_footage_filtergraph``'s validation + duration math."""
+
+    validate_renderable(reel)
+    validate_segment_assets(reel, segment_assets)
+    segments = list(_segments(reel))
+    if not segments:
+        raise SegmentAssetValidationError("reel has no segments")
+
+    transitions = list(_transitions(reel))
+    expected_transition_count = max(0, len(segments) - 1)
+    if len(transitions) != expected_transition_count:
+        raise SegmentAssetValidationError(
+            "transition count mismatch: "
+            f"expected {expected_transition_count}, got {len(transitions)}"
+        )
+
+    norm_steps: list[_NormStep] = []
+    durations: list[float] = []
+    for idx, segment in enumerate(segments):
+        duration_s = _segment_duration(segment)
+        durations.append(duration_s)
+        if _kind(segment) == "black":
+            norm_steps.append(
+                _NormStep(idx, "black", None, 0.0, duration_s, duration_s, False)
+            )
+            continue
+        asset = segment_assets[_segment_id(segment)]
+        trim_start_s = max(
+            0.0, _float_attr(segment, "start_s") - _float_attr(asset, "source_start_s", 0.0)
+        )
+        norm_steps.append(
+            _NormStep(
+                idx,
+                "source",
+                Path(_attr(asset, "path")),
+                trim_start_s,
+                trim_start_s + duration_s,
+                duration_s,
+                bool(_attr(asset, "pre_normalized", False)),
+            )
+        )
+
+    fold_steps: list[_FoldStep] = []
+    current_duration_s = durations[0]
+    for idx, transition in enumerate(transitions, start=1):
+        _validate_transition_indexes(transition, idx - 1, idx)
+        next_duration_s = durations[idx]
+        effect = _transition_effect(transition)
+        transition_duration_s = _transition_duration(transition, effect)
+        audio_fade = bool(_attr(transition, "audio_fade", True))
+
+        if effect == "none" or transition_duration_s == 0:
+            result_duration_s = current_duration_s + next_duration_s
+        elif effect in FADE_TO_COLOR_EFFECTS:
+            _validate_fade_to_color_duration(
+                transition_duration_s, current_duration_s, next_duration_s, idx
+            )
+            result_duration_s = current_duration_s + next_duration_s
+        elif effect in XFADE_EFFECTS:
+            _validate_xfade_duration(
+                transition_duration_s, current_duration_s, next_duration_s, idx
+            )
+            result_duration_s = current_duration_s + next_duration_s - transition_duration_s
+        else:
+            raise SegmentAssetValidationError(f"unsupported xfade effect: {effect}")
+
+        fold_steps.append(
+            _FoldStep(
+                idx,
+                effect,
+                transition_duration_s,
+                current_duration_s,
+                audio_fade,
+                result_duration_s,
+            )
+        )
+        current_duration_s = result_duration_s
+
+    expected_duration = _optional_float_attr(reel, "duration_s")
+    if (
+        expected_duration is not None
+        and abs(expected_duration - current_duration_s) > FFPROBE_DURATION_EPSILON_S
+    ):
+        raise SegmentAssetValidationError(
+            "reel duration does not match derived stitch duration: "
+            f"reel={expected_duration:.3f}s derived={current_duration_s:.3f}s"
+        )
+
+    return _PairwisePlan(tuple(norm_steps), tuple(fold_steps), current_duration_s)
+
+
+def _normalize_cmd(step: _NormStep, out_path: Path) -> list[str]:
+    """One-input (or synthetic) pass that renders a segment to a canvas-uniform mp4."""
+    if step.kind == "black":
+        filtergraph = (
+            f"color=c=black:s={CANVAS_WIDTH}x{CANVAS_HEIGHT}:r={FPS}:"
+            f"d={step.duration_s:.3f},format=yuv420p[v];"
+            f"anullsrc=channel_layout=stereo:sample_rate={AUDIO_SAMPLE_RATE}:"
+            f"d={step.duration_s:.3f},asetpts=PTS-STARTPTS[a]"
+        )
+        cmd = _base_ffmpeg(threads=2) + ["-filter_complex", filtergraph]
+    else:
+        video = _source_video_fragment(
+            0, 0, step.trim_start_s, step.trim_end_s, pre_normalized=step.pre_normalized
+        )
+        audio = _source_audio_fragment(0, 0, step.trim_start_s, step.trim_end_s)
+        cmd = _base_ffmpeg(threads=2) + [
+            "-i",
+            str(step.input_path),
+            "-filter_complex",
+            f"{video};{audio}",
+        ]
+    cmd += [
+        "-map",
+        "[v]" if step.kind == "black" else "[v0]",
+        "-map",
+        "[a]" if step.kind == "black" else "[a0]",
+        *_video_encode_opts(),
+        "-t",
+        f"{step.duration_s:.3f}",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    return cmd
+
+
+def _fold_filter(fold: _FoldStep) -> str:
+    """The 2-input transition filtergraph (input 0 = accumulated reel, 1 = next)."""
+    duration = fold.transition_duration_s
+    if fold.effect == "none" or duration == 0:
+        return "[0:v][1:v]concat=n=2:v=1:a=0[v];[0:a][1:a]concat=n=2:v=0:a=1[a]"
+
+    if fold.effect in FADE_TO_COLOR_EFFECTS:
+        color = "white" if fold.effect == "fadewhite" else "black"
+        fade_start_s = max(0.0, fold.current_duration_s - duration)
+        parts = [
+            f"[0:v]fade=t=out:st={fade_start_s:.3f}:d={duration:.3f}:color={color}[lv]",
+            f"[1:v]fade=t=in:st=0:d={duration:.3f}:color={color}[rv]",
+            "[lv][rv]concat=n=2:v=1:a=0[v]",
+        ]
+        if fold.audio_fade:
+            parts += [
+                f"[0:a]afade=t=out:st={fade_start_s:.3f}:d={duration:.3f}[la]",
+                f"[1:a]afade=t=in:st=0:d={duration:.3f}[ra]",
+                "[la][ra]concat=n=2:v=0:a=1[a]",
+            ]
+        else:
+            parts.append("[0:a][1:a]concat=n=2:v=0:a=1[a]")
+        return ";".join(parts)
+
+    # xfade
+    offset_s = fold.current_duration_s - duration
+    parts = [
+        "[0:v]settb=AVTB[lv]",
+        "[1:v]settb=AVTB[rv]",
+        f"[lv][rv]xfade=transition={fold.effect}:duration={duration:.3f}:offset={offset_s:.3f}[v]",
+    ]
+    if fold.audio_fade:
+        parts.append(f"[0:a][1:a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]")
+    else:
+        parts += [
+            f"[0:a]atrim=duration={offset_s:.3f},asetpts=PTS-STARTPTS[cuta]",
+            "[cuta][1:a]concat=n=2:v=0:a=1[a]",
+        ]
+    return ";".join(parts)
+
+
+def _fold_cmd(
+    current_path: Path,
+    next_path: Path,
+    fold: _FoldStep,
+    out_path: Path,
+    *,
+    duration_clamp: float | None,
+) -> list[str]:
+    cmd = _base_ffmpeg(threads=2) + [
+        "-i",
+        str(current_path),
+        "-i",
+        str(next_path),
+        "-filter_complex",
+        _fold_filter(fold),
+        "-map",
+        "[v]",
+        "-map",
+        "[a]",
+        *_video_encode_opts(),
+    ]
+    if duration_clamp is not None:
+        cmd += ["-t", f"{duration_clamp:.3f}"]
+    cmd += ["-movflags", "+faststart", str(out_path)]
+    return cmd
+
+
+def _source_audio_fragment(input_idx: int, idx: int, trim_start_s: float, trim_end_s: float) -> str:
+    """Per-source-segment audio filter fragment (trim + resample to canvas audio)."""
+    return (
+        f"[{input_idx}:a]atrim=start={trim_start_s:.3f}:end={trim_end_s:.3f},"
+        "asetpts=PTS-STARTPTS,"
+        f"aresample={AUDIO_SAMPLE_RATE},"
+        f"aformat=sample_rates={AUDIO_SAMPLE_RATE}:channel_layouts=stereo[a{idx}]"
+    )
+
+
+def _base_ffmpeg(threads: int) -> list[str]:
+    """ffmpeg prefix that bounds per-thread buffer pools. Pairwise passes have
+    ≤2 inputs, so a small fixed thread count stays memory-safe on a many-core box."""
+    return [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-threads",
+        str(threads),
+        "-filter_threads",
+        str(threads),
+        "-filter_complex_threads",
+        str(threads),
+    ]
+
+
+def _video_encode_opts() -> list[str]:
+    """Shared encoder options: trimmed x264 buffers + canvas audio."""
+    return [
+        "-c:v",
+        "libx264",
+        "-preset",
+        "veryfast",
+        "-x264-params",
+        "rc-lookahead=5:bframes=0:ref=1",
+        "-pix_fmt",
+        "yuv420p",
+        "-r",
+        str(FPS),
+        "-c:a",
+        "aac",
+        "-b:a",
+        "192k",
+        "-ar",
+        str(AUDIO_SAMPLE_RATE),
+    ]
 
 
 def _source_video_fragment(
