@@ -1660,6 +1660,8 @@ async def dsl_hooks_to_reels(
         doc = read_composite_file(composite_path)
         words = load_words(words_path)
         clip = _load_hook_clip(str(hook_path), clip_idx)
+        if not clip.get("composite_ref"):
+            raise KeyError("hook clip missing composite_ref")
     except (OSError, ValueError, KeyError, FileNotFoundError) as exc:
         return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
 
@@ -1747,6 +1749,53 @@ async def dsl_hooks_to_reels(
         "duration_s": result.plan.duration_s,
         "source": "dsl_hooks",
     }
+
+
+@reel.reasoner()
+async def transcript_to_plan(
+    source_url: str,
+    register: str = "educational",
+    target_duration_bounds_s: dict[str, float] | None = None,
+    out_dir: str | None = None,
+    *,
+    llm=None,
+    transcribe=None,
+    artifact_writer=None,
+) -> dict:
+    """Source transcript → A1 DSL-hook artifact triple.
+
+    This producer delivers data only. The returned refs are intended for
+    ``reel-af.reel_dsl_hooks_to_reels``.
+    """
+
+    if not _is_browser_deliverable_url(source_url):
+        return {"error": DSL_HOOKS_ERROR_INVALID_SOURCE_URL, "source_url": source_url}
+
+    try:
+        from reel_af.planner.ingest import transcribe as _transcribe
+        from reel_af.planner.pipeline import plan as _plan
+
+        run_id = uuid.uuid4().hex[:12]
+        work = Path(out_dir) if out_dir else Path(f"/tmp/reel-af/transcript-to-plan/{run_id}")
+        transcriber = transcribe or _transcribe
+        words = transcriber(source_url)
+        if inspect.isawaitable(words):
+            words = await words
+
+        result = await _plan(
+            source_url,
+            words=words,
+            register=register,
+            bounds=target_duration_bounds_s,
+            llm=llm,
+            out_dir=work,
+        )
+        if artifact_writer is not None and "error" not in result:
+            maybe_result = artifact_writer(result)
+            result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
+        return result
+    except Exception as exc:  # noqa: BLE001 — reasoners return errors, never raise
+        return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
 
 
 def _cut_ins_are_wellformed(raw_cut_ins: list) -> bool:

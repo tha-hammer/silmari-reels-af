@@ -1,0 +1,21 @@
+{
+  "model": "openrouter/deepseek/deepseek-v4-pro",
+  "default_register": "educational",
+  "max_repair_passes": 1,
+  "self_verify": false,
+  "remote_asr_chain": [],
+  "r1_hook_window_s": 3.5,
+  "r2_cadence_s": {
+    "entertainment": 3.0,
+    "educational": 5.0,
+    "b2b": 9.0
+  },
+  "r4_max_gap_s": 0.6,
+  "r8_min_token_overlap": 0.5,
+  "r11_bait_patterns": [
+    "\\bcomment\\s+[a-z0-9_#-]+\\b",
+    "\\btag\\s+\\d+\\b",
+    "\\blike\\s+if\\b",
+    "\\bcomment\\s+\\w+\\s+for\\b"
+  ]
+}
