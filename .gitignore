@@ -17,6 +17,10 @@ build/
 
 # Pipeline outputs (renders + intermediates)
 output/
+/resources/runs/*
+!/resources/runs/.gitkeep
+/resources/evals/*
+!/resources/evals/.gitkeep
 
 # Tooling caches
 .pytest_cache/

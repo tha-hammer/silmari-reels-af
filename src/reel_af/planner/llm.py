@@ -99,6 +99,25 @@ def _field(value: Any, name: str) -> Any:
     return getattr(value, name)
 
 
+def _optional_field(value: Any, name: str, default: Any = None) -> Any:
+    if isinstance(value, Mapping):
+        return value.get(name, default)
+    return getattr(value, name, default)
+
+
+def _require_rationale(value: Any, phase: str) -> None:
+    if not str(_optional_field(value, "rationale", "") or "").strip():
+        raise BamlPlannerContractError(f"{phase} rationale is required")
+
+
+def _require_candidate_rationales(candidates: list[Any]) -> None:
+    for index, candidate in enumerate(candidates, start=1):
+        if str(_optional_field(candidate, "rationale", "") or "").strip():
+            continue
+        candidate_id = _optional_field(candidate, "candidate_id", f"candidate[{index}]")
+        raise BamlPlannerContractError(f"MineCandidates rationale is required for {candidate_id}")
+
+
 def _enforce_text_limit(cfg: Any, transcript: str) -> None:
     limit = _cfg_value(cfg, "max_transcript_chars")
     if limit is not None and len(transcript) > int(limit):
@@ -216,6 +235,7 @@ class BamlPlannerLLM:
         )
         raw_candidates = list(result)
         _enforce_candidate_limit(self.cfg, raw_candidates)
+        _require_candidate_rationales(raw_candidates)
         return raw_candidates
 
     async def strategize(
@@ -234,6 +254,7 @@ class BamlPlannerLLM:
         min_s, max_s = _bounds_values(bounds)
         if not min_s <= result.target_duration_s <= max_s:
             raise BamlPlannerContractError("strategy target_duration_s is outside duration bounds")
+        _require_rationale(result, "StrategizeReel")
         return result
 
     async def arrange(
@@ -251,6 +272,7 @@ class BamlPlannerLLM:
             repair_hint,
             baml_options=self._baml_options(),
         )
+        _require_rationale(result, "ArrangeReel")
         return result
 
     def _baml_options(self) -> dict[str, Any]:

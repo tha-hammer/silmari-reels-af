@@ -4,6 +4,7 @@
 **/node_modules/
 output/
 out/
+/resources/
 **/__pycache__/
 *.pyc
 .pytest_cache/

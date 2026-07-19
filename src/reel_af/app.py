@@ -81,6 +81,7 @@ from reel_af.dsl.models import (  # noqa: E402
 )
 from reel_af.models import Essence  # noqa: E402
 from reel_af.naming import reel_output_name  # noqa: E402
+from reel_af.planner.paths import runs_dir  # noqa: E402
 from reel_af.render.finish import FinishContext, finish_reel  # noqa: E402
 from reel_af.render.finish_config import ReelFinishConfig  # noqa: E402
 from reel_af.render.footage_stitch import download_segments, stitch_footage_reel  # noqa: E402
@@ -1644,7 +1645,7 @@ async def dsl_hooks_to_reels(
     artifact_fetch = artifact_fetch or _default_artifact_fetch
 
     run_id = uuid.uuid4().hex[:12]
-    work = Path(out_dir) if out_dir else Path(f"/tmp/reel-af/dsl-hooks/{run_id}")
+    work = Path(out_dir) if out_dir else runs_dir("dsl-hooks", run_id)
     work.mkdir(parents=True, exist_ok=True)
 
     # Guard: reject a non-HTTP(S) source before ANY artifact read or side effect.
@@ -1776,7 +1777,7 @@ async def transcript_to_plan(
         from reel_af.planner.pipeline import plan as _plan
 
         run_id = uuid.uuid4().hex[:12]
-        work = Path(out_dir) if out_dir else Path(f"/tmp/reel-af/transcript-to-plan/{run_id}")
+        work = Path(out_dir) if out_dir else runs_dir("transcript-to-plan", run_id)
         transcriber = transcribe or _transcribe
         words = transcriber(source_url)
         if inspect.isawaitable(words):

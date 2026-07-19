@@ -20,7 +20,7 @@ from typing import Any
 
 import httpx
 
-from reel_af.dsl.models import WordsSidecar
+from reel_af.dsl.models import AlignedSpan, WordsSidecar
 from reel_af.planner.config import AsrEntry, PlannerConfig, load_planner_config
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
@@ -261,6 +261,35 @@ def _sidecar_text(sidecar: WordsSidecar) -> str:
     if sidecar.words:
         return _clean_text(" ".join(word.w for word in sidecar.words))
     return _clean_text(" ".join(segment.text for segment in sidecar.segments))
+
+
+def word_range_to_aligned_span(
+    words: WordsSidecar,
+    word_range: tuple[int, int] | list[int],
+    *,
+    quality: float = 1.0,
+) -> AlignedSpan:
+    """Map an exact word-index range back to source timing."""
+
+    if not words.words:
+        raise ValueError("word-level transcript timings are required")
+    if len(word_range) != 2:
+        raise ValueError("word_range must contain [start, end]")
+
+    start_idx = int(word_range[0])
+    end_idx = int(word_range[1])
+    if start_idx > end_idx:
+        raise ValueError("word_range start must be <= end")
+    if start_idx < 0 or end_idx >= len(words.words):
+        raise ValueError("word_range is outside transcript word bounds")
+
+    return AlignedSpan(
+        start_s=words.words[start_idx].start,
+        end_s=words.words[end_idx].end,
+        quality=float(quality),
+        word_range=(start_idx, end_idx),
+        method="exact",
+    )
 
 
 def _probe_wav_duration(path: Path) -> float | None:
@@ -852,4 +881,5 @@ __all__ = [
     "normalize_transcription_response",
     "transcribe_audio",
     "transcribe_chain",
+    "word_range_to_aligned_span",
 ]

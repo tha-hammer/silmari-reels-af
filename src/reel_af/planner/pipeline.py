@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -66,7 +67,12 @@ async def plan(
     repair_hint: str | None = None
     for _attempt in range(attempts):
         blueprint = await llm.arrange(candidates, strategy, repair_hint=repair_hint)
-        resolved = resolve_timecodes(blueprint.beats, words)
+        resolved = resolve_timecodes(
+            blueprint.beats,
+            words,
+            candidates=candidates,
+            floor=cfg.verbatim_floor,
+        )
         last_unresolved = [item for item in resolved if not item.resolved]
         if last_unresolved:
             repair_hint = _repair_hint(
@@ -101,7 +107,16 @@ async def plan(
             model=cfg.model,
             duration_bounds_s=effective_bounds,
         )
-        return _write_triple(out_dir, composite, words, hook_plan)
+        return _write_triple(
+            out_dir,
+            composite,
+            words,
+            hook_plan,
+            mined_candidates=mined_candidates,
+            accepted_candidates=candidates,
+            strategy=strategy,
+            blueprint=blueprint,
+        )
 
     return {
         "error": PLANNER_UNMATCHED_SEGMENT,
@@ -128,6 +143,11 @@ def _write_triple(
     composite: str,
     words: WordsSidecar,
     hook_plan: Mapping[str, Any],
+    *,
+    mined_candidates: Any | None = None,
+    accepted_candidates: Any | None = None,
+    strategy: Any | None = None,
+    blueprint: Any | None = None,
 ) -> dict[str, str]:
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -135,22 +155,51 @@ def _write_triple(
     composite_path = root / "composite.ts.md"
     words_path = root / "transcript.words.json"
     hook_path = root / "hook-plan.json"
+    mined_candidates_path = root / "mined-candidates.json"
+    accepted_candidates_path = root / "accepted-candidates.json"
+    strategy_path = root / "strategy.json"
+    blueprint_path = root / "blueprint.json"
 
     composite_path.write_text(composite, encoding="utf-8")
-    words_path.write_text(
-        json.dumps(words.model_dump(mode="json"), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    hook_path.write_text(
-        json.dumps(hook_plan, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    _write_json(words_path, words)
+    _write_json(hook_path, hook_plan)
+    _write_json(mined_candidates_path, mined_candidates or [])
+    _write_json(accepted_candidates_path, accepted_candidates or [])
+    _write_json(strategy_path, strategy)
+    _write_json(blueprint_path, blueprint)
 
     return {
         "composite_ref": str(composite_path),
         "words_ref": str(words_path),
         "hook_ref": str(hook_path),
+        "mined_candidates_ref": str(mined_candidates_path),
+        "accepted_candidates_ref": str(accepted_candidates_path),
+        "strategy_ref": str(strategy_path),
+        "blueprint_ref": str(blueprint_path),
     }
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.write_text(
+        json.dumps(_jsonable(value), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _jsonable(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, Enum):
+        return value.value
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json", exclude_none=True)
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _transcript_text(words: WordsSidecar) -> str:

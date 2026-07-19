@@ -24,6 +24,7 @@ from reel_af.planner.models import (
     validate_cut_in,
     validate_interrupt,
 )
+from reel_af.planner.verbatim import resolve_span_quote
 
 HOOKS_TARGET = "reel-af.reel_dsl_hooks_to_reels"
 DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
@@ -54,16 +55,31 @@ class PlannedCutIn:
     beat_end_s: float
 
 
-def resolve_timecodes(beats: Sequence[Any], words: WordsSidecar) -> list[ResolvedBeat]:
-    """Resolve blueprint beat quotes to source time spans via the real DSL aligner."""
+def resolve_timecodes(
+    beats: Sequence[Any],
+    words: WordsSidecar,
+    *,
+    candidates: Sequence[Any] | None = None,
+    floor: float = MATCH_QUALITY_FLOOR,
+) -> list[ResolvedBeat]:
+    """Resolve blueprint beat quotes to source time spans.
+
+    With candidates, beat quotes must satisfy the planner's span-join + trim
+    verbatim policy. Without candidates, this preserves the legacy direct
+    aligner path used by lower-level serializer tests and callers.
+    """
 
     resolved: list[ResolvedBeat] = []
     for index, beat in enumerate(beats):
         quote = str(_get(beat, "span_quote", ""))
-        span = align(quote, words)
+        span = (
+            resolve_span_quote(beat, candidates, words, floor=floor)
+            if candidates is not None
+            else align(quote, words)
+        )
         if (
             getattr(span, "kind", None) == "aligned"
-            and span.quality >= MATCH_QUALITY_FLOOR
+            and span.quality >= floor
         ):
             start_s = float(span.start_s)
             end_s = _clamp_to_max_len(start_s, float(span.end_s), _get(beat, "max_len_s", None))
@@ -89,7 +105,7 @@ def resolve_timecodes(beats: Sequence[Any], words: WordsSidecar) -> list[Resolve
                 beat=beat,
                 span_quote=quote,
                 resolved=False,
-                quality=float(getattr(span, "best_quality", 0.0)),
+                quality=float(getattr(span, "best_quality", getattr(span, "quality", 0.0))),
                 reason=str(getattr(span, "reason", "below_floor")),
             )
         )

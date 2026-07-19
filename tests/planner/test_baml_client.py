@@ -16,7 +16,7 @@ BAML_FILES = {
 
 def test_baml_client_exposes_planner_functions():
     from baml_client.async_client import b
-    from baml_client.types import ReelBlueprint, ReelStrategy
+    from baml_client.types import CandidateSpan, PlannerCandidate, ReelBlueprint, ReelStrategy
 
     for fn in ("MineCandidates", "StrategizeReel", "ArrangeReel"):
         assert hasattr(b, fn)
@@ -24,6 +24,10 @@ def test_baml_client_exposes_planner_functions():
     assert "template_" in ReelBlueprint.model_fields
     assert "template" not in ReelStrategy.model_fields
     assert "template" not in ReelBlueprint.model_fields
+    assert "rationale" in CandidateSpan.model_fields
+    assert "rationale" in PlannerCandidate.model_fields
+    assert "rationale" in ReelStrategy.model_fields
+    assert "rationale" in ReelBlueprint.model_fields
 
 
 def test_authored_baml_source_is_split_by_concern():
@@ -56,6 +60,7 @@ def test_authored_baml_types_match_planner_contract():
         "class PlannerCandidate",
         "candidate_id string",
         "occurrence_index int",
+        "rationale string?",
         "class ReelStrategy",
         "template_ Template",
         "class ReelBlueprint",
@@ -82,6 +87,7 @@ def test_authored_baml_functions_match_planner_contract():
         "function ArrangeReel(",
         "repair_hint: string?",
         "If repair_hint is present, repair those exact failed quotes without changing unrelated strategy.",
+        "rationale MUST explain",
         "{{ ctx.output_format }}",
     ]
     for needle in expected:

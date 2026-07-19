@@ -77,6 +77,7 @@ class CandidateSpan {
   emotion string?
   is_claim bool?
   payoff_worthy bool?
+  rationale string?
 }
 
 class PlannerCandidate {
@@ -91,6 +92,7 @@ class PlannerCandidate {
   emotion string?
   is_claim bool?
   payoff_worthy bool?
+  rationale string?
 }
 
 class Hook {
@@ -156,6 +158,7 @@ class ReelStrategy {
   hook Hook
   engagement_primary EngagementKind
   cta CtaPlan
+  rationale string?
 }
 
 class ReelBlueprint {
@@ -166,4 +169,5 @@ class ReelBlueprint {
   loop LoopPlan
   engagement_primary EngagementKind
   cta CtaPlan
+  rationale string?
 }

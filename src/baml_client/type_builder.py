@@ -656,7 +656,7 @@ class CandidateSpanAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("CandidateSpan")
-        self._properties: typing.Set[str] = set([  "quote",  "approx_start_s",  "approx_end_s",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  ])
+        self._properties: typing.Set[str] = set([  "quote",  "approx_start_s",  "approx_end_s",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
         self._props = CandidateSpanProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -711,6 +711,10 @@ class CandidateSpanProperties:
     @property
     def payoff_worthy(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("payoff_worthy"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
     
     
 
@@ -1064,7 +1068,7 @@ class PlannerCandidateAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("PlannerCandidate")
-        self._properties: typing.Set[str] = set([  "candidate_id",  "quote",  "occurrence_index",  "word_range",  "start_s",  "end_s",  "quality",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  ])
+        self._properties: typing.Set[str] = set([  "candidate_id",  "quote",  "occurrence_index",  "word_range",  "start_s",  "end_s",  "quality",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
         self._props = PlannerCandidateProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1136,6 +1140,10 @@ class PlannerCandidateProperties:
     def payoff_worthy(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("payoff_worthy"))
     
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
     
 
 
@@ -1143,7 +1151,7 @@ class ReelBlueprintAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("ReelBlueprint")
-        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "beats",  "loop",  "engagement_primary",  "cta",  ])
+        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "beats",  "loop",  "engagement_primary",  "cta",  "rationale",  ])
         self._props = ReelBlueprintProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1199,6 +1207,10 @@ class ReelBlueprintProperties:
     def cta(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("cta"))
     
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
     
 
 
@@ -1206,7 +1218,7 @@ class ReelStrategyAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("ReelStrategy")
-        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "engagement_primary",  "cta",  ])
+        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "engagement_primary",  "cta",  "rationale",  ])
         self._props = ReelStrategyProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1253,6 +1265,10 @@ class ReelStrategyProperties:
     @property
     def cta(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("cta"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
     
     
 

@@ -124,7 +124,11 @@ def _patch_baml(monkeypatch: pytest.MonkeyPatch, rec: _RecordingBaml) -> None:
     monkeypatch.setattr(llm_mod, "_client_registry_type", lambda: _RecordingRegistry)
 
 
-def _candidate(quote: str = "they pattern match") -> CandidateSpan:
+def _candidate(
+    quote: str = "they pattern match",
+    *,
+    rationale: str | None = "strong mined span with clear hook/payoff potential",
+) -> CandidateSpan:
     return CandidateSpan(
         quote=quote,
         approx_start_s=0.0,
@@ -133,10 +137,15 @@ def _candidate(quote: str = "they pattern match") -> CandidateSpan:
         emotion="surprise",
         is_claim=True,
         payoff_worthy=True,
+        rationale=rationale,
     )
 
 
-def _planner_candidate(quote: str = "they pattern match") -> PlannerCandidate:
+def _planner_candidate(
+    quote: str = "they pattern match",
+    *,
+    rationale: str | None = "accepted verbatim span with clear hook/payoff potential",
+) -> PlannerCandidate:
     return PlannerCandidate(
         candidate_id="c001",
         quote=quote,
@@ -149,6 +158,7 @@ def _planner_candidate(quote: str = "they pattern match") -> PlannerCandidate:
         emotion="surprise",
         is_claim=True,
         payoff_worthy=True,
+        rationale=rationale,
     )
 
 
@@ -162,17 +172,26 @@ def _hook(span_quote: str = "verbatim words") -> Hook:
     )
 
 
-def _strategy(*, target_duration_s: float = 24.0) -> ReelStrategy:
+def _strategy(
+    *,
+    target_duration_s: float = 24.0,
+    rationale: str | None = "the template, hook, length, engagement, and CTA fit one thread",
+) -> ReelStrategy:
     return ReelStrategy(
         **_template_field(ReelStrategy, Template.HookContextValuePayoffCta),
         target_duration_s=target_duration_s,
         hook=_hook(),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        rationale=rationale,
     )
 
 
-def _blueprint(*, target_duration_s: float = 24.0) -> ReelBlueprint:
+def _blueprint(
+    *,
+    target_duration_s: float = 24.0,
+    rationale: str | None = "the beat order builds to payoff and the loop echoes the hook",
+) -> ReelBlueprint:
     return ReelBlueprint(
         **_template_field(ReelBlueprint, Template.HookContextValuePayoffCta),
         target_duration_s=target_duration_s,
@@ -194,6 +213,7 @@ def _blueprint(*, target_duration_s: float = 24.0) -> ReelBlueprint:
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        rationale=rationale,
     )
 
 
@@ -280,6 +300,10 @@ async def test_mine_enforces_transcript_and_candidate_limits(
     with pytest.raises(llm_mod.BamlPlannerContractError, match="max_candidates"):
         await llm.mine("short transcript", "educational")
 
+    rec.mine_result = [_candidate("verbatim words", rationale=None)]
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="MineCandidates rationale"):
+        await llm.mine("short transcript", "educational")
+
 
 async def test_strategize_passes_baml_candidates_and_bounds_without_dumping(
     monkeypatch: pytest.MonkeyPatch,
@@ -327,6 +351,20 @@ async def test_strategize_rejects_target_duration_outside_bounds(
         await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, bounds)
 
 
+async def test_strategize_rejects_missing_rationale(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    bounds: DurationBounds,
+):
+    rec = _RecordingBaml()
+    rec.strategy_result = _strategy(target_duration_s=20.0, rationale=None)
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="StrategizeReel rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, bounds)
+
+
 async def test_arrange_passes_strategy_object_without_dumping(
     monkeypatch: pytest.MonkeyPatch,
     cfg: SimpleNamespace,
@@ -349,6 +387,20 @@ async def test_arrange_passes_strategy_object_without_dumping(
     assert rec.calls[0].args[1] is strategy
     assert rec.calls[0].args[2] == "fix candidate c001"
     assert out is rec.arrange_result
+
+
+async def test_arrange_rejects_missing_rationale(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    rec.arrange_result = _blueprint(target_duration_s=20.0, rationale=None)
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="ArrangeReel rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
 
 
 async def test_fake_llm_records_repair_hint(strategy: ReelStrategy):

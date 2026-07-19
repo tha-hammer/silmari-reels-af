@@ -26,6 +26,7 @@ from reel_af.planner.models import (
     InterruptKind,
     LoopPlan,
     ReelBlueprint,
+    ReelStrategy,
     Template,
     XfadeEffect,
 )
@@ -33,6 +34,12 @@ from reel_af.planner.pipeline import plan
 
 SRC = "https://www.youtube.com/watch?v=abc123"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
+SOURCE_QUOTE = (
+    "They don't reason. They pattern-match at a scale that feels like reasoning. Right. "
+    "And the moment you trust the feeling, you ship the bug. Anyway, "
+    "So the fix isn't a smarter model. It's a tighter loop. "
+    "A loop you can actually see closing."
+)
 
 
 class _FakePlannerLLM:
@@ -46,19 +53,20 @@ class _FakePlannerLLM:
         self.mine_calls += 1
         return [
             CandidateSpan(
-                quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+                quote=SOURCE_QUOTE,
                 approx_start_s=4.12,
-                approx_end_s=7.9,
+                approx_end_s=81.16,
                 value_score=0.9,
                 emotion="skepticism",
                 is_claim=True,
                 payoff_worthy=True,
+                rationale="the full quote contains the hook, consequence, and payoff thread",
             )
         ]
 
     async def strategize(self, transcript, candidates, bounds):
         self.strategize_calls += 1
-        return None
+        return _strategy()
 
     async def arrange(self, candidates, strategy, repair_hint=None):
         self.arrange_calls += 1
@@ -135,6 +143,24 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        rationale="the order moves from AI skepticism to the tighter-loop payoff and loop echo",
+    )
+
+
+def _strategy() -> ReelStrategy:
+    return ReelStrategy(
+        template_=Template.HookContextValuePayoffCta,
+        target_duration_s=24.0,
+        hook=Hook(
+            type=HookType.CuriosityGap,
+            banner_line="They don't reason.",
+            span_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            candidate_id="c001",
+            occurrence_index=0,
+        ),
+        engagement_primary=EngagementKind.Send,
+        cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        rationale="the template uses one AI-process thread with a tight target duration and soft CTA",
     )
 
 
@@ -164,6 +190,16 @@ async def test_plan_promise_compiles_ok(tmp_path):
 
     assert out.status == "ok", out.diagnostics
     validate_renderable(out.plan)
+
+    blueprint = json.loads(Path(res["blueprint_ref"]).read_text(encoding="utf-8"))
+    strategy = json.loads(Path(res["strategy_ref"]).read_text(encoding="utf-8"))
+    mined = json.loads(Path(res["mined_candidates_ref"]).read_text(encoding="utf-8"))
+    accepted = json.loads(Path(res["accepted_candidates_ref"]).read_text(encoding="utf-8"))
+
+    assert blueprint["rationale"]
+    assert strategy["rationale"]
+    assert mined[0]["rationale"]
+    assert accepted[0]["rationale"]
 
 
 async def test_produced_triple_compiles_through_real_consumer(tmp_path, monkeypatch):

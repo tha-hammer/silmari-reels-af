@@ -125,6 +125,7 @@ class CandidateSpan(BaseModel):
     emotion: typing.Optional[str] = None
     is_claim: typing.Optional[bool] = None
     payoff_worthy: typing.Optional[bool] = None
+    rationale: typing.Optional[str] = None
 
 class CtaPlan(BaseModel):
     hardness: CtaHardness
@@ -177,6 +178,7 @@ class PlannerCandidate(BaseModel):
     emotion: typing.Optional[str] = None
     is_claim: typing.Optional[bool] = None
     payoff_worthy: typing.Optional[bool] = None
+    rationale: typing.Optional[str] = None
 
 class ReelBlueprint(BaseModel):
     template_: Template
@@ -186,6 +188,7 @@ class ReelBlueprint(BaseModel):
     loop: "LoopPlan"
     engagement_primary: EngagementKind
     cta: "CtaPlan"
+    rationale: typing.Optional[str] = None
 
 class ReelStrategy(BaseModel):
     template_: Template
@@ -193,6 +196,7 @@ class ReelStrategy(BaseModel):
     hook: "Hook"
     engagement_primary: EngagementKind
     cta: "CtaPlan"
+    rationale: typing.Optional[str] = None
 
 # #########################################################################
 # Generated type aliases (0)

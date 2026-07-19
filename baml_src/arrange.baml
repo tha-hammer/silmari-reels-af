@@ -10,9 +10,127 @@ function ArrangeReel(
     Arrange candidates into an ordered beat list per the strategy. Each beat carries role,
     candidate_id, occurrence_index, VERBATIM span_quote, max_len_s, and at most one interrupt_out.
     If repair_hint is present, repair those exact failed quotes without changing unrelated strategy.
-    Strategy: {{ strategy }}
+    rationale MUST explain why this beat order resolves the strategy, why the payoff lands where it
+    does, and why the final R8 loop span is the right distinct source echo.
+
+    NON-NEGOTIABLE STORY CONTRACT:
+    - The ordered beats MUST follow one narrative thread from the hook candidate to a payoff span
+      that answers the hook promise.
+    - The payoff is not "the most impressive quote"; it is the span that resolves the tension created
+      by strategy.hook.banner_line and strategy.hook.span_quote.
+    - Drop strong but unrelated candidates when they do not move this single thread forward.
+    - Do not mix three topics just because all candidates are individually good.
+
+    BEAT ORDER THAT BUILDS:
+    - Hook: first beat only, use strategy.hook candidate_id/occurrence_index and span_quote or a
+      VERBATIM substring of that same candidate.
+    - Context: the minimum setup needed to understand the promise.
+    - Value: mechanism, contrast, or stakes that narrows the answer.
+    - Payoff: the beat that directly answers the hook promise. It should land after the setup, not
+      appear as an unrelated flex.
+    - Cta/loop: final beat echoes the hook idea so the ending loops back cleanly without
+      replaying the identical source clip.
+
+    R3 PACING ESCALATION:
+    - Start with a hook max_len_s <= 3.5.
+    - Middle beats may breathe, but every beat longer than 5s needs a cutin or interrupt_out.
+    - The back half must tighten toward the payoff: each back-half max_len_s should be lower than
+      the prior back-half beat unless the quote cannot be shortened.
+    - Use a stronger interrupt immediately before the payoff when the source topic turns or stakes rise.
+    - Do not place transitions mechanically after every beat.
+
+    R8 LOOP TIE-BACK:
+    - The final beat MUST echo strategy.hook.span_quote while using a source span DISTINCT from
+      the hook beat. Never reuse the identical hook source clip as the final loop.
+    - The final beat MUST NOT reuse strategy.hook candidate_id/occurrence_index when that would
+      duplicate the hook span. Prefer a different candidate_id/occurrence_index whose start_s/end_s
+      are also different from the hook candidate's start_s/end_s.
+    - If the same phrase recurs in the source, choose the OTHER occurrence for the final loop.
+      A repeated phrase is good craft only when it is cut from a distinct utterance.
+    - If no distinct recurrence exists, end on a different payoff-adjacent span with high token
+      overlap or the same idea instead of duplicating the hook source interval.
+    - loop.final_span_quote MUST match the final beat span_quote, and loop.candidate_id plus
+      loop.occurrence_index MUST match that final distinct beat.
+    - If the payoff uses a different candidate, place payoff immediately before the distinct loop echo.
+
+    R9 SHARE CUE:
+    - Emit exactly ONE engagement object across all beats.
+    - That one engagement MUST be kind Send or Share, primary true, with a line that tells the
+      viewer exactly WHO to send/share it to and WHY that person needs it.
+    - The line must be earned from the selected reel topic, not a generic growth hack. Tie the
+      recipient and reason to the hook/payoff tension, e.g. "Send this to the dev on your team who
+      still lets the AI grade its own homework."
+    - Output engagement_primary as Send or Share to match that cue, even if strategy.engagement_primary
+      says Save.
+    - Keep exactly one primary engagement. Do not stack a CTA, save prompt, comment prompt, or second
+      share cue on another beat.
+    - BANNED R11 bait: "share if you agree", "share this", "tag 5 friends", "like for more",
+      "comment below", "follow for more", vague saves, or any cue without a concrete recipient
+      and reason.
+    - The share cue belongs on the payoff beat unless it would crowd the line; otherwise put it on
+      the final loop beat.
+
+    INTERRUPT AND CUT-IN PLACEMENT:
+    - Use Join only when adjacent beats continue the same sentence or idea with no visual reset AND
+      the next beat starts later in source time. Never Join into an earlier source span.
+    - Use Trans, not Join, for any non-adjacent source jump, reordered source-time jump, topic turn,
+      or beat whose candidate start_s is earlier than the prior beat's candidate start_s.
+    - Use Trans with a concrete effect for topic turns, rising stakes, or the move into payoff.
+    - Use Black only for a hard reset or tonal snap; never as filler.
+    - Use interrupt_out on 2 or 3 beats total, not every beat. Leave at least one middle beat with
+      interrupt_out null unless there are only two beats.
+    - The strongest interrupt should be immediately before the payoff. The final loop beat should
+      normally have interrupt_out null.
+    - A cutin should clarify a number, mechanism, or contrast already present in the VERBATIM span.
+    - Keep cutin offset_s and dur_s inside the containing beat.
+
+    SPAN POLICY:
+    - Every span_quote must be VERBATIM from its referenced candidate.
+    - Single-candidate trim: span_quote may be any contiguous verbatim source-token substring inside
+      the referenced PlannerCandidate.word_range.
+    - Adjacent span join: span_quote may be one continuous source-token range that starts inside the
+      referenced candidate and extends through following adjacent candidates only when each next
+      candidate starts at previous.word_range[-1] + 1.
+    - For joined spans, keep candidate_id and occurrence_index set to the FIRST candidate in
+      source-time order. Do not use the later candidate's identity.
+    - Do not skip source words inside the emitted quote. No added words, no reworded words, and no
+      gap words outside covered adjacent candidates.
+    - If only whole candidates are available or adjacency is unclear, degrade gracefully: use whole
+      candidate quotes, split ideas across multiple beats, and never invent glue text.
+
+    FEW-SHOT ARRANGEMENT EXEMPLARS:
+    - Bad: Hook c010 occurrence 0 "Pay now or pay later" at start_s 366.185 -> "AI is not a wonder
+      box" -> "200-250 commands" -> "10,000 lines in four days" -> final echo c010 occurrence 0
+      "Pay now or pay later." This duplicates the hook source span and the metric does not resolve
+      what "pay now" means.
+    - Good: Hook c010 occurrence 0 "pay now or you pay later" at start_s 366.185 -> context
+      "The AIs are stupid" -> mechanism "You don't let the AI make the check in its own memory" ->
+      payoff "use the AI's memory to create the script to run the check" -> final echo c027
+      occurrence 0 "Pay now or pay later." at start_s 385.060. One thread: cost means verification,
+      and the loop uses the distinct standalone utterance.
+    - Bad: Payoff first, then context, then a new claim. The viewer gets the answer before the
+      question and the ending cannot loop.
+    - Good: Context narrows the question, mechanism raises confidence, payoff answers the hook, final
+      echo makes the first line feel inevitable.
+    - Banned R9 bait: Payoff beat engagement { kind Share, primary true, line "Share this if you
+      agree." }. It gives no concrete recipient and no earned reason.
+    - Good R9 cue: Payoff beat engagement { kind Send, primary true, line "Send this to the dev on
+      your team who still lets the AI grade its own homework." }. One recipient, one reason, derived
+      from the AI-checking-its-own-work payoff.
+
+    RATIONALE STYLE:
+    - Explain the ordered story arc from hook to payoff.
+    - Name the loop candidate_id/occurrence_index and why it is distinct from the hook source span.
+    - Mention the one R9 cue placement if present.
+    - Keep rationale to 2-4 concise sentences.
+
+    Strategy:
+    {{ strategy }}
+
     Repair hint: {{ repair_hint }}
-    Candidates: {{ candidates }}
+
+    Candidates:
+    {{ candidates }}
   "#
 }
 

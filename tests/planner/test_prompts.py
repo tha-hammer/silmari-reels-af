@@ -37,6 +37,8 @@ def test_mine_prompt_keeps_offsets_non_authoritative():
     assert "Quote VERBATIM" in src
     assert "approx_start_s/approx_end_s are optional hints" in src
     assert "never authoritative timecodes" in src
+    assert "rationale must explain why this exact span was selected" in src
+    assert "value_score, emotion" in src
 
 
 def test_strategize_prompt_preserves_candidate_identity():
@@ -46,6 +48,8 @@ def test_strategize_prompt_preserves_candidate_identity():
     assert "candidate_id/occurrence_index" in src
     assert "ONE primary engagement lever" in src
     assert "Preserve candidate identity" in src
+    assert "rationale MUST state why the selected template_" in src
+    assert "target length is tight enough" in src
 
 
 def test_arrange_prompt_carries_repair_hint_contract():
@@ -56,3 +60,27 @@ def test_arrange_prompt_carries_repair_hint_contract():
     assert "If repair_hint is present, repair those exact failed quotes" in src
     assert "candidate_id, occurrence_index, VERBATIM span_quote" in src
     assert "Repair hint: {{ repair_hint }}" in src
+    assert "rationale MUST explain why this beat order resolves the strategy" in src
+    assert "Name the loop candidate_id/occurrence_index" in src
+
+
+def test_arrange_prompt_requires_distinct_loop_source_span():
+    src = _source()
+
+    assert "Every reel segment must resolve to a unique source span" in src
+    assert (
+        "The final beat MUST echo strategy.hook.span_quote while using a source span DISTINCT"
+        in src
+    )
+    assert "different candidate_id/occurrence_index" in src
+    assert "start_s/end_s" in src
+    assert "choose the OTHER occurrence for the final loop" in src
+    assert "Never reuse the identical hook source clip as the final loop" in src
+
+
+def test_arrange_prompt_forbids_join_into_earlier_source_span():
+    src = _source()
+
+    assert "Never Join into an earlier source span" in src
+    assert "Use Trans, not Join" in src
+    assert "candidate start_s is earlier than the prior beat's candidate start_s" in src

@@ -1,0 +1,62 @@
+{
+  "clips": [
+    {
+      "composite_ref": "composite.ts.md",
+      "cut_ins": [
+        {
+          "at_s": 362.841625,
+          "line": "Myth: AI just knows.",
+          "type": "zoom",
+          "until_s": 364.041625,
+          "zoom_focus": "speaker face, wide-eyed emphasis"
+        },
+        {
+          "at_s": 1145.7281875,
+          "line": "No 'make me a CRM' magic.",
+          "type": "zoom",
+          "until_s": 1147.1281875000002,
+          "zoom_focus": "hands typing, close on screen"
+        },
+        {
+          "at_s": 975.4644375,
+          "image_prompt": "simple bar counter graphic ticking up to 200-250",
+          "line": "200-250 commands. That's it.",
+          "type": "visual",
+          "until_s": 977.0644375
+        },
+        {
+          "at_s": 1617.3525625,
+          "line": "Let the script check itself.",
+          "type": "zoom",
+          "until_s": 1618.6525625,
+          "zoom_focus": "terminal script output"
+        },
+        {
+          "at_s": 332.3201875,
+          "image_prompt": "clean stat card: 10,000 lines / 4 days / 0 regressions",
+          "line": "10,000 lines. Four days. Zero regressions.",
+          "type": "visual",
+          "until_s": 333.8201875
+        }
+      ],
+      "end_s": 369.226625,
+      "excerpt": "The reality of all of this is the AIs are stupid. And so you either pay now or you pay later.",
+      "hook": "Pay now or pay later.",
+      "idea": "Pay now or pay later.",
+      "idempotency_key": "a1:wPcKNuUG3NM:30d3ea4d92ce:clip:1",
+      "idx": 1,
+      "start_s": 361.841625,
+      "target": "reel-af.reel_dsl_hooks_to_reels",
+      "title": "pay now or pay later"
+    }
+  ],
+  "duration_bounds_s": {
+    "max": 180.0,
+    "min": 10.0
+  },
+  "model": "anthropic/claude-sonnet-5",
+  "schema_version": "1",
+  "source_id": "wPcKNuUG3NM",
+  "source_url": "https://youtu.be/wPcKNuUG3NM",
+  "workflow": "dsl_hooks"
+}

@@ -4,6 +4,9 @@
   "llm_connect_timeout_s": 10.0,
   "llm_request_timeout_s": 60.0,
   "llm_total_timeout_s": 180.0,
+  "output_root": "resources",
+  "artifacts_dir": "runs",
+  "evals_dir": "evals",
   "default_register": "educational",
   "bounds_default": {
     "min_s": 10.0,

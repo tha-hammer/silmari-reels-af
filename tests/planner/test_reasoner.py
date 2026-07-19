@@ -24,15 +24,21 @@ from reel_af.planner.models import (
 
 SRC = "https://www.youtube.com/watch?v=abc123"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
+SOURCE_QUOTE = (
+    "They don't reason. They pattern-match at a scale that feels like reasoning. Right. "
+    "And the moment you trust the feeling, you ship the bug. Anyway, "
+    "So the fix isn't a smarter model. It's a tighter loop. "
+    "A loop you can actually see closing."
+)
 
 
 class _FakePlannerLLM:
     async def mine(self, transcript, register):
         return [
             CandidateSpan(
-                quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+                quote=SOURCE_QUOTE,
                 approx_start_s=4.12,
-                approx_end_s=7.9,
+                approx_end_s=81.16,
                 value_score=0.9,
                 emotion="skepticism",
                 is_claim=True,

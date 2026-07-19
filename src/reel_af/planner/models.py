@@ -32,6 +32,11 @@ Register = Literal["entertainment", "educational", "b2b"]
 
 TInterrupt = TypeVar("TInterrupt", bound=Interrupt)
 
+# Joined span_quote values preserve the existing one-id BAML schema by carrying
+# the first source-time PlannerCandidate identity. Deterministic validation may
+# only extend from that candidate into later adjacent candidate word ranges.
+JOINED_SPAN_IDENTITY_POLICY = "first_adjacent_candidate"
+
 
 def interrupt_marker(interrupt: Interrupt) -> str:
     """Return the DSL marker name for a BAML interrupt."""
@@ -110,6 +115,7 @@ __all__ = [
     "HookType",
     "Interrupt",
     "InterruptKind",
+    "JOINED_SPAN_IDENTITY_POLICY",
     "LoopPlan",
     "PlannerCandidate",
     "ReelBlueprint",
