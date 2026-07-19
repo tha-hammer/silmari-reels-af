@@ -158,6 +158,7 @@ def run_config_probe(overrides: Optional[dict] = None) -> dict:
     src = str(Path(__file__).resolve().parent.parent / "src")
     env = dict(os.environ)
     env["PYTHONPATH"] = src + os.pathsep + env.get("PYTHONPATH", "")
+    env["PYTHON_DOTENV_DISABLED"] = "true"
     env.setdefault("OPENROUTER_API_KEY", "test-dummy")
     for key, value in (overrides or {}).items():
         if value is None:

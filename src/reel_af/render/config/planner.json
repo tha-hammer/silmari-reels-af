@@ -1,9 +1,53 @@
 {
-  "model": "openrouter/deepseek/deepseek-v4-pro",
+  "model": "anthropic/claude-sonnet-5",
+  "llm_temperature": 0.4,
+  "llm_connect_timeout_s": 10.0,
+  "llm_request_timeout_s": 60.0,
+  "llm_total_timeout_s": 180.0,
   "default_register": "educational",
+  "bounds_default": {
+    "min_s": 10.0,
+    "max_s": 180.0
+  },
   "max_repair_passes": 1,
+  "verbatim_floor": 0.85,
+  "max_transcript_chars": 120000,
+  "max_candidates": 80,
+  "max_beats": 16,
+  "max_repair_hint_chars": 2000,
+  "max_audio_bytes": 25000000,
+  "max_audio_duration_s": 1800.0,
+  "asr_chunk_duration_s": 600.0,
+  "asr_connect_timeout_s": 10.0,
+  "asr_request_timeout_s": 65.0,
+  "asr_total_timeout_s": 240.0,
   "self_verify": false,
-  "remote_asr_chain": [],
+  "remote_asr_chain": [
+    {
+      "model": "openai/whisper-large-v3",
+      "word_ts": "native",
+      "response_format": "verbose_json",
+      "request_word_timestamps": true
+    },
+    {
+      "model": "google/chirp-3",
+      "word_ts": "verify",
+      "response_format": "json",
+      "request_word_timestamps": false
+    },
+    {
+      "model": "nvidia/parakeet-tdt-0.6b-v2",
+      "word_ts": "forced",
+      "response_format": "json",
+      "request_word_timestamps": false
+    },
+    {
+      "model": "openai/gpt-4o-mini-transcribe",
+      "word_ts": "forced",
+      "response_format": "json",
+      "request_word_timestamps": false
+    }
+  ],
   "r1_hook_window_s": 3.5,
   "r2_cadence_s": {
     "entertainment": 3.0,

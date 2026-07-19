@@ -3,6 +3,18 @@ from __future__ import annotations
 from reel_af.dsl.models import DslWord, WordsSidecar
 from reel_af.planner.config import PlannerConfig
 from reel_af.planner.lint import lint_blueprint
+from reel_af.planner.models import (
+    Beat,
+    BeatRole,
+    CtaHardness,
+    CtaPlan,
+    EngagementKind,
+    Hook,
+    HookType,
+    LoopPlan,
+    ReelBlueprint,
+    Template,
+)
 
 
 def _cfg(**overrides) -> PlannerConfig:
@@ -73,6 +85,41 @@ def test_hook_window_over_threshold_warns():
             {"role": "hook", "span_quote": "beta", "duration_s": 2.5},
             {"role": "value", "span_quote": "gamma", "duration_s": 1.0},
         ]
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg())
+
+    assert any(d.rule == "R1" and d.severity == "warning" for d in diags)
+
+
+def test_baml_beat_role_member_drives_hook_window_lint():
+    bp = ReelBlueprint(
+        template_=Template.HookContextValuePayoffCta,
+        target_duration_s=12.0,
+        hook=Hook(
+            type=HookType.CuriosityGap,
+            banner_line="Alpha beta",
+            span_quote="alpha beta",
+            candidate_id="c001",
+            occurrence_index=0,
+        ),
+        beats=[
+            Beat(
+                role=BeatRole.Hook,
+                span_quote="alpha",
+                candidate_id="c001",
+                occurrence_index=0,
+                max_len_s=4.0,
+            )
+        ],
+        loop=LoopPlan(
+            strategy="tie_final_to_hook",
+            final_span_quote="alpha",
+            candidate_id="c001",
+            occurrence_index=0,
+        ),
+        engagement_primary=EngagementKind.Send,
+        cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
     )
 
     diags = lint_blueprint(bp, words=None, cfg=_cfg())

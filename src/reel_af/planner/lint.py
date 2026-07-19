@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Sequence
+from enum import Enum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
 from reel_af.dsl.models import WordsSidecar
 from reel_af.planner.config import PlannerConfig, load_planner_config
+from reel_af.planner.models import BeatRole
 
 LintRule = Literal["R1", "R2", "R3", "R4", "R8", "R11", "R12"]
 LintSeverity = Literal["warning", "error"]
@@ -76,7 +78,7 @@ def _lint_r1(
     hook_duration = sum(
         duration
         for index, beat in enumerate(beats)
-        if _get(beat, "role", None) == "hook"
+        if _beat_role(beat) is BeatRole.Hook
         for duration in [_duration_s(beat, _resolved_at(resolved, index))]
         if duration is not None
     )
@@ -148,7 +150,7 @@ def _lint_r4(
 
 def _lint_r8(blueprint: Any, beats: Sequence[Any], cfg: PlannerConfig) -> list[LintDiagnostic]:
     hook = _get(blueprint, "hook", {})
-    hook_text = _get(hook, "span_quote", None) or _first_role_quote(beats, "hook")
+    hook_text = _get(hook, "span_quote", None) or _first_role_quote(beats, BeatRole.Hook)
     loop = _get(blueprint, "loop", {})
     final_text = _get(loop, "final_span_quote", None)
     if final_text is None and beats:
@@ -194,7 +196,7 @@ def _lint_r12(blueprint: Any, beats: Sequence[Any]) -> list[LintDiagnostic]:
         count = int(explicit_count)
     else:
         placements = list(_items(_get(cta, "placements", [])))
-        role_count = sum(1 for beat in beats if _get(beat, "role", None) == "cta")
+        role_count = sum(1 for beat in beats if _beat_role(beat) is BeatRole.Cta)
         count = max(len(placements), role_count)
     if count > 1:
         return [_diag("R12", "warning", "Blueprint has more than one primary CTA.")]
@@ -239,9 +241,9 @@ def _has_adjacent_change(beat: Any) -> bool:
     )
 
 
-def _first_role_quote(beats: Sequence[Any], role: str) -> str | None:
+def _first_role_quote(beats: Sequence[Any], role: BeatRole) -> str | None:
     for beat in beats:
-        if _get(beat, "role", None) == role:
+        if _beat_role(beat) is role:
             quote = _get(beat, "span_quote", None)
             if quote:
                 return str(quote)
@@ -274,6 +276,27 @@ def _get(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _beat_role(beat: Any) -> BeatRole | None:
+    value = _get(beat, "role", None)
+    if isinstance(value, BeatRole):
+        return value
+    if isinstance(value, Enum):
+        value = value.value
+    mapping = {
+        "Hook": BeatRole.Hook,
+        "hook": BeatRole.Hook,
+        "Context": BeatRole.Context,
+        "context": BeatRole.Context,
+        "Value": BeatRole.Value,
+        "value": BeatRole.Value,
+        "Payoff": BeatRole.Payoff,
+        "payoff": BeatRole.Payoff,
+        "Cta": BeatRole.Cta,
+        "cta": BeatRole.Cta,
+    }
+    return mapping.get(str(value))
 
 
 def _display_texts(blueprint: Any) -> Iterable[str]:

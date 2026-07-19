@@ -13,7 +13,22 @@ from reel_af.dsl.models import (
     SourceRef,
     validate_renderable,
 )
-from reel_af.planner.models import Beat, CtaPlan, Hook, Interrupt, LoopPlan, ReelBlueprint
+from reel_af.planner.models import (
+    Beat,
+    BeatRole,
+    CandidateSpan,
+    CtaHardness,
+    CtaPlan,
+    EngagementKind,
+    Hook,
+    HookType,
+    Interrupt,
+    InterruptKind,
+    LoopPlan,
+    ReelBlueprint,
+    Template,
+    XfadeEffect,
+)
 from reel_af.planner.pipeline import plan
 
 SRC = "https://www.youtube.com/watch?v=abc123"
@@ -29,13 +44,23 @@ class _FakePlannerLLM:
 
     async def mine(self, transcript, register):
         self.mine_calls += 1
-        return []
+        return [
+            CandidateSpan(
+                quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+                approx_start_s=4.12,
+                approx_end_s=7.9,
+                value_score=0.9,
+                emotion="skepticism",
+                is_claim=True,
+                payoff_worthy=True,
+            )
+        ]
 
     async def strategize(self, transcript, candidates, bounds):
         self.strategize_calls += 1
         return None
 
-    async def arrange(self, candidates, strategy):
+    async def arrange(self, candidates, strategy, repair_hint=None):
         self.arrange_calls += 1
         idx = min(self.arrange_calls - 1, len(self._blueprints) - 1)
         return self._blueprints[idx]
@@ -48,44 +73,68 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
         else "They don't reason. They pattern-match at a scale that feels like reasoning."
     )
     return ReelBlueprint(
-        template="hook_context_value_payoff_cta",
+        template_=Template.HookContextValuePayoffCta,
         target_duration_s=24.0,
         hook=Hook(
-            type="curiosity_gap",
+            type=HookType.CuriosityGap,
             banner_line="They don't reason.",
             span_quote=first_quote,
+            candidate_id="c001",
+            occurrence_index=0,
         ),
         beats=[
             Beat(
-                role="hook",
+                role=BeatRole.Hook,
                 span_quote=first_quote,
+                candidate_id="c001",
+                occurrence_index=0,
                 max_len_s=4.5,
-                interrupt_out=Interrupt(kind="trans", effect="dissolve", dur_s=0.8),
+                interrupt_out=Interrupt(
+                    kind=InterruptKind.Trans,
+                    effect=XfadeEffect.Dissolve,
+                    dur_s=0.8,
+                ),
             ),
             Beat(
-                role="value",
+                role=BeatRole.Value,
                 span_quote="And the moment you trust the feeling, you ship the bug.",
+                candidate_id="c001",
+                occurrence_index=0,
                 max_len_s=4.5,
-                interrupt_out=Interrupt(kind="trans", effect="smoothleft", dur_s=1.0),
+                interrupt_out=Interrupt(
+                    kind=InterruptKind.Trans,
+                    effect=XfadeEffect.Smoothleft,
+                    dur_s=1.0,
+                ),
             ),
             Beat(
-                role="payoff",
+                role=BeatRole.Payoff,
                 span_quote="So the fix isn't a smarter model. It's a tighter loop.",
+                candidate_id="c001",
+                occurrence_index=0,
                 max_len_s=4.5,
-                interrupt_out=Interrupt(kind="trans", effect="dissolve", dur_s=0.6),
+                interrupt_out=Interrupt(
+                    kind=InterruptKind.Trans,
+                    effect=XfadeEffect.Dissolve,
+                    dur_s=0.6,
+                ),
             ),
             Beat(
-                role="cta",
+                role=BeatRole.Cta,
                 span_quote="A loop you can actually see closing.",
+                candidate_id="c001",
+                occurrence_index=0,
                 max_len_s=3.0,
             ),
         ],
         loop=LoopPlan(
             strategy="tie_final_to_hook",
             final_span_quote="A loop you can actually see closing.",
+            candidate_id="c001",
+            occurrence_index=0,
         ),
-        engagement_primary="send",
-        cta=CtaPlan(hardness="soft", placements=["end"]),
+        engagement_primary=EngagementKind.Send,
+        cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
     )
 
 

@@ -1,136 +1,124 @@
-"""Typed planner blueprint models for the A1 producer."""
+"""Planner domain type facade backed by generated BAML types."""
 
 from __future__ import annotations
 
-from typing import Literal
+from enum import Enum
+from typing import Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-from reel_af.dsl.models import XfadeEffect
+from baml_client.types import (
+    Beat,
+    BeatRole,
+    CandidateSpan,
+    CtaHardness,
+    CtaPlan,
+    CutIn,
+    CutInKind,
+    DurationBounds,
+    Engagement,
+    EngagementKind,
+    Hook,
+    HookType,
+    Interrupt,
+    InterruptKind,
+    LoopPlan,
+    PlannerCandidate,
+    ReelBlueprint,
+    ReelStrategy,
+    Template,
+    XfadeEffect,
+)
 
 Register = Literal["entertainment", "educational", "b2b"]
-Template = Literal[
-    "hook_context_value_payoff_cta",
-    "problem_agitate_solve",
-    "before_after_bridge",
-    "myth_bust",
-    "listicle",
-    "storytime",
-]
-HookType = Literal["curiosity_gap", "contrarian", "open_loop", "proof", "question", "story"]
-BeatRole = Literal["hook", "context", "value", "payoff", "cta"]
-InterruptKind = Literal["trans", "join", "black"]
-EngagementKind = Literal["send", "save", "share", "comment", "follow", "none"]
-CutInKind = Literal["zoom", "visual"]
-CtaHardness = Literal["soft", "medium", "hard", "none"]
+
+TInterrupt = TypeVar("TInterrupt", bound=Interrupt)
 
 
-class PlannerModel(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+def interrupt_marker(interrupt: Interrupt) -> str:
+    """Return the DSL marker name for a BAML interrupt."""
+
+    kind = _enum_value(interrupt.kind)
+    if kind in {"Black", "black"}:
+        return "insert"
+    if kind in {"Trans", "trans"}:
+        return "trans"
+    if kind in {"Join", "join"}:
+        return "join"
+    raise ValueError(f"unsupported interrupt kind: {kind!r}")
 
 
-class CandidateSpan(PlannerModel):
-    quote: str = Field(min_length=1)
-    approx_start_s: float = Field(ge=0)
-    approx_end_s: float = Field(gt=0)
-    value_score: float = Field(ge=0, le=1)
-    emotion: str = ""
-    is_claim: bool = False
-    payoff_worthy: bool = False
+def validate_candidate_span(span: CandidateSpan) -> CandidateSpan:
+    """Validate semantic candidate span invariants not enforced by BAML SAP."""
 
-    @model_validator(mode="after")
-    def _end_after_start(self) -> "CandidateSpan":
-        if self.approx_end_s <= self.approx_start_s:
-            raise ValueError("approx_end_s must be greater than approx_start_s")
-        return self
+    if (
+        span.approx_start_s is not None
+        and span.approx_end_s is not None
+        and span.approx_end_s <= span.approx_start_s
+    ):
+        raise ValueError("approx_end_s must be greater than approx_start_s")
+    return span
 
 
-class Hook(PlannerModel):
-    type: HookType
-    banner_line: str = Field(min_length=1)
-    span_quote: str = Field(min_length=1)
+def validate_cut_in(cut_in: CutIn) -> CutIn:
+    """Validate semantic cut-in invariants not enforced by BAML SAP."""
+
+    if cut_in.offset_s < 0:
+        raise ValueError("cut-in offset_s must be non-negative")
+    if cut_in.dur_s <= 0:
+        raise ValueError("cut-in duration must be positive")
+    if _enum_value(cut_in.type) in {"Visual", "visual"} and not cut_in.image_prompt:
+        raise ValueError("visual cut-in requires image_prompt")
+    return cut_in
 
 
-class Interrupt(PlannerModel):
-    kind: InterruptKind
-    effect: XfadeEffect | None = None
-    dur_s: float = Field(default=0.0, ge=0)
+def validate_interrupt(interrupt: TInterrupt) -> TInterrupt:
+    """Validate and normalize semantic interrupt invariants."""
 
-    @model_validator(mode="after")
-    def _validate_for_kind(self) -> "Interrupt":
-        if self.kind == "trans":
-            if self.effect is None:
-                self.effect = "fade"
-            if self.effect == "none" and self.dur_s != 0:
-                raise ValueError('trans interrupt with effect="none" requires dur_s=0')
-            return self
-        if self.kind == "black" and self.dur_s <= 0:
+    kind = _enum_value(interrupt.kind)
+    if kind in {"Trans", "trans"}:
+        effect = interrupt.effect or XfadeEffect.Fade
+        dur_s = 0.0 if interrupt.dur_s is None else float(interrupt.dur_s)
+        if _enum_value(effect) in {"NoEffect", "none"} and dur_s != 0.0:
+            raise ValueError('trans interrupt with effect="none" requires dur_s=0')
+        if effect is not interrupt.effect or dur_s != interrupt.dur_s:
+            return interrupt.model_copy(update={"effect": effect, "dur_s": dur_s})
+        return interrupt
+
+    if kind in {"Black", "black"}:
+        if interrupt.dur_s is None or interrupt.dur_s <= 0:
             raise ValueError("black interrupt requires dur_s > 0")
-        return self
-
-    @property
-    def kind_as_marker(self) -> str:
-        if self.kind == "black":
-            return "insert"
-        return self.kind
+    return interrupt
 
 
-class CutIn(PlannerModel):
-    type: CutInKind
-    at_s: float = Field(ge=0)
-    until_s: float = Field(gt=0)
-    line: str | None = None
-    image_prompt: str | None = None
-    zoom_focus: str = "center"
-
-    @model_validator(mode="after")
-    def _validate_window_and_payload(self) -> "CutIn":
-        if self.until_s <= self.at_s:
-            raise ValueError("cut-in until_s must be greater than at_s")
-        if self.type == "visual" and not self.image_prompt:
-            raise ValueError("visual cut-in requires image_prompt")
-        return self
+def _enum_value(value: object) -> str:
+    if isinstance(value, Enum):
+        return str(value.value)
+    return str(value)
 
 
-class Engagement(PlannerModel):
-    kind: EngagementKind
-    line: str | None = None
-    primary: bool = True
-
-
-class Beat(PlannerModel):
-    role: BeatRole
-    span_quote: str = Field(min_length=1)
-    max_len_s: float = Field(gt=0)
-    cutin: CutIn | None = None
-    interrupt_out: Interrupt | None = None
-    engagement: Engagement | None = None
-
-
-class LoopPlan(PlannerModel):
-    strategy: str = Field(min_length=1)
-    final_span_quote: str = Field(min_length=1)
-
-
-class CtaPlan(PlannerModel):
-    hardness: CtaHardness
-    placements: list[str] = Field(default_factory=list)
-
-
-class ReelStrategy(PlannerModel):
-    template: Template
-    target_duration_s: float = Field(gt=0)
-    hook: Hook
-    engagement_primary: EngagementKind
-    cta: CtaPlan
-
-
-class ReelBlueprint(PlannerModel):
-    template: Template
-    target_duration_s: float = Field(gt=0)
-    hook: Hook
-    beats: list[Beat] = Field(min_length=1)
-    loop: LoopPlan
-    engagement_primary: EngagementKind
-    cta: CtaPlan
-
+__all__ = [
+    "Beat",
+    "BeatRole",
+    "CandidateSpan",
+    "CtaHardness",
+    "CtaPlan",
+    "CutIn",
+    "CutInKind",
+    "DurationBounds",
+    "Engagement",
+    "EngagementKind",
+    "Hook",
+    "HookType",
+    "Interrupt",
+    "InterruptKind",
+    "LoopPlan",
+    "PlannerCandidate",
+    "ReelBlueprint",
+    "ReelStrategy",
+    "Register",
+    "Template",
+    "XfadeEffect",
+    "interrupt_marker",
+    "validate_candidate_span",
+    "validate_cut_in",
+    "validate_interrupt",
+]

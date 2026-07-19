@@ -7,11 +7,12 @@ that DSL model so planner ingest does not carry a second copy of the invariant.
 
 from __future__ import annotations
 
+import inspect
 import json
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -23,7 +24,9 @@ _YT_HOSTS = ("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www
 
 SidecarPayload = Mapping[str, Any] | WordsSidecar
 CaptionRunner = Callable[[str], str | SidecarPayload | None]
-WhisperRunner = Callable[[str], SidecarPayload]
+WhisperResult = SidecarPayload | Awaitable[SidecarPayload]
+WhisperRunner = Callable[[str], WhisperResult]
+TranscribeResult = WordsSidecar | Awaitable[WordsSidecar]
 
 
 def _run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -234,13 +237,30 @@ def _default_whisper(source: str) -> dict[str, Any]:
         return sidecar_from_whisper_json(workdir / "audio.json", vtt)
 
 
+async def _default_remote_transcriber(source: str) -> WordsSidecar:
+    from reel_af.planner.transcribe import transcribe_chain
+
+    return await transcribe_chain(source, local=_default_whisper)
+
+
+def _validate_whisper_result(result: WhisperResult) -> TranscribeResult:
+    if inspect.isawaitable(result):
+
+        async def _await_and_validate() -> WordsSidecar:
+            payload = await result
+            return WordsSidecar.model_validate(_coerce_whisper_payload(payload))
+
+        return _await_and_validate()
+    return WordsSidecar.model_validate(_coerce_whisper_payload(result))
+
+
 def transcribe(
     source: str,
     *,
     run_caption: CaptionRunner = fetch_captions_vtt,
     run_whisper: WhisperRunner | None = None,
     allow_coarse: bool = False,
-) -> WordsSidecar:
+) -> TranscribeResult:
     """Return word-level transcript timing for a YouTube URL or local media path.
 
     YouTube captions are only final when they already carry word timing or when
@@ -255,6 +275,5 @@ def transcribe(
             if _has_word_timing(caption_payload) or allow_coarse:
                 return WordsSidecar.model_validate(caption_payload)
 
-    whisper = run_whisper or _default_whisper
-    return WordsSidecar.model_validate(_coerce_whisper_payload(whisper(source)))
-
+    whisper = run_whisper or _default_remote_transcriber
+    return _validate_whisper_result(whisper(source))

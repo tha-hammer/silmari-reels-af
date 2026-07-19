@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import inspect
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
 from reel_af.dsl.models import WordsSidecar
+from reel_af.planner import ingest
 from reel_af.planner.ingest import (
     sidecar_from_vtt,
     sidecar_from_whisper_json,
     transcribe,
     youtube_id,
 )
+from reel_af.planner.transcribe import AsrError
+
+
+async def maybe_await(value):
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def test_whisper_json_becomes_monotonic_sidecar():
@@ -170,6 +179,56 @@ def test_local_file_uses_whisper_directly(tmp_path: Path):
 
     assert side.words[0].w == "local"
     assert calls["caption"] == 0
+
+
+async def test_default_ingest_transcriber_can_be_awaited(monkeypatch):
+    async def async_remote_words(source: str) -> dict:
+        assert source == "https://youtu.be/abc123"
+        return {
+            "schema_version": "1",
+            "words": [{"w": "remote", "start": 0.0, "end": 0.4}],
+            "segments": [],
+        }
+
+    monkeypatch.setattr(ingest, "_default_remote_transcriber", async_remote_words)
+
+    words = await maybe_await(
+        ingest.transcribe("https://youtu.be/abc123", run_caption=lambda _video_id: None)
+    )
+
+    assert words.words[0].w == "remote"
+
+
+def test_sync_local_fallback_still_supported(tmp_path: Path):
+    media = tmp_path / "local.mp4"
+    media.write_bytes(b"")
+
+    words = ingest.transcribe(
+        str(media),
+        run_whisper=lambda _source: {
+            "schema_version": "1",
+            "words": [{"w": "local", "start": 0.0, "end": 0.4}],
+            "segments": [],
+        },
+    )
+
+    assert not inspect.isawaitable(words)
+    assert words.words[0].w == "local"
+
+
+async def test_terminal_remote_failure_does_not_silently_use_local(monkeypatch):
+    async def terminal_remote(_source: str):
+        raise AsrError(code="asr_auth", message="no auth", retryable=False)
+
+    monkeypatch.setattr(ingest, "_default_remote_transcriber", terminal_remote)
+
+    with pytest.raises(AsrError):
+        await maybe_await(
+            ingest.transcribe(
+                "https://youtu.be/abc123",
+                run_caption=lambda _video_id: None,
+            )
+        )
 
 
 @pytest.mark.parametrize(

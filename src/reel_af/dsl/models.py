@@ -188,6 +188,7 @@ DiagnosticCode = Literal[
     "RELEVANT_NO_MATCH",
     "CANDIDATE_NOT_FOUND",
     "SEGMENT_SPAN_COLLAPSE",
+    "SOURCE_TIME_OVERLAP",
 ]
 
 

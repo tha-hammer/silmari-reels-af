@@ -1,0 +1,21 @@
+{
+  "schema_version": "1",
+  "words": [],
+  "segments": [
+    {
+      "text": "Earlier source clip holds enough footage for a clean first crossfade.",
+      "start_s": 10.0,
+      "end_s": 14.0
+    },
+    {
+      "text": "Middle source clip follows in source time and supports the second fade.",
+      "start_s": 18.0,
+      "end_s": 24.0
+    },
+    {
+      "text": "Later source clip opens the reordered narrative and must stay first.",
+      "start_s": 20.0,
+      "end_s": 28.0
+    }
+  ]
+}

@@ -19,6 +19,7 @@ the browser only ever sends in-bounds values, so a clamp here is pure belt-and-b
 from __future__ import annotations
 
 import json
+import math
 import re
 from functools import lru_cache
 from pathlib import Path
@@ -44,14 +45,19 @@ def tunable_keys() -> list[str]:
 def _coerce_number(value: Any) -> float | None:
     if isinstance(value, bool):
         return None
+    number: float
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        number = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value.strip())
+            number = float(value.strip())
         except ValueError:
             return None
-    return None
+    else:
+        return None
+    if not math.isfinite(number):
+        return None
+    return number
 
 
 def _coerce_int(value: Any) -> int | None:

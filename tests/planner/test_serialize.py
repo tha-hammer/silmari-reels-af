@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from reel_af.dsl.composite import read_composite
 from reel_af.dsl.models import CutInSpec, DslWord, WordsSidecar
 from reel_af.dsl.parser import parse_marker, serialize_marker
+from reel_af.planner.models import CutIn, CutInKind, Interrupt, InterruptKind, XfadeEffect
 from reel_af.planner.serialize import (
     build_hook_plan,
     interrupt_to_marker_text,
@@ -31,7 +34,7 @@ def _words() -> WordsSidecar:
 
 def _bp() -> SimpleNamespace:
     return SimpleNamespace(
-        template="hook_context_value_payoff_cta",
+        template_="hook_context_value_payoff_cta",
         target_duration_s=28.0,
         hook=SimpleNamespace(
             type="curiosity_gap",
@@ -94,6 +97,18 @@ def test_trans_interrupt_round_trips():
 
     assert marker.kind == "trans"
     assert serialize_marker(marker) == "[trans dissolve 0.5]"
+
+
+def test_baml_enum_interrupt_maps_to_dsl_wire_tokens():
+    text = interrupt_to_marker_text(
+        Interrupt(
+            kind=InterruptKind.Trans,
+            effect=XfadeEffect.Smoothleft,
+            dur_s=0.25,
+        )
+    )
+
+    assert serialize_marker(parse_marker(text)) == "[trans smoothleft 0.25]"
 
 
 def test_join_and_black_interrupts_round_trip():
@@ -167,3 +182,21 @@ def test_hook_plan_matches_consumer_shape():
     assert clip["idx"] == 1
     for cut_in in clip["cut_ins"]:
         CutInSpec.model_validate(cut_in)
+
+
+def test_hook_plan_accepts_relative_planner_cut_in_shape():
+    bp = _bp()
+    resolved = resolve_timecodes(bp.beats, _words())
+
+    plan = build_hook_plan(
+        source_url="https://www.youtube.com/watch?v=abc123",
+        hook=bp.hook,
+        span=resolved[0],
+        cut_ins=[CutIn(type=CutInKind.Zoom, offset_s=0.2, dur_s=0.6, line="look")],
+        composite_ref="/tmp/out/composite.ts.md",
+    )
+
+    cut_in = plan["clips"][0]["cut_ins"][0]
+    assert cut_in["at_s"] == pytest.approx(resolved[0].start_s + 0.2)
+    assert cut_in["until_s"] == pytest.approx(resolved[0].start_s + 0.8)
+    CutInSpec.model_validate(cut_in)

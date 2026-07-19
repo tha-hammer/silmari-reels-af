@@ -17,6 +17,8 @@ Ordering:
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,8 @@ UNSUPPORTED_VERBS_BY_WORKFLOW: dict[str, frozenset[str]] = {
     DSL_HOOKS_WORKFLOW: frozenset({"insert_corpus", "find"}),
 }
 
+SOURCE_INTERVAL_EPSILON_S = 1e-6
+
 
 def compile_composite(
     doc: CompositeDoc,
@@ -94,8 +98,9 @@ def compile_composite(
     _apply_extends(doc, aligned, words, diagnostics)
 
     # Tile segments contiguously in source time (end_s -> next start_s) so no source
-    # moment — and no spoken phrase — plays twice at a seam (AF-e1x).
-    _clamp_contiguous_spans(aligned)
+    # moment - and no spoken phrase - plays twice at a seam (AF-e1x).
+    if _normalize_source_intervals(aligned, source.source_url, diagnostics):
+        return _error_result_from(diagnostics)
 
     segments_and_markers = _build_segment_list(
         doc, aligned, source, diagnostics, words, relevant_dir,
@@ -103,10 +108,24 @@ def compile_composite(
     if segments_and_markers is None:
         return _error_result_from(diagnostics)
 
-    segments, trans_markers = segments_and_markers
+    build_result = segments_and_markers
 
-    segments = _apply_joins(doc, segments, diagnostics)
-    if segments is None:
+    join_result = _apply_joins(
+        doc,
+        build_result.segments,
+        build_result.boundary_map,
+        build_result.original_segment_indexes,
+        build_result.segment_output_indexes,
+        build_result.trans_markers,
+        diagnostics,
+    )
+    if join_result is None:
+        return _error_result_from(diagnostics)
+
+    segments = join_result.segments
+    trans_markers = join_result.trans_markers
+
+    if _verify_no_source_interval_overlap(segments, diagnostics):
         return _error_result_from(diagnostics)
 
     transitions = _build_transitions(segments, trans_markers, doc, diagnostics)
@@ -273,6 +292,43 @@ class _AlignedSegment:
         self.seg_id = f"seg-{uuid.uuid4().hex[:8]}"
 
 
+@dataclass(frozen=True)
+class _SourceInterval:
+    source_url: str
+    segment_id: str
+    index: int
+    start_s: float
+    end_s: float
+
+
+@dataclass(frozen=True)
+class _SourceNeighborBounds:
+    previous_end_s: float | None
+    next_start_s: float | None
+
+
+@dataclass(frozen=True)
+class _BoundaryBinding:
+    original_before_index: int
+    left_output_index: int
+    right_output_index: int
+
+
+@dataclass(frozen=True)
+class _SegmentBuildResult:
+    segments: list[SourceSegment | BlackSegment]
+    trans_markers: dict[int, Trans]
+    boundary_map: dict[int, _BoundaryBinding]
+    original_segment_indexes: list[int]
+    segment_output_indexes: dict[int, int]
+
+
+@dataclass(frozen=True)
+class _JoinResult:
+    segments: list[SourceSegment | BlackSegment]
+    trans_markers: dict[int, Trans]
+
+
 def _align_segments(
     doc: CompositeDoc,
     words: WordsSidecar,
@@ -298,10 +354,10 @@ def _align_segments(
 def _verify_injective_spans(
     aligned: list[_AlignedSegment], diagnostics: list[Diagnostic]
 ) -> bool:
-    """Degenerate-plan guard: distinct composite segments must map to distinct,
-    non-decreasing source spans. A duplicate span means the aligner collapsed
-    several segments onto one cue (the ``bd ate`` defect); never render it. Returns
-    True (and emits a diagnostic) when the plan is degenerate.
+    """Degenerate-plan guard: distinct composite segments must map to distinct
+    source spans. A duplicate span means the aligner collapsed several segments
+    onto one cue (the ``bd ate`` defect); never render it. Returns True (and
+    emits a diagnostic) when the plan is degenerate.
 
     Runs on RAW aligner output, BEFORE ``_apply_extends``/``_apply_joins``:
     ``_apply_joins`` legitimately merges adjacent segments (intentional span
@@ -325,30 +381,133 @@ def _verify_injective_spans(
             f"spans (segments {idxs}); alignment is non-injective",
             "injectivity",
         )
-    for prev, cur in zip(aligned, aligned[1:]):
-        if cur.start_s < prev.start_s:
-            return _collapse(
-                f"segment {cur.seg.index} aligns before segment {prev.seg.index} "
-                f"({cur.start_s} < {prev.start_s})",
-                "monotonicity",
-            )
     return False
 
 
-def _clamp_contiguous_spans(aligned: list[_AlignedSegment]) -> None:
-    """Tile source segments contiguously so no source moment plays twice.
+def _aligned_source_intervals(
+    aligned: list[_AlignedSegment], source_url: str
+) -> list[_SourceInterval]:
+    return [
+        _SourceInterval(
+            source_url=source_url,
+            segment_id=a.seg_id,
+            index=a.seg.index,
+            start_s=a.start_s,
+            end_s=a.end_s,
+        )
+        for a in aligned
+    ]
 
-    The aligner gives each segment its full caption-cue span, whose ``end_s`` can
-    overrun the next segment's ``start_s``. Rendered, that replays the overlap —
-    audibly re-speaking the tail of every clip into the head of the next (AF-e1x).
-    Clamp each segment's ``end_s`` down to the next segment's ``start_s``; the last
-    segment keeps its cue end. Runs AFTER ``_apply_extends`` (which already clamps
-    extend growth to neighbor edges) so it only trims the base-cue overruns and never
-    inverts a span (guarded on ``next.start_s > cur.start_s``; starts are already
-    non-decreasing per ``_verify_injective_spans``)."""
-    for cur, nxt in zip(aligned, aligned[1:]):
-        if nxt.start_s > cur.start_s and cur.end_s > nxt.start_s:
+
+def _segment_source_intervals(
+    segments: list[SourceSegment | BlackSegment],
+) -> list[_SourceInterval]:
+    intervals: list[_SourceInterval] = []
+    for index, segment in enumerate(segments):
+        if not isinstance(segment, SourceSegment):
+            continue
+        intervals.append(_SourceInterval(
+            source_url=segment.source_url,
+            segment_id=segment.segment_id,
+            index=index,
+            start_s=segment.start_s,
+            end_s=segment.end_s,
+        ))
+    return intervals
+
+
+def _source_interval_groups(
+    intervals: list[_SourceInterval],
+) -> dict[str, list[_SourceInterval]]:
+    groups: dict[str, list[_SourceInterval]] = defaultdict(list)
+    for interval in intervals:
+        groups[interval.source_url].append(interval)
+    return groups
+
+
+def _first_source_interval_overlap(
+    intervals: list[_SourceInterval],
+) -> tuple[_SourceInterval, _SourceInterval, float] | None:
+    for group in _source_interval_groups(intervals).values():
+        ordered = sorted(group, key=lambda item: (item.start_s, item.end_s, item.segment_id))
+        for left, right in zip(ordered, ordered[1:]):
+            has_positive_overlap = left.end_s > right.start_s + SOURCE_INTERVAL_EPSILON_S
+            if has_positive_overlap:
+                overlap_s = max(0.0, left.end_s - right.start_s)
+                return left, right, overlap_s
+    return None
+
+
+def _append_source_overlap_diagnostic(
+    diagnostics: list[Diagnostic],
+    left: _SourceInterval,
+    right: _SourceInterval,
+    overlap_s: float,
+) -> None:
+    diagnostics.append(Diagnostic(
+        code="SOURCE_TIME_OVERLAP",
+        message=(
+            f"source interval overlap for {left.source_url}: "
+            f"{left.segment_id} ends at {left.end_s:.6f}s, "
+            f"{right.segment_id} starts at {right.start_s:.6f}s"
+        ),
+        severity="error",
+        context={
+            "source_url": left.source_url,
+            "left_segment_id": left.segment_id,
+            "right_segment_id": right.segment_id,
+            "left_index": left.index,
+            "right_index": right.index,
+            "overlap_s": overlap_s,
+        },
+    ))
+
+
+def _normalize_source_intervals(
+    aligned: list[_AlignedSegment],
+    source_url: str,
+    diagnostics: list[Diagnostic],
+) -> bool:
+    """Clamp source cue overruns by source-time neighbors, preserving composite order."""
+    ordered = sorted(aligned, key=lambda item: (item.start_s, item.end_s, item.seg.index))
+    for cur, nxt in zip(ordered, ordered[1:]):
+        overruns_next = cur.end_s > nxt.start_s + SOURCE_INTERVAL_EPSILON_S
+        can_clamp_without_inversion = nxt.start_s > cur.start_s + SOURCE_INTERVAL_EPSILON_S
+        if overruns_next and can_clamp_without_inversion:
             cur.end_s = nxt.start_s
+
+    for interval in _aligned_source_intervals(aligned, source_url):
+        if interval.end_s <= interval.start_s + SOURCE_INTERVAL_EPSILON_S:
+            _append_source_overlap_diagnostic(diagnostics, interval, interval, 0.0)
+            return True
+    return False
+
+
+def _verify_no_source_interval_overlap(
+    segments: list[SourceSegment | BlackSegment],
+    diagnostics: list[Diagnostic],
+) -> bool:
+    overlap = _first_source_interval_overlap(_segment_source_intervals(segments))
+    if overlap is None:
+        return False
+    left, right, overlap_s = overlap
+    _append_source_overlap_diagnostic(diagnostics, left, right, overlap_s)
+    return True
+
+
+def _source_neighbor_bounds(
+    aligned: list[_AlignedSegment],
+) -> dict[int, _SourceNeighborBounds]:
+    ordered = sorted(aligned, key=lambda item: (item.start_s, item.end_s, item.seg.index))
+    bounds: dict[int, _SourceNeighborBounds] = {}
+    for idx, current in enumerate(ordered):
+        previous_end_s = ordered[idx - 1].end_s if idx > 0 else None
+        next_start_s = ordered[idx + 1].start_s if idx + 1 < len(ordered) else None
+        bounds[current.seg.index] = _SourceNeighborBounds(
+            previous_end_s=previous_end_s,
+            next_start_s=next_start_s,
+        )
+    return bounds
 
 
 def _apply_extends(
@@ -358,6 +517,7 @@ def _apply_extends(
     diagnostics: list[Diagnostic],
 ) -> None:
     seg_by_index: dict[int, _AlignedSegment] = {a.seg.index: a for a in aligned}
+    neighbor_bounds = _source_neighbor_bounds(aligned)
 
     for att in doc.markers:
         if not isinstance(att.marker, Extend):
@@ -387,17 +547,13 @@ def _apply_extends(
 
         if edge == "tail":
             target = a.end_s + dur
-            clamp_max = None
-            idx_in_list = aligned.index(a)
-            if idx_in_list + 1 < len(aligned):
-                clamp_max = aligned[idx_in_list + 1].start_s
+            clamp_max = neighbor_bounds.get(a.seg.index, _SourceNeighborBounds(None, None)).next_start_s
             a.end_s = snap_edge(target, boundaries, tolerance=SNAP_TOLERANCE_S, clamp_max=clamp_max)
         elif edge == "head":
             target = a.start_s - dur
-            clamp_min = 0.0
-            idx_in_list = aligned.index(a)
-            if idx_in_list > 0:
-                clamp_min = aligned[idx_in_list - 1].end_s
+            clamp_min = neighbor_bounds.get(a.seg.index, _SourceNeighborBounds(None, None)).previous_end_s
+            if clamp_min is None:
+                clamp_min = 0.0
             a.start_s = snap_edge(target, boundaries, tolerance=SNAP_TOLERANCE_S, clamp_min=clamp_min)
 
 
@@ -408,7 +564,7 @@ def _build_segment_list(
     diagnostics: list[Diagnostic],
     words: WordsSidecar,
     relevant_dir: Path | None,
-) -> tuple[list[SourceSegment | BlackSegment], dict[int, Trans]] | None:
+) -> _SegmentBuildResult | None:
     segments: list[SourceSegment | BlackSegment] = []
     trans_markers: dict[int, Trans] = {}
 
@@ -471,21 +627,21 @@ def _build_segment_list(
                     segments.append(seg)
                     out_idx += 1
 
-    boundary_idx = 0
-    for i in range(len(segments) - 1):
-        if aligned and boundary_idx < len(aligned):
-            orig_idx = None
-            for a in aligned:
-                if seg_map.get(a.seg.index) == i:
-                    orig_idx = a.seg.index
-                    break
-            if orig_idx is not None and orig_idx in trans_points:
-                trans_markers[i] = trans_points[orig_idx]
-            elif global_trans is not None:
-                trans_markers[i] = global_trans
-        boundary_idx += 1
+    original_segment_indexes = [a.seg.index for a in aligned]
+    boundary_map = _rebuild_boundary_map(original_segment_indexes, seg_map)
+    for binding in boundary_map.values():
+        if binding.original_before_index in trans_points:
+            trans_markers[binding.original_before_index] = trans_points[binding.original_before_index]
+        elif global_trans is not None:
+            trans_markers[binding.original_before_index] = global_trans
 
-    return segments, trans_markers
+    return _SegmentBuildResult(
+        segments=segments,
+        trans_markers=trans_markers,
+        boundary_map=boundary_map,
+        original_segment_indexes=original_segment_indexes,
+        segment_output_indexes=seg_map,
+    )
 
 
 def _compile_insert(
@@ -598,46 +754,154 @@ def _derive_relevant_dir(doc: CompositeDoc) -> Path | None:
     return None
 
 
+def _rebuild_boundary_map(
+    original_segment_indexes: list[int],
+    segment_output_indexes: dict[int, int],
+) -> dict[int, _BoundaryBinding]:
+    boundary_map: dict[int, _BoundaryBinding] = {}
+    for left_orig, right_orig in zip(original_segment_indexes, original_segment_indexes[1:]):
+        boundary_map[left_orig] = _BoundaryBinding(
+            original_before_index=left_orig,
+            left_output_index=segment_output_indexes[left_orig],
+            right_output_index=segment_output_indexes[right_orig],
+        )
+    return boundary_map
+
+
+def _remap_transition_markers(
+    trans_markers: dict[int, Trans],
+    boundary_map: dict[int, _BoundaryBinding],
+    segment_count: int,
+) -> dict[int, Trans]:
+    remapped: dict[int, Trans] = {}
+    for original_before_index, marker in trans_markers.items():
+        binding = boundary_map.get(original_before_index)
+        if binding is None:
+            continue
+        if binding.left_output_index == binding.right_output_index:
+            continue
+        before_index = binding.left_output_index
+        if before_index < segment_count - 1:
+            remapped[before_index] = marker
+    return remapped
+
+
+def _update_segment_output_indexes_after_merge(
+    segment_output_indexes: dict[int, int],
+    *,
+    merge_idx: int,
+    removed_idx: int,
+) -> None:
+    for original_index, output_index in list(segment_output_indexes.items()):
+        if output_index == removed_idx:
+            segment_output_indexes[original_index] = merge_idx
+        elif output_index > removed_idx:
+            segment_output_indexes[original_index] = output_index - 1
+
+
+def _join_refused(
+    diagnostics: list[Diagnostic],
+    message: str,
+    *,
+    original_before_index: int,
+    reason: str,
+    context: dict[str, Any] | None = None,
+) -> None:
+    diagnostic_context = {
+        "original_before_index": original_before_index,
+        "reason": reason,
+    }
+    if context:
+        diagnostic_context.update(context)
+    diagnostics.append(Diagnostic(
+        code="JOIN_REFUSED",
+        message=message,
+        severity="error",
+        context=diagnostic_context,
+    ))
+
+
 def _apply_joins(
     doc: CompositeDoc,
     segments: list[SourceSegment | BlackSegment],
+    boundary_map: dict[int, _BoundaryBinding],
+    original_segment_indexes: list[int],
+    segment_output_indexes: dict[int, int],
+    trans_markers: dict[int, Trans],
     diagnostics: list[Diagnostic],
-) -> list[SourceSegment | BlackSegment] | None:
+) -> _JoinResult | None:
     join_markers: list[tuple[int, Join]] = []
     for att in doc.markers:
         if isinstance(att.marker, Join):
             join_markers.append((att.before_segment_index or 0, att.marker))
 
     if not join_markers:
-        return segments
+        return _JoinResult(
+            segments=segments,
+            trans_markers=_remap_transition_markers(trans_markers, boundary_map, len(segments)),
+        )
 
     joined = list(segments)
+    current_boundary_map = dict(boundary_map)
+    current_segment_output_indexes = dict(segment_output_indexes)
 
     for orig_before_idx, join in sorted(join_markers, key=lambda x: x[0], reverse=True):
-        merge_idx = None
-        for i, seg in enumerate(joined):
-            if isinstance(seg, SourceSegment) and i + 1 < len(joined):
-                next_seg = joined[i + 1]
-                if isinstance(next_seg, SourceSegment) and seg.source_url == next_seg.source_url:
-                    if _should_merge(seg, next_seg, orig_before_idx, join, diagnostics):
-                        merge_idx = i
-                        break
+        binding = current_boundary_map.get(orig_before_idx)
+        if binding is None:
+            continue
 
-        if merge_idx is not None:
-            left = joined[merge_idx]
-            right = joined[merge_idx + 1]
-            if isinstance(left, SourceSegment) and isinstance(right, SourceSegment):
-                merged = SourceSegment(
-                    segment_id=left.segment_id,
-                    source_url=left.source_url,
-                    start_s=min(left.start_s, right.start_s),
-                    end_s=max(left.end_s, right.end_s),
-                    text=left.text + " " + right.text,
-                )
-                joined[merge_idx] = merged
-                joined.pop(merge_idx + 1)
+        merge_idx = binding.left_output_index
+        right_idx = binding.right_output_index
+        if merge_idx == right_idx:
+            continue
+        if right_idx != merge_idx + 1:
+            _join_refused(
+                diagnostics,
+                "join refused: marked boundary is not adjacent after inserts",
+                original_before_index=orig_before_idx,
+                reason="non_adjacent_boundary",
+                context={"left_index": merge_idx, "right_index": right_idx},
+            )
+            return None
 
-    return joined
+        left = joined[merge_idx]
+        right = joined[right_idx]
+        if not isinstance(left, SourceSegment) or not isinstance(right, SourceSegment):
+            _join_refused(
+                diagnostics,
+                "join refused: marked boundary is not a source/source pair",
+                original_before_index=orig_before_idx,
+                reason="non_source_pair",
+                context={"left_index": merge_idx, "right_index": right_idx},
+            )
+            return None
+
+        if not _should_merge(left, right, orig_before_idx, join, diagnostics):
+            return None
+
+        merged = SourceSegment(
+            segment_id=left.segment_id,
+            source_url=left.source_url,
+            start_s=left.start_s,
+            end_s=right.end_s,
+            text=left.text + " " + right.text,
+        )
+        joined[merge_idx] = merged
+        joined.pop(right_idx)
+        _update_segment_output_indexes_after_merge(
+            current_segment_output_indexes,
+            merge_idx=merge_idx,
+            removed_idx=right_idx,
+        )
+        current_boundary_map = _rebuild_boundary_map(
+            original_segment_indexes,
+            current_segment_output_indexes,
+        )
+
+    return _JoinResult(
+        segments=joined,
+        trans_markers=_remap_transition_markers(trans_markers, current_boundary_map, len(joined)),
+    )
 
 
 def _should_merge(
@@ -647,26 +911,46 @@ def _should_merge(
     join: Join,
     diagnostics: list[Diagnostic],
 ) -> bool:
-    gap = right.start_s - left.end_s
-
     if left.source_url != right.source_url:
-        if join.mode == "force":
-            return True
-        diagnostics.append(Diagnostic(
-            code="JOIN_REFUSED",
-            message="join refused: different sources; use [join force]",
-            severity="error",
-        ))
+        _join_refused(
+            diagnostics,
+            "join refused: different sources",
+            original_before_index=orig_before_idx,
+            reason="different_sources",
+            context={
+                "left_source_url": left.source_url,
+                "right_source_url": right.source_url,
+            },
+        )
         return False
 
-    if gap > JOIN_GAP_LIMIT_S:
+    source_time_reversed = right.start_s + SOURCE_INTERVAL_EPSILON_S < left.end_s
+    if source_time_reversed:
+        _join_refused(
+            diagnostics,
+            "join refused: non-forward source-time order",
+            original_before_index=orig_before_idx,
+            reason="non_forward_source_time",
+            context={
+                "left_segment_id": left.segment_id,
+                "right_segment_id": right.segment_id,
+                "left_end_s": left.end_s,
+                "right_start_s": right.start_s,
+            },
+        )
+        return False
+
+    source_gap_s = max(0.0, right.start_s - left.end_s)
+    if source_gap_s > JOIN_GAP_LIMIT_S:
         if join.mode in ("confirmed", "force"):
             return True
-        diagnostics.append(Diagnostic(
-            code="JOIN_REFUSED",
-            message=f"join refused: gap {gap:.1f}s exceeds limit {JOIN_GAP_LIMIT_S}s; use [join confirmed]",
-            severity="error",
-        ))
+        _join_refused(
+            diagnostics,
+            f"join refused: gap {source_gap_s:.1f}s exceeds limit {JOIN_GAP_LIMIT_S}s; use [join confirmed]",
+            original_before_index=orig_before_idx,
+            reason="gap_exceeds_limit",
+            context={"source_gap_s": source_gap_s},
+        )
         return False
 
     return True

@@ -1,8 +1,8 @@
-"""B2 — compile-stage injectivity + monotonicity verifier (fail closed).
+"""B2 - compile-stage aligned span injectivity verifier (fail closed).
 
-N distinct composite segments must yield N distinct, non-decreasing source spans.
-A collapse means the aligner mapped several segments onto one cue (the ``bd ate``
-defect); compile must refuse rather than forward a degenerate plan to render.
+N distinct composite segments must yield N distinct source spans. A collapse
+means the aligner mapped several segments onto one cue (the ``bd ate`` defect);
+compile must refuse rather than forward a degenerate plan to render.
 """
 
 from pathlib import Path
@@ -44,10 +44,10 @@ def test_identical_spans_flagged_and_fail_closed():
     assert diags[0].severity == "error" and diags[0].context.get("kind") == "injectivity"
 
 
-def test_non_monotonic_starts_flagged():
+def test_distinct_reordered_spans_pass():
     diags: list[Diagnostic] = []
-    assert _verify_injective_spans(_aligned([(5.0, 6.0), (1.0, 2.0)]), diags) is True
-    assert diags[0].context.get("kind") == "monotonicity"
+    assert _verify_injective_spans(_aligned([(20.0, 24.0), (10.0, 14.0), (30.0, 34.0)]), diags) is False
+    assert diags == []
 
 
 def test_single_and_empty_are_ok():

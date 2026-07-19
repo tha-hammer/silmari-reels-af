@@ -9,12 +9,12 @@ from pathlib import Path
 
 from reel_af.dsl.compile import (
     _AlignedSegment,
-    _clamp_contiguous_spans,
+    _normalize_source_intervals,
     compile_composite,
     load_words,
 )
 from reel_af.dsl.composite import read_composite
-from reel_af.dsl.models import SourceRef, SourceSegment
+from reel_af.dsl.models import Diagnostic, SourceRef, SourceSegment
 
 FIX = Path(__file__).resolve().parent / "fixtures"
 
@@ -30,26 +30,43 @@ def _aligned(spans):
 
 def test_overrun_clamped_to_next_start():
     a = _aligned([(412.0, 440.0), (432.0, 458.0), (452.0, 460.0)])
-    _clamp_contiguous_spans(a)
+    assert _normalize_source_intervals(a, "fixture", []) is False
     assert [(x.start_s, x.end_s) for x in a] == [
-        (412.0, 432.0),  # was 440 → clamped to next start 432
-        (432.0, 452.0),  # was 458 → clamped to next start 452
+        (412.0, 432.0),  # was 440; clamped to next start 432
+        (432.0, 452.0),  # was 458; clamped to next start 452
         (452.0, 460.0),  # last segment keeps its cue end
     ]
 
 
 def test_non_overlapping_spans_unchanged():
     a = _aligned([(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)])
-    _clamp_contiguous_spans(a)
+    assert _normalize_source_intervals(a, "fixture", []) is False
     assert [(x.start_s, x.end_s) for x in a] == [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)]
 
 
 def test_clamp_never_inverts_a_span():
-    # next starts before cur ends but after cur starts → clamp to a positive-length span
+    # next starts before cur ends but after cur starts; clamp to a positive-length span
     a = _aligned([(10.0, 30.0), (20.0, 25.0)])
-    _clamp_contiguous_spans(a)
+    assert _normalize_source_intervals(a, "fixture", []) is False
     assert [(x.start_s, x.end_s) for x in a] == [(10.0, 20.0), (20.0, 25.0)]
     assert all(x.end_s > x.start_s for x in a)
+
+
+def test_reordered_overrun_clamped_by_source_time_not_composite_order():
+    diagnostics: list[Diagnostic] = []
+    a = _aligned([(20.0, 28.0), (10.0, 18.0), (18.0, 23.0)])
+
+    assert _normalize_source_intervals(a, "fixture", diagnostics) is False
+
+    assert [(x.start_s, x.end_s) for x in a] == [
+        (20.0, 28.0),
+        (10.0, 18.0),
+        (18.0, 20.0),
+    ]
+    assert diagnostics == []
+    sorted_spans = sorted((x.start_s, x.end_s) for x in a)
+    for (_, left_end), (right_start, _) in zip(sorted_spans, sorted_spans[1:]):
+        assert left_end <= right_start
 
 
 def test_compile_tiles_overlapping_cues_contiguously():

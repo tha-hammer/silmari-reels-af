@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlparse
 
@@ -13,6 +14,15 @@ from reel_af.dsl.models import (
     MATCH_QUALITY_FLOOR,
     CutInSpec,
     WordsSidecar,
+)
+from reel_af.planner.models import (
+    CutIn,
+    DurationBounds,
+    Interrupt,
+    XfadeEffect,
+    interrupt_marker,
+    validate_cut_in,
+    validate_interrupt,
 )
 
 HOOKS_TARGET = "reel-af.reel_dsl_hooks_to_reels"
@@ -33,6 +43,15 @@ class ResolvedBeat:
     method: str | None = None
     word_range: tuple[int, int] | None = None
     fallback_segment_range: tuple[int, int] | None = None
+
+
+@dataclass(frozen=True)
+class PlannedCutIn:
+    """A BAML relative cut-in paired with its resolved containing beat."""
+
+    cut_in: Any
+    beat_start_s: float
+    beat_end_s: float
 
 
 def resolve_timecodes(beats: Sequence[Any], words: WordsSidecar) -> list[ResolvedBeat]:
@@ -80,18 +99,23 @@ def resolve_timecodes(beats: Sequence[Any], words: WordsSidecar) -> list[Resolve
 def interrupt_to_marker_text(interrupt: Any) -> str:
     """Render a planner interrupt to a single DSL marker line."""
 
-    kind = _get(interrupt, "kind")
-    if kind == "join":
+    if isinstance(interrupt, Interrupt):
+        interrupt = validate_interrupt(interrupt)
+        marker = interrupt_marker(interrupt)
+    else:
+        kind = _wire_token(_get(interrupt, "kind"))
+        marker = "insert" if kind == "black" else kind
+    if marker == "join":
         return "[join]"
 
-    if kind == "black":
+    if marker == "insert":
         dur_s = _required_float(_get(interrupt, "dur_s", _get(interrupt, "duration_s", None)), "black duration")
         if dur_s <= 0:
             raise ValueError("black interrupt duration must be positive")
         return f"[insert black {_fmt_num(dur_s)}]"
 
-    if kind == "trans":
-        effect = _get(interrupt, "effect", _get(interrupt, "primitive", "fade"))
+    if marker == "trans":
+        effect = _wire_token(_get(interrupt, "effect", _get(interrupt, "primitive", XfadeEffect.Fade)))
         dur_s = _required_float(_get(interrupt, "dur_s", _get(interrupt, "duration_s", 1.0)), "transition duration")
         if effect == "none" and dur_s != 0.0:
             raise ValueError("effect='none' requires dur_s=0")
@@ -99,7 +123,7 @@ def interrupt_to_marker_text(interrupt: Any) -> str:
             return f"[trans {effect}]"
         return f"[trans {effect} {_fmt_num(dur_s)}]"
 
-    raise ValueError(f"unsupported interrupt kind: {kind!r}")
+    raise ValueError(f"unsupported interrupt kind: {marker!r}")
 
 
 def serialize_composite(blueprint: Any, resolved: Sequence[ResolvedBeat]) -> str:
@@ -154,7 +178,7 @@ def build_hook_plan(
     banner = str(_get(hook, "banner_line", hook_text)).strip()
     clip_title = title or _slug_title(banner or hook_text)
     clip_idea = idea or str(_get(hook, "idea", banner or hook_text)).strip()
-    cut_in_payloads = [_cut_in_payload(cut_in) for cut_in in cut_ins]
+    cut_in_payloads = [_cut_in_payload(cut_in, span=span) for cut_in in cut_ins]
     idempotency_key = _idempotency_key(
         source_url=source_url,
         source_id=source_id,
@@ -247,29 +271,76 @@ def _source_id_from_url(source_url: str) -> str:
     return digest
 
 
-def _duration_bounds(bounds: Mapping[str, float] | None) -> dict[str, float]:
+def _duration_bounds(bounds: Mapping[str, float] | DurationBounds | None) -> dict[str, float]:
     if bounds is None:
         return dict(DEFAULT_DURATION_BOUNDS_S)
-    min_s = bounds.get("min", bounds.get("min_s", DEFAULT_DURATION_BOUNDS_S["min"]))
-    max_s = bounds.get("max", bounds.get("max_s", DEFAULT_DURATION_BOUNDS_S["max"]))
+    min_s = _get(bounds, "min", _get(bounds, "min_s", DEFAULT_DURATION_BOUNDS_S["min"]))
+    max_s = _get(bounds, "max", _get(bounds, "max_s", DEFAULT_DURATION_BOUNDS_S["max"]))
     return {"min": min_s, "max": max_s}
 
 
-def _cut_in_payload(cut_in: Any) -> dict[str, Any]:
-    if hasattr(cut_in, "model_dump"):
-        raw = cut_in.model_dump()
+def _cut_in_payload(cut_in: Any, *, span: ResolvedBeat) -> dict[str, Any]:
+    beat_start_s = span.start_s
+    beat_end_s = span.end_s
+    if isinstance(cut_in, PlannedCutIn):
+        beat_start_s = cut_in.beat_start_s
+        beat_end_s = cut_in.beat_end_s
+        cut_in = cut_in.cut_in
+
+    if isinstance(cut_in, CutIn):
+        raw = validate_cut_in(cut_in).model_dump(exclude_none=True)
+    elif hasattr(cut_in, "model_dump"):
+        raw = cut_in.model_dump(exclude_none=True)
     elif isinstance(cut_in, Mapping):
         raw = dict(cut_in)
     else:
         raw = {
             key: getattr(cut_in, key)
-            for key in ("type", "at_s", "until_s", "line", "image_prompt", "zoom_focus")
+            for key in (
+                "type",
+                "offset_s",
+                "dur_s",
+                "at_s",
+                "until_s",
+                "line",
+                "image_prompt",
+                "zoom_focus",
+            )
             if hasattr(cut_in, key)
         }
+    raw = {key: value for key, value in raw.items() if value is not None}
+    if "type" in raw:
+        raw["type"] = _wire_token(raw["type"])
+    offset_s = raw.pop("offset_s", None)
+    dur_s = raw.pop("dur_s", None)
+    if "at_s" not in raw and offset_s is not None:
+        raw["at_s"] = float(beat_start_s or 0.0) + float(offset_s)
+    if "until_s" not in raw and offset_s is not None and dur_s is not None:
+        until_s = float(raw["at_s"]) + float(dur_s)
+        if beat_end_s is not None:
+            until_s = min(until_s, float(beat_end_s))
+        raw["until_s"] = until_s
     return CutInSpec.model_validate(raw).model_dump(
         exclude_none=True,
         exclude_defaults=True,
     )
+
+
+def _wire_token(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    text = str(value)
+    aliases = {
+        "Black": "black",
+        "Join": "join",
+        "Trans": "trans",
+        "Zoom": "zoom",
+        "Visual": "visual",
+        "NoEffect": "none",
+        "NoEngagement": "none",
+        "NoCta": "none",
+    }
+    return aliases.get(text, text.lower())
 
 
 def _slug_title(text: str) -> str:
@@ -296,6 +367,7 @@ __all__ = [
     "DEFAULT_DURATION_BOUNDS_S",
     "DEFAULT_MODEL",
     "HOOKS_TARGET",
+    "PlannedCutIn",
     "ResolvedBeat",
     "build_hook_plan",
     "interrupt_to_marker_text",
