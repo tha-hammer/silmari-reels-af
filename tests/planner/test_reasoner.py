@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import urlparse
+
+import pytest
 
 from reel_af import app as app_mod
+from reel_af import storage as storage_mod
 from reel_af.app import transcript_to_plan
 from reel_af.dsl.compile import load_words
 from reel_af.planner.models import (
@@ -28,6 +34,8 @@ from reel_af.planner.models import (
 from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://www.youtube.com/watch?v=abc123"
+BUCKET = "reel-uploads-test"
+RUN_ID = "abc123456789"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
 SOURCE_QUOTE = (
     "They don't reason. They pattern-match at a scale that feels like reasoning. Right. "
@@ -141,7 +149,81 @@ def _fake_transcribe(source):
     return load_words(FIXTURES / "source.words.json")
 
 
-async def test_transcript_to_plan_returns_triple(tmp_path):
+class _FakeA1S3:
+    def __init__(
+        self,
+        *,
+        fail_put_key: str | None = None,
+        fail_presign_key: str | None = None,
+        url_by_key: dict[str, str] | None = None,
+    ):
+        self.fail_put_key = fail_put_key
+        self.fail_presign_key = fail_presign_key
+        self.url_by_key = url_by_key or {}
+        self.puts: list[dict] = []
+        self.bodies_by_key: dict[str, bytes] = {}
+
+    def put_object(self, *, Bucket, Key, Body):  # noqa: N803
+        if Key == self.fail_put_key:
+            raise OSError("put_object failed")
+        body = bytes(Body)
+        self.puts.append({"Bucket": Bucket, "Key": Key, "Body": body})
+        self.bodies_by_key[Key] = body
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):  # noqa: N803
+        assert operation == "get_object"
+        key = Params["Key"]
+        if key == self.fail_presign_key:
+            raise OSError("presign failed")
+        return self.url_by_key.get(
+            key,
+            f"https://s3.example/{Params['Bucket']}/{key}?X-Amz-Expires={ExpiresIn}",
+        )
+
+
+def _write_fake_artifacts(out_dir: Path, *, missing: str | None = None) -> dict:
+    out_dir.mkdir(parents=True, exist_ok=True)
+    composite = out_dir / "composite.ts.md"
+    words = out_dir / "transcript.words.json"
+    hook = out_dir / "hook-plan.json"
+    if missing != "composite_ref":
+        composite.write_text("00:00:04.120  They don't reason.\n", encoding="utf-8")
+    if missing != "words_ref":
+        words.write_text('{"schema_version":"1","words":[]}', encoding="utf-8")
+    if missing != "hook_ref":
+        hook.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "clips": [
+                        {
+                            "idx": 1,
+                            "composite_ref": str(composite),
+                            "idempotency_key": "immutable-key",
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+    sidecar = out_dir / "strategy.json"
+    sidecar.write_text('{"debug":true}', encoding="utf-8")
+    return {
+        "composite_ref": str(composite),
+        "words_ref": str(words),
+        "hook_ref": str(hook),
+        "strategy_ref": str(sidecar),
+        "clip_count": 1,
+    }
+
+
+def _hosted(ref: str) -> bool:
+    parsed = urlparse(ref)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+async def test_transcript_to_plan_returns_triple(tmp_path, monkeypatch):
+    monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)
     out = await transcript_to_plan(
         SRC,
         register="educational",
@@ -151,6 +233,82 @@ async def test_transcript_to_plan_returns_triple(tmp_path):
     )
 
     assert set(out) >= {"composite_ref", "words_ref", "hook_ref"}
+
+
+async def test_transcript_to_plan_default_writer_publishes_when_bucket_configured(
+    tmp_path, monkeypatch
+):
+    from reel_af.planner import pipeline as pipeline_mod
+
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    monkeypatch.setattr(app_mod.uuid, "uuid4", lambda: SimpleNamespace(hex=f"{RUN_ID}ffff"))
+    s3 = _FakeA1S3()
+    monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
+
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir):
+        return _write_fake_artifacts(Path(out_dir))
+
+    monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
+
+    out = await transcript_to_plan(
+        SRC,
+        transcribe=lambda source: object(),
+        out_dir=str(tmp_path / "producer"),
+    )
+
+    assert _hosted(out["composite_ref"])
+    assert _hosted(out["words_ref"])
+    assert _hosted(out["hook_ref"])
+    assert [put["Key"] for put in s3.puts] == [
+        f"plans/{RUN_ID}/composite.ts.md",
+        f"plans/{RUN_ID}/transcript.words.json",
+        f"plans/{RUN_ID}/hook-plan.json",
+    ]
+    assert "strategy_ref" not in out
+    assert out["clip_count"] == 1
+    assert str(tmp_path) not in json.dumps(out)
+    uploaded_hook = json.loads(s3.bodies_by_key[f"plans/{RUN_ID}/hook-plan.json"].decode())
+    assert uploaded_hook["clips"][0]["composite_ref"] == out["composite_ref"]
+    assert uploaded_hook["clips"][0]["idempotency_key"] == "immutable-key"
+    assert str(tmp_path) not in json.dumps(uploaded_hook)
+
+
+@pytest.mark.parametrize(
+    ("missing", "fail_put_key", "fail_presign_key", "url_by_key"),
+    [
+        ("composite_ref", None, None, None),
+        (None, f"plans/{RUN_ID}/transcript.words.json", None, None),
+        (None, None, f"plans/{RUN_ID}/composite.ts.md", None),
+        (None, None, None, {f"plans/{RUN_ID}/composite.ts.md": "https://"}),
+    ],
+)
+async def test_transcript_to_plan_publication_failures_map_to_artifact_unavailable(
+    tmp_path, monkeypatch, missing, fail_put_key, fail_presign_key, url_by_key
+):
+    from reel_af.planner import pipeline as pipeline_mod
+
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    monkeypatch.setattr(app_mod.uuid, "uuid4", lambda: SimpleNamespace(hex=f"{RUN_ID}ffff"))
+    s3 = _FakeA1S3(
+        fail_put_key=fail_put_key,
+        fail_presign_key=fail_presign_key,
+        url_by_key=url_by_key,
+    )
+    monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
+
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir):
+        return _write_fake_artifacts(Path(out_dir), missing=missing)
+
+    monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
+
+    out = await transcript_to_plan(
+        SRC,
+        transcribe=lambda source: object(),
+        out_dir=str(tmp_path / "producer"),
+    )
+
+    assert out["error"] == "dsl_artifact_unavailable"
+    assert str(tmp_path) not in json.dumps(out)
 
 
 async def test_transcript_to_plan_rejects_non_http():

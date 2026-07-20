@@ -1784,8 +1784,14 @@ async def transcript_to_plan(
             llm=llm,
             out_dir=work,
         )
-        if artifact_writer is not None and "error" not in result:
-            maybe_result = artifact_writer(result)
+        if "error" not in result:
+            writer = artifact_writer
+            if writer is None:
+                from reel_af.storage import publish_a1_artifacts
+
+                def writer(artifacts):
+                    return publish_a1_artifacts(artifacts, run_id=run_id)
+            maybe_result = writer(result)
             result = await maybe_result if inspect.isawaitable(maybe_result) else maybe_result
         return result
     except Exception as exc:  # noqa: BLE001 — reasoners return errors, never raise

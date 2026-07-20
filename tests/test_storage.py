@@ -5,9 +5,27 @@ Injected fake S3 client (no boto3 / network). Fail-soft when unconfigured or mis
 
 from __future__ import annotations
 
+import json
+from urllib.parse import urlparse
+
+import pytest
+
 from reel_af import storage
+from reel_af.app import _resolve_artifact_ref
 
 BUCKET = "reel-uploads-test"
+CORE_KEYS = [
+    "plans/abc123/composite.ts.md",
+    "plans/abc123/transcript.words.json",
+    "plans/abc123/hook-plan.json",
+]
+SIDECAR_REF_KEYS = {
+    "mined_candidates_ref",
+    "accepted_candidates_ref",
+    "strategy_ref",
+    "blueprint_ref",
+    "script_coherence_ref",
+}
 
 
 class FakeS3:
@@ -22,6 +40,87 @@ class FakeS3:
         assert operation == "get_object"
         self.presigned.append((Params["Bucket"], Params["Key"], ExpiresIn))
         return f"https://s3.example/{Params['Bucket']}/{Params['Key']}?X-Amz-Expires={ExpiresIn}"
+
+
+class FakeA1S3:
+    def __init__(
+        self,
+        *,
+        fail_put_key: str | None = None,
+        fail_presign_key: str | None = None,
+        url_by_key: dict[str, str] | None = None,
+    ):
+        self.fail_put_key = fail_put_key
+        self.fail_presign_key = fail_presign_key
+        self.url_by_key = url_by_key or {}
+        self.puts: list[dict] = []
+        self.presigned: list[dict] = []
+        self.bodies_by_key: dict[str, bytes] = {}
+        self.bodies_by_url: dict[str, bytes] = {}
+
+    def put_object(self, *, Bucket, Key, Body):  # noqa: N803 (boto3 kwarg)
+        if Key == self.fail_put_key:
+            raise OSError("put_object failed")
+        body = bytes(Body)
+        self.puts.append({"Bucket": Bucket, "Key": Key, "Body": body})
+        self.bodies_by_key[Key] = body
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):  # noqa: N803
+        assert operation == "get_object"
+        key = Params["Key"]
+        if key == self.fail_presign_key:
+            raise OSError("presign failed")
+        self.presigned.append(
+            {"Bucket": Params["Bucket"], "Key": key, "ExpiresIn": ExpiresIn}
+        )
+        url = self.url_by_key.get(
+            key,
+            f"https://s3.example/{Params['Bucket']}/{key}?X-Amz-Expires={ExpiresIn}",
+        )
+        self.bodies_by_url[url] = self.bodies_by_key[key]
+        return url
+
+
+def _seed_a1_result(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    composite = tmp_path / "composite.ts.md"
+    words = tmp_path / "transcript.words.json"
+    hook = tmp_path / "hook-plan.json"
+    composite.write_text("00:00:04.120  They don't reason.\n", encoding="utf-8")
+    words.write_text('{"schema_version":"1","words":[]}', encoding="utf-8")
+    hook.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "clips": [
+                    {
+                        "idx": 1,
+                        "composite_ref": str(composite),
+                        "idempotency_key": "immutable-local-ref-derived-key",
+                        "hook": "They don't reason",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = {
+        "composite_ref": str(composite),
+        "words_ref": str(words),
+        "hook_ref": str(hook),
+        "clip_count": 1,
+    }
+    for key in SIDECAR_REF_KEYS:
+        sidecar = tmp_path / f"{key}.json"
+        sidecar.write_text('{"debug":true}', encoding="utf-8")
+        result[key] = str(sidecar)
+    return result, {"composite": composite, "words": words, "hook": hook}
+
+
+def _assert_hosted(ref: str) -> None:
+    parsed = urlparse(ref)
+    assert parsed.scheme in {"http", "https"}
+    assert parsed.netloc
 
 
 def test_upload_reel_returns_presigned_url_under_run_id(tmp_path, monkeypatch):
@@ -92,3 +191,156 @@ def test_upload_reel_filename_cannot_escape_key_prefix(tmp_path, monkeypatch):
     storage.upload_reel(reel, run_id="r", filename="../../evil.mp4", client_factory=lambda: s3)
 
     assert s3.uploaded[0][2] == "outputs/r/evil.mp4"  # basename only, no path escape
+
+
+def test_publish_a1_artifacts_uploads_core_with_fixed_keys_and_rewrites_hook(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, paths = _seed_a1_result(tmp_path)
+    original = dict(result)
+    s3 = FakeA1S3()
+
+    out = storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert out is not result
+    assert result == original
+    assert [put["Key"] for put in s3.puts] == CORE_KEYS
+    assert s3.puts[0] == {
+        "Bucket": BUCKET,
+        "Key": "plans/abc123/composite.ts.md",
+        "Body": paths["composite"].read_bytes(),
+    }
+    assert s3.puts[1] == {
+        "Bucket": BUCKET,
+        "Key": "plans/abc123/transcript.words.json",
+        "Body": paths["words"].read_bytes(),
+    }
+    for field in ("composite_ref", "words_ref", "hook_ref"):
+        _assert_hosted(out[field])
+    assert out["clip_count"] == 1
+    assert not (SIDECAR_REF_KEYS & set(out))
+    assert str(tmp_path) not in json.dumps(out)
+
+    uploaded_hook = json.loads(s3.bodies_by_key["plans/abc123/hook-plan.json"].decode())
+    clip = uploaded_hook["clips"][0]
+    assert clip["composite_ref"] == out["composite_ref"]
+    assert clip["idempotency_key"] == "immutable-local-ref-derived-key"
+    assert str(paths["composite"]) not in json.dumps(uploaded_hook)
+    assert out["hook_ref"] == (
+        f"https://s3.example/{BUCKET}/plans/abc123/hook-plan.json?X-Amz-Expires=86400"
+    )
+
+
+def test_publish_a1_artifacts_no_bucket_preserves_local_refs_without_client(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)
+    result, _paths = _seed_a1_result(tmp_path)
+
+    def fail_client():
+        raise AssertionError("S3 client must not be constructed without a bucket")
+
+    out = storage.publish_a1_artifacts(result, run_id="abc123", client_factory=fail_client)
+
+    assert out == result
+    assert out is not result
+    assert SIDECAR_REF_KEYS <= set(out)
+
+
+@pytest.mark.parametrize("field", ["composite_ref", "words_ref", "hook_ref"])
+def test_publish_a1_artifacts_missing_core_file_raises_without_local_path(
+    tmp_path, monkeypatch, field
+):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, _paths = _seed_a1_result(tmp_path)
+    result[field] = str(tmp_path / "missing-artifact")
+    s3 = FakeA1S3()
+
+    with pytest.raises(Exception) as excinfo:
+        storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert field in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+    assert s3.puts == []
+
+
+def test_publish_a1_artifacts_upload_failure_raises_in_bucket_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, _paths = _seed_a1_result(tmp_path)
+    s3 = FakeA1S3(fail_put_key="plans/abc123/transcript.words.json")
+
+    with pytest.raises(Exception) as excinfo:
+        storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert "put_object failed" in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+    assert [put["Key"] for put in s3.puts] == ["plans/abc123/composite.ts.md"]
+
+
+def test_publish_a1_artifacts_presign_failure_raises_in_bucket_mode(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, _paths = _seed_a1_result(tmp_path)
+    s3 = FakeA1S3(fail_presign_key="plans/abc123/composite.ts.md")
+
+    with pytest.raises(Exception) as excinfo:
+        storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert "presign failed" in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+def test_publish_a1_artifacts_malformed_presign_url_raises(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, _paths = _seed_a1_result(tmp_path)
+    s3 = FakeA1S3(url_by_key={"plans/abc123/composite.ts.md": "https://"})
+
+    with pytest.raises(Exception) as excinfo:
+        storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert "composite_ref" in str(excinfo.value)
+    assert str(tmp_path) not in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("delivery_ttl", "artifact_ttl", "expected"),
+    [(None, None, 86400), ("240", None, 240), ("240", "900", 900)],
+)
+def test_publish_a1_artifacts_uses_named_artifact_ttl_policy(
+    tmp_path, monkeypatch, delivery_ttl, artifact_ttl, expected
+):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    if delivery_ttl is None:
+        monkeypatch.delenv("REEL_DELIVERY_TTL_S", raising=False)
+    else:
+        monkeypatch.setenv("REEL_DELIVERY_TTL_S", delivery_ttl)
+    if artifact_ttl is None:
+        monkeypatch.delenv("REEL_ARTIFACT_TTL_S", raising=False)
+    else:
+        monkeypatch.setenv("REEL_ARTIFACT_TTL_S", artifact_ttl)
+    result, _paths = _seed_a1_result(tmp_path)
+    s3 = FakeA1S3()
+
+    storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert {call["ExpiresIn"] for call in s3.presigned} == {expected}
+
+
+def test_published_a1_refs_resolve_through_artifact_resolver(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, _paths = _seed_a1_result(tmp_path / "producer")
+    s3 = FakeA1S3()
+    published = storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+    dest = tmp_path / "consumer"
+    dest.mkdir()
+
+    for field, filename, key in [
+        ("composite_ref", "composite.ts.md", "plans/abc123/composite.ts.md"),
+        ("words_ref", "transcript.words.json", "plans/abc123/transcript.words.json"),
+        ("hook_ref", "hook-plan.json", "plans/abc123/hook-plan.json"),
+    ]:
+        resolved = _resolve_artifact_ref(
+            published[field], dest, filename, lambda url: s3.bodies_by_url[url]
+        )
+        assert resolved == dest / filename
+        assert resolved.read_bytes() == s3.bodies_by_key[key]

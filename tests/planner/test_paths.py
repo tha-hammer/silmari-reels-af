@@ -74,10 +74,19 @@ def test_absolute_env_output_root_is_honored(monkeypatch, tmp_path):
 
 async def test_transcript_to_plan_default_out_dir_uses_resources_runs(monkeypatch, tmp_path):
     from reel_af.planner import pipeline as pipeline_mod
+    from reel_af import storage as storage_mod
 
     monkeypatch.delenv(REEL_AF_OUTPUT_ROOT_ENV, raising=False)
+    monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)
     monkeypatch.setattr(paths_mod, "_PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(app_mod.uuid, "uuid4", lambda: SimpleNamespace(hex="abc123456789ffff"))
+    monkeypatch.setattr(
+        storage_mod,
+        "_client",
+        lambda client_factory=None: (_ for _ in ()).throw(
+            AssertionError("S3 client must not be constructed without a bucket")
+        ),
+    )
 
     captured: list[Path] = []
 
@@ -95,6 +104,7 @@ async def test_transcript_to_plan_default_out_dir_uses_resources_runs(monkeypatc
             "composite_ref": str(Path(out_dir) / "composite.ts.md"),
             "words_ref": str(Path(out_dir) / "transcript.words.json"),
             "hook_ref": str(Path(out_dir) / "hook-plan.json"),
+            "strategy_ref": str(Path(out_dir) / "strategy.json"),
         }
 
     monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
@@ -104,6 +114,7 @@ async def test_transcript_to_plan_default_out_dir_uses_resources_runs(monkeypatc
     expected = tmp_path / "resources" / "runs" / "transcript-to-plan-abc123456789"
     assert captured == [expected]
     assert out["composite_ref"] == str(expected / "composite.ts.md")
+    assert out["strategy_ref"] == str(expected / "strategy.json")
 
 
 async def test_dsl_hooks_to_reels_default_out_dir_uses_resources_runs(monkeypatch, tmp_path):

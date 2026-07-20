@@ -29,10 +29,12 @@ import asyncio
 import json
 import shutil
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytest
 
 from reel_af import app as app_mod
+from reel_af import storage as storage_mod
 from reel_af.app import dsl_hooks_to_reels
 from reel_af.dsl.models import A1_DELIVERY_UNAVAILABLE
 
@@ -148,6 +150,40 @@ def _uploader_none(local_path, *, run_id, filename=None, **kw):
     return None
 
 
+class _DefaultUploaderFakeS3:
+    def __init__(self):
+        self.uploaded: list[tuple[str, str, str]] = []
+
+    def upload_file(self, filename, bucket, key):
+        self.uploaded.append((filename, bucket, key))
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):  # noqa: N803
+        assert operation == "get_object"
+        return f"https://s3.example/{Params['Bucket']}/{Params['Key']}?ttl={ExpiresIn}"
+
+
+def _patch_fast_render(monkeypatch, tmp_path):
+    def fake_download_segments(plan, out_dir, fetch_segment):
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return []
+
+    async def fake_stitch_footage_reel(plan, assets, out_dir, *, run_id):
+        path = Path(out_dir) / "base.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"base-video")
+        return path
+
+    async def fake_finish_reel(base, ctx, cfg, *, out_dir, raw):
+        path = Path(out_dir) / "final.mp4"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"final-video")
+        return path
+
+    monkeypatch.setattr(app_mod, "download_segments", fake_download_segments)
+    monkeypatch.setattr(app_mod, "stitch_footage_reel", fake_stitch_footage_reel)
+    monkeypatch.setattr(app_mod, "finish_reel", fake_finish_reel)
+
+
 def _normalize(result: dict) -> dict:
     """Strip only non-deterministic fields. NEVER strips download_url/error — those
     are the contract B17 pins."""
@@ -201,6 +237,61 @@ def test_worker_without_bucket_is_terminal_delivery_unavailable(a1_refs, lavfi_s
     assert "download_url" not in result
     # Must NOT fall back to a node-local path (cf. app.py research_to_reel's
     # `download_url or video_path` anti-pattern).
+    assert "video_path" not in result
+
+
+def test_worker_default_uploader_delivers_with_configured_bucket(
+    a1_refs, tmp_path, monkeypatch
+):
+    """The production default uploader path is storage.upload_reel, not an injected callable."""
+    monkeypatch.setenv("REEL_BUCKET_NAME", "reel-uploads-test")
+    s3 = _DefaultUploaderFakeS3()
+    monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
+    _patch_fast_render(monkeypatch, tmp_path)
+
+    result = asyncio.run(
+        dsl_hooks_to_reels(
+            **a1_refs,
+            out_dir=str(tmp_path / "work"),
+            fetch_segment=lambda req: pytest.fail("download_segments is faked"),
+            text_provider=_FakeTextProvider(),
+            image_provider=_FakeImageProvider(),
+        )
+    )
+
+    assert "error" not in result, result
+    parsed = urlparse(result["download_url"])
+    assert parsed.scheme in {"http", "https"}
+    assert parsed.netloc
+    assert result["target_workflow"] == "dsl_hooks"
+    assert len(s3.uploaded) == 1
+    assert s3.uploaded[0][1] == "reel-uploads-test"
+    assert s3.uploaded[0][2].startswith(f"outputs/{result['run_id']}/")
+
+
+def test_worker_default_uploader_without_bucket_is_delivery_unavailable(
+    a1_refs, tmp_path, monkeypatch
+):
+    monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)
+    monkeypatch.setattr(
+        storage_mod,
+        "_client",
+        lambda client_factory=None: pytest.fail("S3 client must not be constructed"),
+    )
+    _patch_fast_render(monkeypatch, tmp_path)
+
+    result = asyncio.run(
+        dsl_hooks_to_reels(
+            **a1_refs,
+            out_dir=str(tmp_path / "work"),
+            fetch_segment=lambda req: pytest.fail("download_segments is faked"),
+            text_provider=_FakeTextProvider(),
+            image_provider=_FakeImageProvider(),
+        )
+    )
+
+    assert result["error"] == A1_DELIVERY_UNAVAILABLE
+    assert "download_url" not in result
     assert "video_path" not in result
 
 
@@ -302,6 +393,28 @@ def test_worker_remote_artifact_fetch_failure_fails_closed(a1_refs, tmp_path):
 
     assert result["error"] == "dsl_artifact_unavailable"
     assert "502 from A1" in result["detail"]
+
+
+def test_worker_expired_presigned_artifact_fetch_fails_as_artifact_unavailable(a1_refs, tmp_path):
+    remote = {
+        **a1_refs,
+        "composite_ref": "https://s3.example/reel-uploads/plans/x/composite.ts.md?expired=1",
+        "words_ref": "https://s3.example/reel-uploads/plans/x/transcript.words.json?expired=1",
+        "hook_ref": "https://s3.example/reel-uploads/plans/x/hook-plan.json?expired=1",
+    }
+
+    result = asyncio.run(
+        dsl_hooks_to_reels(
+            **remote,
+            out_dir=str(tmp_path / "work"),
+            artifact_fetch=lambda url: (_ for _ in ()).throw(OSError("403 expired presign")),
+            fetch_segment=lambda req: pytest.fail("must not fetch segment"),
+            uploader=lambda *a, **k: pytest.fail("must not upload"),
+        )
+    )
+
+    assert result["error"] == "dsl_artifact_unavailable"
+    assert "403 expired presign" in result["detail"]
 
 
 def test_worker_rejects_non_http_source_url(a1_refs, tmp_path):

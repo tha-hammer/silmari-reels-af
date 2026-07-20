@@ -118,6 +118,27 @@ def test_cp_input_carries_exactly_the_artifact_refs():
     }
 
 
+def test_published_https_artifact_refs_are_accepted_unchanged():
+    body = {
+        "source_url": A1_SOURCE_URL,
+        "composite_ref": (
+            "https://s3.example/reel-uploads/plans/abc123/composite.ts.md?X-Amz-Expires=86400"
+        ),
+        "words_ref": (
+            "https://s3.example/reel-uploads/plans/abc123/transcript.words.json"
+            "?X-Amz-Expires=86400"
+        ),
+        "hook_ref": (
+            "https://s3.example/reel-uploads/plans/abc123/hook-plan.json?X-Amz-Expires=86400"
+        ),
+        "clip_idx": 1,
+    }
+
+    sub = build_submission(TARGET_DSL_HOOKS, {"input": body})
+
+    assert sub.cp_input == body
+
+
 def test_dispatch_body_is_identity_free_and_metadata_free():
     repo, cp = FakeReelJobRepo(), FakeControlPlane()
     resp = _client(_deps(reel_jobs=repo, control_plane=cp)).post(

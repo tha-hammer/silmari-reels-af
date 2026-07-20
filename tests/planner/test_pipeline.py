@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from reel_af import app as app_mod
+from reel_af import storage as storage_mod
 from reel_af.app import dsl_hooks_to_reels
 from reel_af.dsl.compile import compile_composite, load_words
 from reel_af.dsl.composite import read_composite
@@ -46,6 +47,7 @@ from reel_af.planner.pipeline import (
 from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://www.youtube.com/watch?v=abc123"
+BUCKET = "reel-uploads-test"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
 SOURCE_QUOTE = (
     "They don't reason. They pattern-match at a scale that feels like reasoning. Right. "
@@ -109,6 +111,24 @@ class _FakePlannerLLM:
             idx = min(self.coherence_calls - 1, len(self._coherence_reports) - 1)
             return self._coherence_reports[idx]
         return _coherent_report(len(transitions))
+
+
+class _FakeA1S3:
+    def __init__(self):
+        self.puts: list[dict] = []
+        self.bodies_by_key: dict[str, bytes] = {}
+        self.bodies_by_url: dict[str, bytes] = {}
+
+    def put_object(self, *, Bucket, Key, Body):  # noqa: N803
+        body = bytes(Body)
+        self.puts.append({"Bucket": Bucket, "Key": Key, "Body": body})
+        self.bodies_by_key[Key] = body
+
+    def generate_presigned_url(self, operation, Params, ExpiresIn):  # noqa: N803
+        assert operation == "get_object"
+        url = f"https://s3.example/{Params['Bucket']}/{Params['Key']}?ttl={ExpiresIn}"
+        self.bodies_by_url[url] = self.bodies_by_key[Params["Key"]]
+        return url
 
 
 def _blueprint(*, broken: bool = False) -> ReelBlueprint:
@@ -391,6 +411,70 @@ async def test_produced_triple_compiles_through_real_consumer(tmp_path, monkeypa
     assert out.get("error") != "dsl_compile_failed", out
     assert out["target_workflow"] == DSL_HOOKS_WORKFLOW
     assert fetched_segments
+
+
+async def test_published_triple_resolves_through_real_consumer(tmp_path, monkeypatch):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    fetched_artifacts: list[str] = []
+    fetched_segments = []
+
+    def _fake_fetch_segment(request):
+        fetched_segments.append(request.segment_id)
+        request.target_path.write_bytes(b"not-real-video")
+        return request.target_path
+
+    async def _fake_stitch_footage_reel(*args, **kwargs):
+        path = tmp_path / "base.mp4"
+        path.write_bytes(b"not-real-video")
+        return path
+
+    async def _fake_finish_reel(*args, **kwargs):
+        path = tmp_path / "final.mp4"
+        path.write_bytes(b"not-real-video")
+        return path
+
+    monkeypatch.setattr(app_mod, "stitch_footage_reel", _fake_stitch_footage_reel)
+    monkeypatch.setattr(app_mod, "finish_reel", _fake_finish_reel)
+
+    res = await plan(
+        SRC,
+        words=_seed_words(),
+        register="educational",
+        bounds={"min_s": 15, "max_s": 45},
+        llm=_FakePlannerLLM(_blueprint()),
+        out_dir=tmp_path / "producer",
+    )
+    s3 = _FakeA1S3()
+    published = storage_mod.publish_a1_artifacts(res, run_id="abc123", client_factory=lambda: s3)
+
+    def _artifact_fetch(url):
+        fetched_artifacts.append(url)
+        return s3.bodies_by_url[url]
+
+    out = await dsl_hooks_to_reels(
+        SRC,
+        published["composite_ref"],
+        published["words_ref"],
+        published["hook_ref"],
+        clip_idx=1,
+        out_dir=str(tmp_path / "consume"),
+        fetch_segment=_fake_fetch_segment,
+        uploader=lambda *args, **kwargs: "https://bucket.example.com/reel.mp4",
+        text_provider=object(),
+        image_provider=object(),
+        artifact_fetch=_artifact_fetch,
+    )
+
+    assert fetched_artifacts == [
+        published["composite_ref"],
+        published["words_ref"],
+        published["hook_ref"],
+    ]
+    assert out.get("error") != "dsl_compile_failed", out
+    assert out["target_workflow"] == DSL_HOOKS_WORKFLOW
+    assert out["download_url"] == "https://bucket.example.com/reel.mp4"
+    assert fetched_segments
+    assert str(tmp_path / "producer") not in json.dumps(out)
 
 
 async def test_below_floor_then_good_compiles(tmp_path):
