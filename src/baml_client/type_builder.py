@@ -20,13 +20,13 @@ from .globals import DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIM
 class TypeBuilder(type_builder.TypeBuilder):
     def __init__(self):
         super().__init__(classes=set(
-          ["ArcPlan","Beat","CandidateSpan","CtaPlan","CutIn","DurationBounds","DurationPolicy","DurationRange","Engagement","Hook","Interrupt","LoopPlan","PlannerCandidate","ReelBlueprint","ReelStrategy",]
+          ["ArcPlan","Beat","CandidateSpan","CandidateTranscriptContext","CtaPlan","CutIn","DurationBounds","DurationPolicy","DurationRange","Engagement","Hook","Interrupt","LoopPlan","PlannerCandidate","ReelBlueprint","ReelStrategy","ScriptBeatText","ScriptCoherenceReport","ScriptTransition","ScriptTransitionReview",]
         ), enums=set(
-          ["BeatRole","CtaHardness","CutInKind","EngagementKind","HookType","InterruptKind","Template","XfadeEffect",]
+          ["BeatRole","CtaHardness","CutInKind","EngagementKind","HookType","InterruptKind","ScriptCoherenceFixAction","ScriptTransitionVerdict","Template","XfadeEffect",]
         ), runtime=DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIME)
 
     # #########################################################################
-    # Generated enums 8
+    # Generated enums 10
     # #########################################################################
 
     @property
@@ -54,6 +54,14 @@ class TypeBuilder(type_builder.TypeBuilder):
         return InterruptKindViewer(self)
 
     @property
+    def ScriptCoherenceFixAction(self) -> "ScriptCoherenceFixActionViewer":
+        return ScriptCoherenceFixActionViewer(self)
+
+    @property
+    def ScriptTransitionVerdict(self) -> "ScriptTransitionVerdictViewer":
+        return ScriptTransitionVerdictViewer(self)
+
+    @property
     def Template(self) -> "TemplateViewer":
         return TemplateViewer(self)
 
@@ -63,7 +71,7 @@ class TypeBuilder(type_builder.TypeBuilder):
 
 
     # #########################################################################
-    # Generated classes 15
+    # Generated classes 20
     # #########################################################################
 
     @property
@@ -77,6 +85,10 @@ class TypeBuilder(type_builder.TypeBuilder):
     @property
     def CandidateSpan(self) -> "CandidateSpanViewer":
         return CandidateSpanViewer(self)
+
+    @property
+    def CandidateTranscriptContext(self) -> "CandidateTranscriptContextViewer":
+        return CandidateTranscriptContextViewer(self)
 
     @property
     def CtaPlan(self) -> "CtaPlanViewer":
@@ -126,10 +138,26 @@ class TypeBuilder(type_builder.TypeBuilder):
     def ReelStrategy(self) -> "ReelStrategyViewer":
         return ReelStrategyViewer(self)
 
+    @property
+    def ScriptBeatText(self) -> "ScriptBeatTextViewer":
+        return ScriptBeatTextViewer(self)
+
+    @property
+    def ScriptCoherenceReport(self) -> "ScriptCoherenceReportViewer":
+        return ScriptCoherenceReportViewer(self)
+
+    @property
+    def ScriptTransition(self) -> "ScriptTransitionViewer":
+        return ScriptTransitionViewer(self)
+
+    @property
+    def ScriptTransitionReview(self) -> "ScriptTransitionReviewViewer":
+        return ScriptTransitionReviewViewer(self)
+
 
 
 # #########################################################################
-# Generated enums 8
+# Generated enums 10
 # #########################################################################
 
 class BeatRoleAst:
@@ -448,6 +476,114 @@ class InterruptKindValues:
     
 
 
+class ScriptCoherenceFixActionAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.enum("ScriptCoherenceFixAction")
+        self._values: typing.Set[str] = set([  "Keep",  "Bridge",  "Drop",  "Reorder",  "TrimBoundary",  ])
+        self._vals = ScriptCoherenceFixActionValues(self._bldr, self._values)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def values(self) -> "ScriptCoherenceFixActionValues":
+        return self._vals
+
+
+class ScriptCoherenceFixActionViewer(ScriptCoherenceFixActionAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_values(self) -> typing.List[typing.Tuple[str, type_builder.EnumValueViewer]]:
+        return [(name, type_builder.EnumValueViewer(self._bldr.value(name))) for name in self._values]
+    
+
+class ScriptCoherenceFixActionValues:
+    def __init__(self, enum_bldr: baml_py.EnumBuilder, values: typing.Set[str]):
+        self.__bldr = enum_bldr
+        self.__values = values # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def Keep(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("Keep"))
+    
+    @property
+    def Bridge(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("Bridge"))
+    
+    @property
+    def Drop(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("Drop"))
+    
+    @property
+    def Reorder(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("Reorder"))
+    
+    @property
+    def TrimBoundary(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("TrimBoundary"))
+    
+    
+
+
+class ScriptTransitionVerdictAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.enum("ScriptTransitionVerdict")
+        self._values: typing.Set[str] = set([  "Coherent",  "NeedsBridge",  "UnbridgedJump",  "NonSequitur",  "NeedsCleanBoundary",  ])
+        self._vals = ScriptTransitionVerdictValues(self._bldr, self._values)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def values(self) -> "ScriptTransitionVerdictValues":
+        return self._vals
+
+
+class ScriptTransitionVerdictViewer(ScriptTransitionVerdictAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_values(self) -> typing.List[typing.Tuple[str, type_builder.EnumValueViewer]]:
+        return [(name, type_builder.EnumValueViewer(self._bldr.value(name))) for name in self._values]
+    
+
+class ScriptTransitionVerdictValues:
+    def __init__(self, enum_bldr: baml_py.EnumBuilder, values: typing.Set[str]):
+        self.__bldr = enum_bldr
+        self.__values = values # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def Coherent(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("Coherent"))
+    
+    @property
+    def NeedsBridge(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("NeedsBridge"))
+    
+    @property
+    def UnbridgedJump(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("UnbridgedJump"))
+    
+    @property
+    def NonSequitur(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("NonSequitur"))
+    
+    @property
+    def NeedsCleanBoundary(self) -> type_builder.EnumValueViewer:
+        return type_builder.EnumValueViewer(self.__bldr.value("NeedsCleanBoundary"))
+    
+    
+
+
 class TemplateAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
@@ -594,7 +730,7 @@ class XfadeEffectValues:
 
 
 # #########################################################################
-# Generated classes 15
+# Generated classes 20
 # #########################################################################
 
 class ArcPlanAst:
@@ -660,7 +796,7 @@ class BeatAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("Beat")
-        self._properties: typing.Set[str] = set([  "role",  "span_quote",  "candidate_id",  "occurrence_index",  "max_len_s",  "completion_role",  "completion_criterion_ids",  "cutin",  "interrupt_out",  "engagement",  ])
+        self._properties: typing.Set[str] = set([  "role",  "span_quote",  "candidate_id",  "occurrence_index",  "max_len_s",  "rationale",  "completion_role",  "completion_criterion_ids",  "cutin",  "interrupt_out",  "engagement",  ])
         self._props = BeatProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -707,6 +843,10 @@ class BeatProperties:
     @property
     def max_len_s(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("max_len_s"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
     
     @property
     def completion_role(self) -> type_builder.ClassPropertyViewer:
@@ -810,6 +950,85 @@ class CandidateSpanProperties:
     @property
     def rationale(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
+    
+
+
+class CandidateTranscriptContextAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("CandidateTranscriptContext")
+        self._properties: typing.Set[str] = set([  "candidate_id",  "occurrence_index",  "start_s",  "end_s",  "before_text",  "after_text",  "source_neighborhood",  "prev_candidate_id",  "next_candidate_id",  "gap_to_prev_s",  "gap_to_next_s",  ])
+        self._props = CandidateTranscriptContextProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "CandidateTranscriptContextProperties":
+        return self._props
+
+
+class CandidateTranscriptContextViewer(CandidateTranscriptContextAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class CandidateTranscriptContextProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("candidate_id"))
+    
+    @property
+    def occurrence_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("occurrence_index"))
+    
+    @property
+    def start_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("start_s"))
+    
+    @property
+    def end_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("end_s"))
+    
+    @property
+    def before_text(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("before_text"))
+    
+    @property
+    def after_text(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("after_text"))
+    
+    @property
+    def source_neighborhood(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_neighborhood"))
+    
+    @property
+    def prev_candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("prev_candidate_id"))
+    
+    @property
+    def next_candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("next_candidate_id"))
+    
+    @property
+    def gap_to_prev_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("gap_to_prev_s"))
+    
+    @property
+    def gap_to_next_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("gap_to_next_s"))
     
     
 
@@ -1510,6 +1729,270 @@ class ReelStrategyProperties:
     @property
     def rationale(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
+    
+
+
+class ScriptBeatTextAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("ScriptBeatText")
+        self._properties: typing.Set[str] = set([  "index",  "role",  "candidate_id",  "occurrence_index",  "span_quote",  "start_s",  "end_s",  "rationale",  ])
+        self._props = ScriptBeatTextProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "ScriptBeatTextProperties":
+        return self._props
+
+
+class ScriptBeatTextViewer(ScriptBeatTextAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class ScriptBeatTextProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("index"))
+    
+    @property
+    def role(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("role"))
+    
+    @property
+    def candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("candidate_id"))
+    
+    @property
+    def occurrence_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("occurrence_index"))
+    
+    @property
+    def span_quote(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("span_quote"))
+    
+    @property
+    def start_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("start_s"))
+    
+    @property
+    def end_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("end_s"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
+    
+
+
+class ScriptCoherenceReportAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("ScriptCoherenceReport")
+        self._properties: typing.Set[str] = set([  "coherent",  "transitions",  "overall_rationale",  "repair_hint",  ])
+        self._props = ScriptCoherenceReportProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "ScriptCoherenceReportProperties":
+        return self._props
+
+
+class ScriptCoherenceReportViewer(ScriptCoherenceReportAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class ScriptCoherenceReportProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def coherent(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("coherent"))
+    
+    @property
+    def transitions(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("transitions"))
+    
+    @property
+    def overall_rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("overall_rationale"))
+    
+    @property
+    def repair_hint(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("repair_hint"))
+    
+    
+
+
+class ScriptTransitionAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("ScriptTransition")
+        self._properties: typing.Set[str] = set([  "index",  "from_beat_index",  "to_beat_index",  "from_candidate_id",  "to_candidate_id",  "from_text",  "to_text",  "source_gap_s",  "connective_text",  ])
+        self._props = ScriptTransitionProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "ScriptTransitionProperties":
+        return self._props
+
+
+class ScriptTransitionViewer(ScriptTransitionAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class ScriptTransitionProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("index"))
+    
+    @property
+    def from_beat_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("from_beat_index"))
+    
+    @property
+    def to_beat_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("to_beat_index"))
+    
+    @property
+    def from_candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("from_candidate_id"))
+    
+    @property
+    def to_candidate_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("to_candidate_id"))
+    
+    @property
+    def from_text(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("from_text"))
+    
+    @property
+    def to_text(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("to_text"))
+    
+    @property
+    def source_gap_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_gap_s"))
+    
+    @property
+    def connective_text(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("connective_text"))
+    
+    
+
+
+class ScriptTransitionReviewAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("ScriptTransitionReview")
+        self._properties: typing.Set[str] = set([  "transition_index",  "from_beat_index",  "to_beat_index",  "verdict",  "fix_action",  "why_present",  "rationale",  "missing_why",  "suggested_bridge_candidate_ids",  "suggested_repair",  ])
+        self._props = ScriptTransitionReviewProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "ScriptTransitionReviewProperties":
+        return self._props
+
+
+class ScriptTransitionReviewViewer(ScriptTransitionReviewAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class ScriptTransitionReviewProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def transition_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("transition_index"))
+    
+    @property
+    def from_beat_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("from_beat_index"))
+    
+    @property
+    def to_beat_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("to_beat_index"))
+    
+    @property
+    def verdict(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("verdict"))
+    
+    @property
+    def fix_action(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("fix_action"))
+    
+    @property
+    def why_present(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("why_present"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
+    
+    @property
+    def missing_why(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("missing_why"))
+    
+    @property
+    def suggested_bridge_candidate_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("suggested_bridge_candidate_ids"))
+    
+    @property
+    def suggested_repair(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("suggested_repair"))
     
     
 

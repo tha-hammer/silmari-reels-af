@@ -31,6 +31,10 @@ from reel_af.planner.models import (
     PlannerCandidate,
     ReelBlueprint,
     ReelStrategy,
+    ScriptCoherenceFixAction,
+    ScriptCoherenceReport,
+    ScriptTransitionReview,
+    ScriptTransitionVerdict,
     Template,
     XfadeEffect,
 )
@@ -52,11 +56,18 @@ SOURCE_QUOTE = (
 
 
 class _FakePlannerLLM:
-    def __init__(self, *blueprints: ReelBlueprint):
+    def __init__(
+        self,
+        *blueprints: ReelBlueprint,
+        coherence_reports: list[ScriptCoherenceReport] | None = None,
+    ):
         self._blueprints = list(blueprints)
+        self._coherence_reports = list(coherence_reports or [])
         self.mine_calls = 0
         self.strategize_calls = 0
         self.arrange_calls = 0
+        self.coherence_calls = 0
+        self.coherence_repair_hints: list[str | None] = []
 
     async def mine(self, transcript, register):
         self.mine_calls += 1
@@ -77,10 +88,27 @@ class _FakePlannerLLM:
         self.strategize_calls += 1
         return _strategy()
 
-    async def arrange(self, candidates, strategy, repair_hint=None):
+    async def arrange(self, candidates, strategy, *, candidate_contexts=None, repair_hint=None):
         self.arrange_calls += 1
         idx = min(self.arrange_calls - 1, len(self._blueprints) - 1)
         return self._blueprints[idx]
+
+    async def check_script_coherence(
+        self,
+        blueprint,
+        script_beats,
+        transitions,
+        strategy,
+        candidate_contexts,
+        *,
+        repair_hint=None,
+    ):
+        self.coherence_calls += 1
+        self.coherence_repair_hints.append(repair_hint)
+        if self._coherence_reports:
+            idx = min(self.coherence_calls - 1, len(self._coherence_reports) - 1)
+            return self._coherence_reports[idx]
+        return _coherent_report(len(transitions))
 
 
 def _blueprint(*, broken: bool = False) -> ReelBlueprint:
@@ -108,6 +136,7 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=4.5,
+                rationale="the hook names the false reasoning premise before any mechanism appears",
                 interrupt_out=Interrupt(
                     kind=InterruptKind.Trans,
                     effect=XfadeEffect.Dissolve,
@@ -120,6 +149,7 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=4.5,
+                rationale="this beat supplies the consequence that makes the premise matter",
                 interrupt_out=Interrupt(
                     kind=InterruptKind.Trans,
                     effect=XfadeEffect.Smoothleft,
@@ -132,6 +162,7 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=4.5,
+                rationale="this payoff answers the hook by naming the tighter-loop fix",
                 interrupt_out=Interrupt(
                     kind=InterruptKind.Trans,
                     effect=XfadeEffect.Dissolve,
@@ -144,6 +175,7 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=3.0,
+                rationale="the final loop restates the visible loop idea without adding a new topic",
             ),
         ],
         loop=LoopPlan(
@@ -178,6 +210,29 @@ def _strategy() -> ReelStrategy:
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
         rationale="the template uses one AI-process arc with enough latitude and a soft CTA",
+    )
+
+
+def _coherent_report(transition_count: int) -> ScriptCoherenceReport:
+    return ScriptCoherenceReport(
+        coherent=True,
+        transitions=[
+            ScriptTransitionReview(
+                transition_index=index,
+                from_beat_index=index,
+                to_beat_index=index + 1,
+                verdict=ScriptTransitionVerdict.Coherent,
+                fix_action=ScriptCoherenceFixAction.Keep,
+                why_present=True,
+                rationale="the next beat follows because the prior beat sets up its consequence",
+                missing_why=None,
+                suggested_bridge_candidate_ids=[],
+                suggested_repair=None,
+            )
+            for index in range(transition_count)
+        ],
+        overall_rationale="the assembled script keeps one local proof thread",
+        repair_hint=None,
     )
 
 
@@ -280,9 +335,13 @@ async def test_plan_promise_compiles_ok(tmp_path):
     accepted = json.loads(Path(res["accepted_candidates_ref"]).read_text(encoding="utf-8"))
 
     assert blueprint["rationale"]
+    assert all(beat["rationale"] for beat in blueprint["beats"])
     assert strategy["rationale"]
     assert mined[0]["rationale"]
     assert accepted[0]["rationale"]
+    coherence = json.loads(Path(res["script_coherence_ref"]).read_text(encoding="utf-8"))
+    assert coherence["coherent"] is True
+    assert len(coherence["transitions"]) == len(blueprint["beats"]) - 1
 
 
 async def test_produced_triple_compiles_through_real_consumer(tmp_path, monkeypatch):

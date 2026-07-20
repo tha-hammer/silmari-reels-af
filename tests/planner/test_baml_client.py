@@ -53,8 +53,8 @@ def test_baml_client_exposes_planner_functions():
     assert "rationale" in ReelBlueprint.model_fields
     assert "source_neighborhood" in CandidateTranscriptContext.model_fields
     assert "transitions" in ScriptCoherenceReport.model_fields
-    assert ScriptTransitionVerdict.UnbridgedJump.value == "unbridged_jump"
-    assert ScriptCoherenceFixAction.Bridge.value == "bridge"
+    assert ScriptTransitionVerdict.UnbridgedJump.name == "UnbridgedJump"
+    assert ScriptCoherenceFixAction.Bridge.name == "Bridge"
 
 
 def test_authored_baml_source_is_split_by_concern():

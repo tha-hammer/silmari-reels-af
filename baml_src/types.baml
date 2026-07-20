@@ -138,6 +138,7 @@ class Beat {
   candidate_id string
   occurrence_index int
   max_len_s float
+  rationale string?
   completion_role string?
   completion_criterion_ids string[]?
   cutin CutIn?
@@ -183,6 +184,79 @@ class ArcPlan {
   required_candidate_ids string[]
   optional_candidate_ids string[]?
   excluded_candidate_ids string[]?
+}
+
+class CandidateTranscriptContext {
+  candidate_id string
+  occurrence_index int
+  start_s float
+  end_s float
+  before_text string?
+  after_text string?
+  source_neighborhood string
+  prev_candidate_id string?
+  next_candidate_id string?
+  gap_to_prev_s float?
+  gap_to_next_s float?
+}
+
+class ScriptBeatText {
+  index int
+  role BeatRole
+  candidate_id string
+  occurrence_index int
+  span_quote string
+  start_s float?
+  end_s float?
+  rationale string?
+}
+
+class ScriptTransition {
+  index int
+  from_beat_index int
+  to_beat_index int
+  from_candidate_id string
+  to_candidate_id string
+  from_text string
+  to_text string
+  source_gap_s float?
+  connective_text string?
+}
+
+enum ScriptTransitionVerdict {
+  Coherent @alias("coherent")
+  NeedsBridge @alias("needs_bridge")
+  UnbridgedJump @alias("unbridged_jump")
+  NonSequitur @alias("non_sequitur")
+  NeedsCleanBoundary @alias("needs_clean_boundary")
+}
+
+enum ScriptCoherenceFixAction {
+  Keep @alias("keep")
+  Bridge @alias("bridge")
+  Drop @alias("drop")
+  Reorder @alias("reorder")
+  TrimBoundary @alias("trim_boundary")
+}
+
+class ScriptTransitionReview {
+  transition_index int
+  from_beat_index int
+  to_beat_index int
+  verdict ScriptTransitionVerdict
+  fix_action ScriptCoherenceFixAction
+  why_present bool
+  rationale string
+  missing_why string?
+  suggested_bridge_candidate_ids string[]?
+  suggested_repair string?
+}
+
+class ScriptCoherenceReport {
+  coherent bool
+  transitions ScriptTransitionReview[]
+  overall_rationale string
+  repair_hint string?
 }
 
 class ReelStrategy {

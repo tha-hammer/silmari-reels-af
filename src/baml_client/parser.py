@@ -29,6 +29,12 @@ class LlmResponseParser:
         __result__ = self.__options.merge_options(baml_options).parse_response(function_name="ArrangeReel", llm_response=llm_response, mode="request")
         return typing.cast(types.ReelBlueprint, __result__)
 
+    def CheckScriptCoherence(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> types.ScriptCoherenceReport:
+        __result__ = self.__options.merge_options(baml_options).parse_response(function_name="CheckScriptCoherence", llm_response=llm_response, mode="request")
+        return typing.cast(types.ScriptCoherenceReport, __result__)
+
     def MineCandidates(
         self, llm_response: str, baml_options: BamlCallOptions = {},
     ) -> typing.List["types.CandidateSpan"]:
@@ -54,6 +60,12 @@ class LlmStreamParser:
     ) -> stream_types.ReelBlueprint:
         __result__ = self.__options.merge_options(baml_options).parse_response(function_name="ArrangeReel", llm_response=llm_response, mode="stream")
         return typing.cast(stream_types.ReelBlueprint, __result__)
+
+    def CheckScriptCoherence(
+        self, llm_response: str, baml_options: BamlCallOptions = {},
+    ) -> stream_types.ScriptCoherenceReport:
+        __result__ = self.__options.merge_options(baml_options).parse_response(function_name="CheckScriptCoherence", llm_response=llm_response, mode="stream")
+        return typing.cast(stream_types.ScriptCoherenceReport, __result__)
 
     def MineCandidates(
         self, llm_response: str, baml_options: BamlCallOptions = {},

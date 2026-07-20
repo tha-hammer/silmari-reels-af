@@ -25,6 +25,9 @@ type_map = {
     "types.CandidateSpan": types.CandidateSpan,
     "stream_types.CandidateSpan": stream_types.CandidateSpan,
 
+    "types.CandidateTranscriptContext": types.CandidateTranscriptContext,
+    "stream_types.CandidateTranscriptContext": stream_types.CandidateTranscriptContext,
+
     "types.CtaPlan": types.CtaPlan,
     "stream_types.CtaPlan": stream_types.CtaPlan,
 
@@ -61,6 +64,18 @@ type_map = {
     "types.ReelStrategy": types.ReelStrategy,
     "stream_types.ReelStrategy": stream_types.ReelStrategy,
 
+    "types.ScriptBeatText": types.ScriptBeatText,
+    "stream_types.ScriptBeatText": stream_types.ScriptBeatText,
+
+    "types.ScriptCoherenceReport": types.ScriptCoherenceReport,
+    "stream_types.ScriptCoherenceReport": stream_types.ScriptCoherenceReport,
+
+    "types.ScriptTransition": types.ScriptTransition,
+    "stream_types.ScriptTransition": stream_types.ScriptTransition,
+
+    "types.ScriptTransitionReview": types.ScriptTransitionReview,
+    "stream_types.ScriptTransitionReview": stream_types.ScriptTransitionReview,
+
 
     "types.BeatRole": types.BeatRole,
 
@@ -73,6 +88,10 @@ type_map = {
     "types.HookType": types.HookType,
 
     "types.InterruptKind": types.InterruptKind,
+
+    "types.ScriptCoherenceFixAction": types.ScriptCoherenceFixAction,
+
+    "types.ScriptTransitionVerdict": types.ScriptTransitionVerdict,
 
     "types.Template": types.Template,
 

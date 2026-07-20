@@ -23,7 +23,7 @@ class StreamState(BaseModel, typing.Generic[StreamStateValueT]):
     value: StreamStateValueT
     state: typing_extensions.Literal["Pending", "Incomplete", "Complete"]
 # #########################################################################
-# Generated classes (15)
+# Generated classes (20)
 # #########################################################################
 
 class ArcPlan(BaseModel):
@@ -40,6 +40,7 @@ class Beat(BaseModel):
     candidate_id: typing.Optional[str] = None
     occurrence_index: typing.Optional[int] = None
     max_len_s: typing.Optional[float] = None
+    rationale: typing.Optional[str] = None
     completion_role: typing.Optional[str] = None
     completion_criterion_ids: typing.Optional[typing.List[str]] = None
     cutin: typing.Optional["CutIn"] = None
@@ -59,6 +60,19 @@ class CandidateSpan(BaseModel):
     is_claim: typing.Optional[bool] = None
     payoff_worthy: typing.Optional[bool] = None
     rationale: typing.Optional[str] = None
+
+class CandidateTranscriptContext(BaseModel):
+    candidate_id: typing.Optional[str] = None
+    occurrence_index: typing.Optional[int] = None
+    start_s: typing.Optional[float] = None
+    end_s: typing.Optional[float] = None
+    before_text: typing.Optional[str] = None
+    after_text: typing.Optional[str] = None
+    source_neighborhood: typing.Optional[str] = None
+    prev_candidate_id: typing.Optional[str] = None
+    next_candidate_id: typing.Optional[str] = None
+    gap_to_prev_s: typing.Optional[float] = None
+    gap_to_next_s: typing.Optional[float] = None
 
 class CtaPlan(BaseModel):
     hardness: typing.Optional[types.CtaHardness] = None
@@ -153,6 +167,45 @@ class ReelStrategy(BaseModel):
     engagement_primary: typing.Optional[types.EngagementKind] = None
     cta: typing.Optional["CtaPlan"] = None
     rationale: typing.Optional[str] = None
+
+class ScriptBeatText(BaseModel):
+    index: typing.Optional[int] = None
+    role: typing.Optional[types.BeatRole] = None
+    candidate_id: typing.Optional[str] = None
+    occurrence_index: typing.Optional[int] = None
+    span_quote: typing.Optional[str] = None
+    start_s: typing.Optional[float] = None
+    end_s: typing.Optional[float] = None
+    rationale: typing.Optional[str] = None
+
+class ScriptCoherenceReport(BaseModel):
+    coherent: typing.Optional[bool] = None
+    transitions: typing.List["ScriptTransitionReview"]
+    overall_rationale: typing.Optional[str] = None
+    repair_hint: typing.Optional[str] = None
+
+class ScriptTransition(BaseModel):
+    index: typing.Optional[int] = None
+    from_beat_index: typing.Optional[int] = None
+    to_beat_index: typing.Optional[int] = None
+    from_candidate_id: typing.Optional[str] = None
+    to_candidate_id: typing.Optional[str] = None
+    from_text: typing.Optional[str] = None
+    to_text: typing.Optional[str] = None
+    source_gap_s: typing.Optional[float] = None
+    connective_text: typing.Optional[str] = None
+
+class ScriptTransitionReview(BaseModel):
+    transition_index: typing.Optional[int] = None
+    from_beat_index: typing.Optional[int] = None
+    to_beat_index: typing.Optional[int] = None
+    verdict: typing.Optional[types.ScriptTransitionVerdict] = None
+    fix_action: typing.Optional[types.ScriptCoherenceFixAction] = None
+    why_present: typing.Optional[bool] = None
+    rationale: typing.Optional[str] = None
+    missing_why: typing.Optional[str] = None
+    suggested_bridge_candidate_ids: typing.Optional[typing.List[str]] = None
+    suggested_repair: typing.Optional[str] = None
 
 # #########################################################################
 # Generated type aliases (0)

@@ -8,10 +8,17 @@ from typing import Any, Literal, Protocol
 
 from baml_client.types import (
     CandidateSpan,
+    CandidateTranscriptContext,
     DurationPolicy,
     PlannerCandidate,
     ReelBlueprint,
     ReelStrategy,
+    ScriptBeatText,
+    ScriptCoherenceFixAction,
+    ScriptCoherenceReport,
+    ScriptTransition,
+    ScriptTransitionReview,
+    ScriptTransitionVerdict,
 )
 from reel_af.planner.config import load_planner_config
 
@@ -112,6 +119,40 @@ def _require_rationale(value: Any, phase: str) -> None:
 def _require_completion_rationale(value: Any) -> None:
     if not str(_optional_field(value, "completion_rationale", "") or "").strip():
         raise BamlPlannerContractError("ArrangeReel completion_rationale is required")
+
+
+def _require_beat_rationales(value: Any) -> None:
+    for index, beat in enumerate(_optional_field(value, "beats", None) or []):
+        if str(_optional_field(beat, "rationale", "") or "").strip():
+            continue
+        candidate_id = _optional_field(beat, "candidate_id", f"beat[{index}]")
+        raise BamlPlannerContractError(
+            f"ArrangeReel beat rationale is required for {candidate_id}"
+        )
+
+
+def _require_script_coherence_report(
+    report: ScriptCoherenceReport,
+    expected_transition_count: int,
+) -> None:
+    if not str(_optional_field(report, "overall_rationale", "") or "").strip():
+        raise BamlPlannerContractError("CheckScriptCoherence overall_rationale is required")
+    transitions = list(_optional_field(report, "transitions", None) or [])
+    if len(transitions) != expected_transition_count:
+        raise BamlPlannerContractError(
+            "CheckScriptCoherence transition count must match input transitions"
+        )
+    for index, transition in enumerate(transitions):
+        if not str(_optional_field(transition, "rationale", "") or "").strip():
+            raise BamlPlannerContractError(
+                f"CheckScriptCoherence transition rationale is required for transition {index}"
+            )
+        verdict = _optional_field(transition, "verdict", None)
+        fix_action = _optional_field(transition, "fix_action", None)
+        if verdict is None or fix_action is None:
+            raise BamlPlannerContractError(
+                f"CheckScriptCoherence verdict and fix_action are required for transition {index}"
+            )
 
 
 def _duration_range_bounds(value: Any, phase: str) -> tuple[float, float]:
@@ -218,9 +259,22 @@ class PlannerLLM(Protocol):
         candidates: list[PlannerCandidate],
         strategy: ReelStrategy,
         *,
+        candidate_contexts: list[CandidateTranscriptContext] | None = None,
         repair_hint: str | None = None,
     ) -> ReelBlueprint:
         """Return the final typed reel blueprint."""
+
+    async def check_script_coherence(
+        self,
+        blueprint: ReelBlueprint,
+        script_beats: list[ScriptBeatText],
+        transitions: list[ScriptTransition],
+        strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
+        *,
+        repair_hint: str | None = None,
+    ) -> ScriptCoherenceReport:
+        """Return a transition-level coherence report for resolved script text."""
 
 
 class FakePlannerLLM:
@@ -232,10 +286,12 @@ class FakePlannerLLM:
         candidates: list[CandidateSpan],
         strategy: ReelStrategy,
         blueprint: ReelBlueprint,
+        coherence: ScriptCoherenceReport | None = None,
     ) -> None:
         self.candidates = candidates
         self.strategy = strategy
         self.blueprint = blueprint
+        self.coherence = coherence
         self.calls: list[tuple[Any, ...]] = []
 
     async def mine(self, transcript: str, register: Register) -> list[CandidateSpan]:
@@ -256,10 +312,24 @@ class FakePlannerLLM:
         candidates: list[PlannerCandidate],
         strategy: ReelStrategy,
         *,
+        candidate_contexts: list[CandidateTranscriptContext] | None = None,
         repair_hint: str | None = None,
     ) -> ReelBlueprint:
         self.calls.append(("arrange", repair_hint))
         return self.blueprint
+
+    async def check_script_coherence(
+        self,
+        blueprint: ReelBlueprint,
+        script_beats: list[ScriptBeatText],
+        transitions: list[ScriptTransition],
+        strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
+        *,
+        repair_hint: str | None = None,
+    ) -> ScriptCoherenceReport:
+        self.calls.append(("check_script_coherence", repair_hint))
+        return self.coherence or _coherent_report(transitions)
 
 
 class NeverPlannerLLM:
@@ -281,9 +351,22 @@ class NeverPlannerLLM:
         candidates: list[PlannerCandidate],
         strategy: ReelStrategy,
         *,
+        candidate_contexts: list[CandidateTranscriptContext] | None = None,
         repair_hint: str | None = None,
     ) -> ReelBlueprint:
         raise AssertionError("PlannerLLM.arrange must not be called")
+
+    async def check_script_coherence(
+        self,
+        blueprint: ReelBlueprint,
+        script_beats: list[ScriptBeatText],
+        transitions: list[ScriptTransition],
+        strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
+        *,
+        repair_hint: str | None = None,
+    ) -> ScriptCoherenceReport:
+        raise AssertionError("PlannerLLM.check_script_coherence must not be called")
 
 
 class BamlPlannerLLM:
@@ -330,6 +413,7 @@ class BamlPlannerLLM:
         candidates: list[PlannerCandidate],
         strategy: ReelStrategy | None,
         *,
+        candidate_contexts: list[CandidateTranscriptContext] | None = None,
         repair_hint: str | None = None,
     ) -> ReelBlueprint:
         if strategy is None:
@@ -337,6 +421,7 @@ class BamlPlannerLLM:
         result = await _baml_functions().ArrangeReel(
             candidates,
             strategy,
+            candidate_contexts or [],
             repair_hint,
             baml_options=self._baml_options(),
         )
@@ -347,10 +432,56 @@ class BamlPlannerLLM:
         )
         _require_arc(result, candidates, "ArrangeReel")
         _require_completion_rationale(result)
+        _require_beat_rationales(result)
         _require_rationale(result, "ArrangeReel")
+        return result
+
+    async def check_script_coherence(
+        self,
+        blueprint: ReelBlueprint,
+        script_beats: list[ScriptBeatText],
+        transitions: list[ScriptTransition],
+        strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
+        *,
+        repair_hint: str | None = None,
+    ) -> ScriptCoherenceReport:
+        result = await _baml_functions().CheckScriptCoherence(
+            blueprint,
+            script_beats,
+            transitions,
+            strategy,
+            candidate_contexts,
+            repair_hint,
+            baml_options=self._baml_options(),
+        )
+        _require_script_coherence_report(result, len(transitions))
         return result
 
     def _baml_options(self) -> dict[str, Any]:
         if self._registry is None:
             self._registry = _client_registry(self.cfg)
         return {"client_registry": self._registry}
+
+
+def _coherent_report(transitions: list[ScriptTransition]) -> ScriptCoherenceReport:
+    return ScriptCoherenceReport(
+        coherent=True,
+        transitions=[
+            ScriptTransitionReview(
+                transition_index=int(_optional_field(transition, "index", index)),
+                from_beat_index=int(_optional_field(transition, "from_beat_index", index)),
+                to_beat_index=int(_optional_field(transition, "to_beat_index", index + 1)),
+                verdict=ScriptTransitionVerdict.Coherent,
+                fix_action=ScriptCoherenceFixAction.Keep,
+                why_present=True,
+                rationale="the transition reads coherently in the assembled script",
+                missing_why=None,
+                suggested_bridge_candidate_ids=[],
+                suggested_repair=None,
+            )
+            for index, transition in enumerate(transitions)
+        ],
+        overall_rationale="the assembled script keeps one local proof thread",
+        repair_hint=None,
+    )

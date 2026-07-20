@@ -82,21 +82,36 @@ class BamlAsyncClient:
     def parse_stream(self):
       return self.__llm_stream_parser
 
-    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,repair_hint: typing.Optional[str] = None,
+    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
         baml_options: BamlCallOptions = {},
     ) -> types.ReelBlueprint:
         # Check if on_tick is provided
         if 'on_tick' in baml_options:
             # Use streaming internally when on_tick is provided
-            __stream__ = self.stream.ArrangeReel(candidates=candidates,strategy=strategy,repair_hint=repair_hint,
+            __stream__ = self.stream.ArrangeReel(candidates=candidates,strategy=strategy,candidate_contexts=candidate_contexts,repair_hint=repair_hint,
                 baml_options=baml_options)
             return await __stream__.get_final_response()
         else:
             # Original non-streaming code
             __result__ = await self.__options.merge_options(baml_options).call_function_async(function_name="ArrangeReel", args={
-                "candidates": candidates,"strategy": strategy,"repair_hint": repair_hint,
+                "candidates": candidates,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
             })
             return typing.cast(types.ReelBlueprint, __result__.cast_to(types, types, stream_types, False, __runtime__))
+    async def CheckScriptCoherence(self, blueprint: types.ReelBlueprint,script_beats: typing.List["types.ScriptBeatText"],transitions: typing.List["types.ScriptTransition"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
+        baml_options: BamlCallOptions = {},
+    ) -> types.ScriptCoherenceReport:
+        # Check if on_tick is provided
+        if 'on_tick' in baml_options:
+            # Use streaming internally when on_tick is provided
+            __stream__ = self.stream.CheckScriptCoherence(blueprint=blueprint,script_beats=script_beats,transitions=transitions,strategy=strategy,candidate_contexts=candidate_contexts,repair_hint=repair_hint,
+                baml_options=baml_options)
+            return await __stream__.get_final_response()
+        else:
+            # Original non-streaming code
+            __result__ = await self.__options.merge_options(baml_options).call_function_async(function_name="CheckScriptCoherence", args={
+                "blueprint": blueprint,"script_beats": script_beats,"transitions": transitions,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
+            })
+            return typing.cast(types.ScriptCoherenceReport, __result__.cast_to(types, types, stream_types, False, __runtime__))
     async def MineCandidates(self, transcript_text: str,register: str,
         baml_options: BamlCallOptions = {},
     ) -> typing.List["types.CandidateSpan"]:
@@ -136,16 +151,28 @@ class BamlStreamClient:
     def __init__(self, options: DoNotUseDirectlyCallManager):
         self.__options = options
 
-    def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,repair_hint: typing.Optional[str] = None,
+    def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.BamlStream[stream_types.ReelBlueprint, types.ReelBlueprint]:
         __ctx__, __result__ = self.__options.merge_options(baml_options).create_async_stream(function_name="ArrangeReel", args={
-            "candidates": candidates,"strategy": strategy,"repair_hint": repair_hint,
+            "candidates": candidates,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
         })
         return baml_py.BamlStream[stream_types.ReelBlueprint, types.ReelBlueprint](
           __result__,
           lambda x: typing.cast(stream_types.ReelBlueprint, x.cast_to(types, types, stream_types, True, __runtime__)),
           lambda x: typing.cast(types.ReelBlueprint, x.cast_to(types, types, stream_types, False, __runtime__)),
+          __ctx__,
+        )
+    def CheckScriptCoherence(self, blueprint: types.ReelBlueprint,script_beats: typing.List["types.ScriptBeatText"],transitions: typing.List["types.ScriptTransition"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.BamlStream[stream_types.ScriptCoherenceReport, types.ScriptCoherenceReport]:
+        __ctx__, __result__ = self.__options.merge_options(baml_options).create_async_stream(function_name="CheckScriptCoherence", args={
+            "blueprint": blueprint,"script_beats": script_beats,"transitions": transitions,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
+        })
+        return baml_py.BamlStream[stream_types.ScriptCoherenceReport, types.ScriptCoherenceReport](
+          __result__,
+          lambda x: typing.cast(stream_types.ScriptCoherenceReport, x.cast_to(types, types, stream_types, True, __runtime__)),
+          lambda x: typing.cast(types.ScriptCoherenceReport, x.cast_to(types, types, stream_types, False, __runtime__)),
           __ctx__,
         )
     def MineCandidates(self, transcript_text: str,register: str,
@@ -180,11 +207,18 @@ class BamlHttpRequestClient:
     def __init__(self, options: DoNotUseDirectlyCallManager):
         self.__options = options
 
-    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,repair_hint: typing.Optional[str] = None,
+    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="ArrangeReel", args={
-            "candidates": candidates,"strategy": strategy,"repair_hint": repair_hint,
+            "candidates": candidates,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
+        }, mode="request")
+        return __result__
+    async def CheckScriptCoherence(self, blueprint: types.ReelBlueprint,script_beats: typing.List["types.ScriptBeatText"],transitions: typing.List["types.ScriptTransition"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="CheckScriptCoherence", args={
+            "blueprint": blueprint,"script_beats": script_beats,"transitions": transitions,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
         }, mode="request")
         return __result__
     async def MineCandidates(self, transcript_text: str,register: str,
@@ -209,11 +243,18 @@ class BamlHttpStreamRequestClient:
     def __init__(self, options: DoNotUseDirectlyCallManager):
         self.__options = options
 
-    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,repair_hint: typing.Optional[str] = None,
+    async def ArrangeReel(self, candidates: typing.List["types.PlannerCandidate"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="ArrangeReel", args={
-            "candidates": candidates,"strategy": strategy,"repair_hint": repair_hint,
+            "candidates": candidates,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
+        }, mode="stream")
+        return __result__
+    async def CheckScriptCoherence(self, blueprint: types.ReelBlueprint,script_beats: typing.List["types.ScriptBeatText"],transitions: typing.List["types.ScriptTransition"],strategy: types.ReelStrategy,candidate_contexts: typing.List["types.CandidateTranscriptContext"],repair_hint: typing.Optional[str] = None,
+        baml_options: BamlCallOptions = {},
+    ) -> baml_py.baml_py.HTTPRequest:
+        __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="CheckScriptCoherence", args={
+            "blueprint": blueprint,"script_beats": script_beats,"transitions": transitions,"strategy": strategy,"candidate_contexts": candidate_contexts,"repair_hint": repair_hint,
         }, mode="stream")
         return __result__
     async def MineCandidates(self, transcript_text: str,register: str,

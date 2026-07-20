@@ -11,6 +11,7 @@ from baml_client.types import (
     Beat,
     BeatRole,
     CandidateSpan,
+    CandidateTranscriptContext,
     CtaHardness,
     CtaPlan,
     DurationPolicy,
@@ -21,6 +22,12 @@ from baml_client.types import (
     PlannerCandidate,
     ReelBlueprint,
     ReelStrategy,
+    ScriptBeatText,
+    ScriptCoherenceFixAction,
+    ScriptCoherenceReport,
+    ScriptTransition,
+    ScriptTransitionReview,
+    ScriptTransitionVerdict,
     Template,
 )
 from reel_af.planner import llm as llm_mod
@@ -53,6 +60,7 @@ class _RecordingBaml:
         self.mine_result = [_candidate("verbatim words")]
         self.strategy_result = _strategy()
         self.arrange_result = _blueprint()
+        self.coherence_result = _coherence_report()
 
     async def MineCandidates(  # noqa: N802 - generated BAML API shape
         self,
@@ -81,14 +89,35 @@ class _RecordingBaml:
         self,
         candidates: list[PlannerCandidate],
         strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
         repair_hint: str | None = None,
         *,
         baml_options: dict[str, Any],
     ) -> ReelBlueprint:
         self.calls.append(
-            _BamlCall("ArrangeReel", (candidates, strategy, repair_hint), baml_options)
+            _BamlCall("ArrangeReel", (candidates, strategy, candidate_contexts, repair_hint), baml_options)
         )
         return self.arrange_result
+
+    async def CheckScriptCoherence(  # noqa: N802 - generated BAML API shape
+        self,
+        blueprint: ReelBlueprint,
+        script_beats: list[ScriptBeatText],
+        transitions: list[ScriptTransition],
+        strategy: ReelStrategy,
+        candidate_contexts: list[CandidateTranscriptContext],
+        repair_hint: str | None = None,
+        *,
+        baml_options: dict[str, Any],
+    ) -> ScriptCoherenceReport:
+        self.calls.append(
+            _BamlCall(
+                "CheckScriptCoherence",
+                (blueprint, script_beats, transitions, strategy, candidate_contexts, repair_hint),
+                baml_options,
+            )
+        )
+        return self.coherence_result
 
 
 @pytest.fixture
@@ -197,6 +226,7 @@ def _blueprint(
     range_min_s: float = 20.0,
     range_max_s: float = 35.0,
     required_candidate_ids: tuple[str, ...] = ("c001",),
+    beat_rationale: str | None = "this hook is the cleanest entry to the proof thread",
     completion_rationale: str | None = "the hook, proof, payoff, and loop criteria are all covered",
     rationale: str | None = "the beat order builds to payoff and the loop echoes the hook",
 ) -> ReelBlueprint:
@@ -213,6 +243,7 @@ def _blueprint(
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=3.0,
+                rationale=beat_rationale,
             )
         ],
         loop=LoopPlan(
@@ -233,27 +264,111 @@ def _template_field(model: type[Any], value: Template) -> dict[str, Template]:
     return {field: value}
 
 
+def _script_beat(
+    *,
+    index: int = 0,
+    rationale: str | None = "actual resolved text preserves the hook premise",
+) -> ScriptBeatText:
+    return ScriptBeatText(
+        index=index,
+        role=BeatRole.Hook,
+        candidate_id="c001",
+        occurrence_index=0,
+        span_quote="they pattern match",
+        start_s=0.0,
+        end_s=1.0,
+        rationale=rationale,
+    )
+
+
+def _script_transition() -> ScriptTransition:
+    return ScriptTransition(
+        index=0,
+        from_beat_index=0,
+        to_beat_index=1,
+        from_candidate_id="c001",
+        to_candidate_id="c002",
+        from_text="pay now",
+        to_text="mechanism",
+        source_gap_s=2.0,
+        connective_text="because the check has to be outside the model",
+    )
+
+
+def _candidate_context() -> CandidateTranscriptContext:
+    return CandidateTranscriptContext(
+        candidate_id="c001",
+        occurrence_index=0,
+        start_s=0.0,
+        end_s=1.0,
+        before_text="",
+        after_text="because the check has to be outside the model",
+        source_neighborhood="pay now because the check has to be outside the model",
+        prev_candidate_id=None,
+        next_candidate_id="c002",
+        gap_to_prev_s=None,
+        gap_to_next_s=2.0,
+    )
+
+
+def _coherence_report(
+    *,
+    coherent: bool = True,
+    transition_rationale: str | None = "the connective text supplies the why between beats",
+) -> ScriptCoherenceReport:
+    return ScriptCoherenceReport(
+        coherent=coherent,
+        transitions=[
+            ScriptTransitionReview(
+                transition_index=0,
+                from_beat_index=0,
+                to_beat_index=1,
+                verdict=ScriptTransitionVerdict.Coherent,
+                fix_action=ScriptCoherenceFixAction.Keep,
+                why_present=True,
+                rationale=transition_rationale,
+                missing_why=None,
+                suggested_bridge_candidate_ids=[],
+                suggested_repair=None,
+            )
+        ],
+        overall_rationale="the assembled script keeps one local proof thread",
+        repair_hint=None,
+    )
+
+
 async def test_fake_planner_llm_returns_baml_structs(policy: DurationPolicy):
     candidate = _candidate()
     strategy = _strategy()
     blueprint = _blueprint()
+    coherence = _coherence_report()
     fake: PlannerLLM = FakePlannerLLM(
         candidates=[candidate],
         strategy=strategy,
         blueprint=blueprint,
+        coherence=coherence,
     )
 
     candidates = await fake.mine("transcript", "educational")
     planned = await fake.strategize("transcript", candidates, policy)
     arranged = await fake.arrange(candidates, planned)
+    report = await fake.check_script_coherence(
+        arranged,
+        [_script_beat()],
+        [_script_transition()],
+        planned,
+        [_candidate_context()],
+    )
 
     assert candidates == [candidate]
     assert planned is strategy
     assert arranged is blueprint
+    assert report is coherence
     assert fake.calls == [
         ("mine", "educational"),
         ("strategize", policy),
         ("arrange", None),
+        ("check_script_coherence", None),
     ]
 
 
@@ -262,6 +377,9 @@ async def test_never_planner_llm_raises_if_called(strategy: ReelStrategy):
 
     with pytest.raises(AssertionError, match="must not be called"):
         await llm.arrange([], strategy)
+
+    with pytest.raises(AssertionError, match="must not be called"):
+        await llm.check_script_coherence(strategy, [], [], strategy, [])
 
 
 async def test_mine_passes_client_registry_and_returns_baml_objects_directly(
@@ -412,20 +530,54 @@ async def test_arrange_passes_strategy_object_without_dumping(
 ):
     rec = _RecordingBaml()
     _patch_baml(monkeypatch, rec)
+    candidate_contexts = [_candidate_context()]
     param = inspect.signature(llm_mod.BamlPlannerLLM.arrange).parameters["repair_hint"]
     assert param.kind is inspect.Parameter.KEYWORD_ONLY
 
     out = await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(
         planner_candidates,
         strategy,
+        candidate_contexts=candidate_contexts,
         repair_hint="fix candidate c001",
     )
 
     assert rec.calls[0].name == "ArrangeReel"
     assert rec.calls[0].args[0] is planner_candidates
     assert rec.calls[0].args[1] is strategy
-    assert rec.calls[0].args[2] == "fix candidate c001"
+    assert rec.calls[0].args[2] is candidate_contexts
+    assert rec.calls[0].args[3] == "fix candidate c001"
     assert out is rec.arrange_result
+
+
+async def test_script_coherence_passes_resolved_script_context_without_dumping(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    _patch_baml(monkeypatch, rec)
+    blueprint = _blueprint()
+    script_beats = [_script_beat(index=0), _script_beat(index=1)]
+    transitions = [_script_transition()]
+    candidate_contexts = [_candidate_context()]
+
+    out = await llm_mod.BamlPlannerLLM(cfg=cfg).check_script_coherence(
+        blueprint,
+        script_beats,
+        transitions,
+        strategy,
+        candidate_contexts,
+        repair_hint="repair prior jump",
+    )
+
+    assert rec.calls[0].name == "CheckScriptCoherence"
+    assert rec.calls[0].args[0] is blueprint
+    assert rec.calls[0].args[1] is script_beats
+    assert rec.calls[0].args[2] is transitions
+    assert rec.calls[0].args[3] is strategy
+    assert rec.calls[0].args[4] is candidate_contexts
+    assert rec.calls[0].args[5] == "repair prior jump"
+    assert out is rec.coherence_result
 
 
 async def test_arrange_rejects_missing_rationale(
@@ -440,6 +592,39 @@ async def test_arrange_rejects_missing_rationale(
 
     with pytest.raises(llm_mod.BamlPlannerContractError, match="ArrangeReel rationale"):
         await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
+
+
+async def test_arrange_rejects_missing_beat_rationale(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    rec.arrange_result = _blueprint(beat_rationale=None)
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="beat rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
+
+
+async def test_script_coherence_rejects_missing_transition_rationale(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    rec.coherence_result = _coherence_report(transition_rationale="")
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="transition rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).check_script_coherence(
+            _blueprint(),
+            [_script_beat(index=0), _script_beat(index=1)],
+            [_script_transition()],
+            strategy,
+            [_candidate_context()],
+        )
 
 
 async def test_arrange_rejects_missing_completion_rationale(
@@ -471,11 +656,36 @@ async def test_arrange_rejects_duration_range_above_strategy_cap(
 
 
 async def test_fake_llm_records_repair_hint(strategy: ReelStrategy):
-    fake = FakePlannerLLM(candidates=[], strategy=strategy, blueprint=_blueprint())
+    fake = FakePlannerLLM(
+        candidates=[],
+        strategy=strategy,
+        blueprint=_blueprint(),
+        coherence=_coherence_report(),
+    )
 
     await fake.arrange([], strategy, repair_hint="failed quote")
 
     assert fake.calls[-1] == ("arrange", "failed quote")
+
+
+async def test_fake_llm_records_script_coherence_inputs(strategy: ReelStrategy):
+    fake = FakePlannerLLM(
+        candidates=[],
+        strategy=strategy,
+        blueprint=_blueprint(),
+        coherence=_coherence_report(),
+    )
+
+    await fake.check_script_coherence(
+        _blueprint(),
+        [_script_beat()],
+        [_script_transition()],
+        strategy,
+        [_candidate_context()],
+        repair_hint="SCRIPT-COHERENCE failed",
+    )
+
+    assert fake.calls[-1] == ("check_script_coherence", "SCRIPT-COHERENCE failed")
 
 
 async def test_arrange_rejects_missing_strategy_before_baml(

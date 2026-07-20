@@ -18,6 +18,10 @@ from reel_af.planner.models import (
     InterruptKind,
     LoopPlan,
     ReelBlueprint,
+    ScriptCoherenceFixAction,
+    ScriptCoherenceReport,
+    ScriptTransitionReview,
+    ScriptTransitionVerdict,
     Template,
     XfadeEffect,
 )
@@ -50,7 +54,7 @@ class _FakePlannerLLM:
     async def strategize(self, transcript, candidates, policy):
         return None
 
-    async def arrange(self, candidates, strategy, repair_hint=None):
+    async def arrange(self, candidates, strategy, *, candidate_contexts=None, repair_hint=None):
         return ReelBlueprint(
             template_=Template.HookContextValuePayoffCta,
             duration_range_s=duration_range(min_s=18.0, max_s=42.0),
@@ -70,6 +74,7 @@ class _FakePlannerLLM:
                     candidate_id="c001",
                     occurrence_index=0,
                     max_len_s=4.5,
+                    rationale="the hook establishes the premise before the payoff",
                     interrupt_out=Interrupt(
                         kind=InterruptKind.Trans,
                         effect=XfadeEffect.Dissolve,
@@ -82,6 +87,7 @@ class _FakePlannerLLM:
                     candidate_id="c001",
                     occurrence_index=0,
                     max_len_s=3.0,
+                    rationale="the payoff closes the loop promised by the hook",
                 ),
             ],
             loop=LoopPlan(
@@ -96,6 +102,38 @@ class _FakePlannerLLM:
                 "The hook establishes the promise, proof explains the mechanism, "
                 "payoff resolves the hook, and loop echoes it."
             ),
+            rationale="the short script moves from premise to payoff on one thread",
+        )
+
+    async def check_script_coherence(
+        self,
+        blueprint,
+        script_beats,
+        transitions,
+        strategy,
+        candidate_contexts,
+        *,
+        repair_hint=None,
+    ):
+        return ScriptCoherenceReport(
+            coherent=True,
+            transitions=[
+                ScriptTransitionReview(
+                    transition_index=transition.index,
+                    from_beat_index=transition.from_beat_index,
+                    to_beat_index=transition.to_beat_index,
+                    verdict=ScriptTransitionVerdict.Coherent,
+                    fix_action=ScriptCoherenceFixAction.Keep,
+                    why_present=True,
+                    rationale="the payoff follows from the hook in the resolved script",
+                    missing_why=None,
+                    suggested_bridge_candidate_ids=[],
+                    suggested_repair=None,
+                )
+                for transition in transitions
+            ],
+            overall_rationale="the assembled script reads as one coherent local thread",
+            repair_hint=None,
         )
 
 

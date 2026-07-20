@@ -833,7 +833,12 @@ def _apply_joins(
     join_markers: list[tuple[int, Join]] = []
     for att in doc.markers:
         if isinstance(att.marker, Join):
-            join_markers.append((att.before_segment_index or 0, att.marker))
+            before_index = (
+                att.before_segment_index
+                if att.before_segment_index is not None
+                else att.segment_index
+            )
+            join_markers.append((before_index or 0, att.marker))
 
     if not join_markers:
         return _JoinResult(

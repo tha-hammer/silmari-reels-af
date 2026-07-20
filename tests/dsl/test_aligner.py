@@ -44,6 +44,31 @@ def test_align_exact_normalizes_punctuation_and_case():
     assert span.method == "exact"
 
 
+def test_align_exact_duplicate_words_uses_nearest_timecode_anchor():
+    words = [
+        _word("make", 100.0, 100.2),
+        _word("a", 100.2, 100.3),
+        _word("script", 100.3, 100.6),
+        _word("to", 100.6, 100.8),
+        _word("do", 100.8, 101.0),
+        _word("it", 101.0, 101.2),
+        _word("filler", 200.0, 200.4),
+        _word("make", 1611.171, 1611.3),
+        _word("a", 1611.3, 1611.4),
+        _word("script", 1611.4, 1611.7),
+        _word("to", 1611.7, 1611.9),
+        _word("do", 1611.9, 1612.05),
+        _word("it.", 1612.05, 1612.17),
+    ]
+
+    span = align("make a script to do it.", WordsSidecar(words=words), timecode_s=1611.5)
+
+    assert span.kind == "aligned"
+    assert span.word_range == (7, 12)
+    assert span.start_s == 1611.171
+    assert span.method == "exact"
+
+
 def test_longest_run_returns_longest_contiguous_exact_match():
     query = "they dont reason at scale".split()
     source = "intro they dont reason outro they dont reason at scale closer".split()

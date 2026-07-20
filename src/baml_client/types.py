@@ -37,7 +37,7 @@ def get_checks(checks: typing.Dict[CheckName, Check]) -> typing.List[Check]:
 def all_succeeded(checks: typing.Dict[CheckName, Check]) -> bool:
     return all(check.status == "succeeded" for check in get_checks(checks))
 # #########################################################################
-# Generated enums (8)
+# Generated enums (10)
 # #########################################################################
 
 class BeatRole(str, Enum):
@@ -80,6 +80,20 @@ class InterruptKind(str, Enum):
     Join = "Join"
     Black = "Black"
 
+class ScriptCoherenceFixAction(str, Enum):
+    Keep = "Keep"
+    Bridge = "Bridge"
+    Drop = "Drop"
+    Reorder = "Reorder"
+    TrimBoundary = "TrimBoundary"
+
+class ScriptTransitionVerdict(str, Enum):
+    Coherent = "Coherent"
+    NeedsBridge = "NeedsBridge"
+    UnbridgedJump = "UnbridgedJump"
+    NonSequitur = "NonSequitur"
+    NeedsCleanBoundary = "NeedsCleanBoundary"
+
 class Template(str, Enum):
     HookContextValuePayoffCta = "HookContextValuePayoffCta"
     ProblemAgitateSolve = "ProblemAgitateSolve"
@@ -104,7 +118,7 @@ class XfadeEffect(str, Enum):
     NoEffect = "NoEffect"
 
 # #########################################################################
-# Generated classes (15)
+# Generated classes (20)
 # #########################################################################
 
 class ArcPlan(BaseModel):
@@ -121,6 +135,7 @@ class Beat(BaseModel):
     candidate_id: str
     occurrence_index: int
     max_len_s: float
+    rationale: typing.Optional[str] = None
     completion_role: typing.Optional[str] = None
     completion_criterion_ids: typing.Optional[typing.List[str]] = None
     cutin: typing.Optional["CutIn"] = None
@@ -140,6 +155,19 @@ class CandidateSpan(BaseModel):
     is_claim: typing.Optional[bool] = None
     payoff_worthy: typing.Optional[bool] = None
     rationale: typing.Optional[str] = None
+
+class CandidateTranscriptContext(BaseModel):
+    candidate_id: str
+    occurrence_index: int
+    start_s: float
+    end_s: float
+    before_text: typing.Optional[str] = None
+    after_text: typing.Optional[str] = None
+    source_neighborhood: str
+    prev_candidate_id: typing.Optional[str] = None
+    next_candidate_id: typing.Optional[str] = None
+    gap_to_prev_s: typing.Optional[float] = None
+    gap_to_next_s: typing.Optional[float] = None
 
 class CtaPlan(BaseModel):
     hardness: CtaHardness
@@ -234,6 +262,45 @@ class ReelStrategy(BaseModel):
     engagement_primary: EngagementKind
     cta: "CtaPlan"
     rationale: typing.Optional[str] = None
+
+class ScriptBeatText(BaseModel):
+    index: int
+    role: BeatRole
+    candidate_id: str
+    occurrence_index: int
+    span_quote: str
+    start_s: typing.Optional[float] = None
+    end_s: typing.Optional[float] = None
+    rationale: typing.Optional[str] = None
+
+class ScriptCoherenceReport(BaseModel):
+    coherent: bool
+    transitions: typing.List["ScriptTransitionReview"]
+    overall_rationale: str
+    repair_hint: typing.Optional[str] = None
+
+class ScriptTransition(BaseModel):
+    index: int
+    from_beat_index: int
+    to_beat_index: int
+    from_candidate_id: str
+    to_candidate_id: str
+    from_text: str
+    to_text: str
+    source_gap_s: typing.Optional[float] = None
+    connective_text: typing.Optional[str] = None
+
+class ScriptTransitionReview(BaseModel):
+    transition_index: int
+    from_beat_index: int
+    to_beat_index: int
+    verdict: ScriptTransitionVerdict
+    fix_action: ScriptCoherenceFixAction
+    why_present: bool
+    rationale: str
+    missing_why: typing.Optional[str] = None
+    suggested_bridge_candidate_ids: typing.Optional[typing.List[str]] = None
+    suggested_repair: typing.Optional[str] = None
 
 # #########################################################################
 # Generated type aliases (0)

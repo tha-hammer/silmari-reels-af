@@ -95,7 +95,7 @@ def align(
         )
 
     if words.words:
-        result = _align_words(query_norm, words.words, source)
+        result = _align_words(query_norm, words.words, source, timecode_s)
         if result is not None:
             return result
 
@@ -116,11 +116,12 @@ def _align_words(
     query_norm: list[str],
     word_list: list[DslWord],
     source: object | None,
+    timecode_s: float | None,
 ) -> AlignedSpan | UnmatchedSpan | None:
     word_norms = [_normalize(w.w) for w in word_list]
     qlen = len(query_norm)
 
-    exact = _find_exact_run(query_norm, word_norms)
+    exact = _find_exact_run(query_norm, word_norms, word_list, timecode_s)
     if exact is not None:
         start_idx, end_idx = exact
         return AlignedSpan(
@@ -142,7 +143,14 @@ def _align_words(
             candidate = word_norms[i : i + window]
             q = _trigram_cosine(query_norm, candidate)
             candidate_span = (i, i + window - 1)
-            if _is_better_fuzzy_span(q, candidate_span, best_quality, best_span):
+            if _is_better_fuzzy_span(
+                q,
+                candidate_span,
+                best_quality,
+                best_span,
+                word_list,
+                timecode_s,
+            ):
                 best_quality = q
                 best_span = candidate_span
 
@@ -166,13 +174,29 @@ def _align_words(
     return None
 
 
-def _find_exact_run(query: list[str], words: list[str]) -> tuple[int, int] | None:
-    run = _longest_run(query, words)
-    if run is None:
+def _find_exact_run(
+    query: list[str],
+    words: list[str],
+    word_list: list[DslWord] | None = None,
+    timecode_s: float | None = None,
+) -> tuple[int, int] | None:
+    runs = _exact_runs(query, words)
+    if not runs:
         return None
-    if run[1] - run[0] + 1 != len(query):
-        return None
-    return run
+    if timecode_s is None or word_list is None:
+        return runs[0]
+    return min(runs, key=lambda run: (_word_span_distance(run, word_list, timecode_s), run[0]))
+
+
+def _exact_runs(query: list[str], words: list[str]) -> list[tuple[int, int]]:
+    if not query or not words or len(query) > len(words):
+        return []
+    qlen = len(query)
+    return [
+        (index, index + qlen - 1)
+        for index in range(len(words) - qlen + 1)
+        if words[index : index + qlen] == query
+    ]
 
 
 def _is_better_fuzzy_span(
@@ -180,6 +204,8 @@ def _is_better_fuzzy_span(
     span: tuple[int, int],
     best_quality: float,
     best_span: tuple[int, int] | None,
+    word_list: list[DslWord],
+    timecode_s: float | None,
 ) -> bool:
     if quality > best_quality:
         return True
@@ -192,7 +218,19 @@ def _is_better_fuzzy_span(
     best_len = best_span[1] - best_span[0] + 1
     if span_len != best_len:
         return span_len > best_len
+    if timecode_s is not None:
+        span_distance = _word_span_distance(span, word_list, timecode_s)
+        best_distance = _word_span_distance(best_span, word_list, timecode_s)
+        if abs(span_distance - best_distance) > 1e-12:
+            return span_distance < best_distance
     return span[0] < best_span[0]
+
+
+def _word_span_distance(span: tuple[int, int], word_list: list[DslWord], timecode_s: float) -> float:
+    start_idx, end_idx = span
+    start_s = float(word_list[start_idx].start)
+    end_s = float(word_list[end_idx].end)
+    return abs(_midpoint(start_s, end_s) - timecode_s)
 
 
 # Half-window (seconds) around a segment's ``timecode_s`` within which a caption cue

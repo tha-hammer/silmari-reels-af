@@ -1,26 +1,45 @@
 function ArrangeReel(
   candidates: PlannerCandidate[],
   strategy: ReelStrategy,
+  candidate_contexts: CandidateTranscriptContext[],
   repair_hint: string?
 ) -> ReelBlueprint {
   client PlannerFallback
   prompt #"
     {{ RetentionRules() }}
     {{ _.role("user") }}
+    You are cutting this transcript into a coherent short script. This is an editing task, not a
+    block-scoring task: every cut must preserve the logical thread, and every adjacent line must
+    read as intentional writing.
+    Never leave the listener without the why between two lines.
+
     Arrange candidates into an ordered beat list per the strategy. Each beat carries role,
-    candidate_id, occurrence_index, VERBATIM span_quote, max_len_s, and at most one interrupt_out.
+    candidate_id, occurrence_index, VERBATIM span_quote, max_len_s, rationale, and at most one
+    interrupt_out.
     If repair_hint is present, repair those exact failed quotes without changing unrelated strategy.
+    If repair_hint is a SCRIPT-COHERENCE repair, fix the named transition by including a bridge
+    span, cutting only at a clean idea boundary, dropping the weaker line, or reordering based on
+    what reads best.
     completion_rationale MUST explain how the beat list satisfies strategy.arc.completion_criteria.
+    Each beat rationale MUST explain the writing logic for that beat, the transition it enables or
+    resolves, and any nearby alternative weighed.
     rationale MUST explain why this beat order resolves the strategy, why the payoff lands where it
     does, and why the final R8 loop span is the right distinct source echo.
 
     NON-NEGOTIABLE STORY CONTRACT:
+    - Scope stays the tightest local thread. Do not switch to whole-talk synthesis.
+    - value_score gates eligibility: a candidate may be quotable, but value_score does not decide
+      adjacency, ordering, or whether two lines read coherently together.
     - The ordered beats MUST follow one narrative thread from the hook candidate to a payoff span
       that answers the hook promise.
     - The payoff is not "the most impressive quote"; it is the span that resolves the tension created
       by strategy.hook.banner_line and strategy.hook.span_quote.
     - Drop strong but unrelated candidates when they do not move this single thread forward.
     - Do not mix three topics just because all candidates are individually good.
+    - If two selected lines jump over the connective why, include a bridge span from the candidate
+      pool when that bridge reads better than dropping or reordering.
+    - If the available bridge is filler, redundant, or drags the reel away from the local thread,
+      cut at a cleaner idea boundary, drop the weaker line, or reorder instead.
     - Every beat must satisfy one strategy.arc.completion_criteria item, bridge two named criteria,
       or provide non-duplicative proof/mechanism for the payoff.
     - Do not add repeated examples, optional-only branches, or recap beats just to make the reel
@@ -111,6 +130,9 @@ function ArrangeReel(
 
     SPAN POLICY:
     - Every span_quote must be VERBATIM from its referenced candidate.
+    - Candidate transcript context is advisory reading context. Output only VERBATIM spans that
+      exist in Candidates. Local bridge candidates are allowed only when they appear in Candidates
+      with a ctx_ candidate_id.
     - Single-candidate trim: span_quote may be any contiguous verbatim source-token substring inside
       the referenced PlannerCandidate.word_range.
     - Adjacent span join: span_quote may be one continuous source-token range that starts inside the
@@ -166,6 +188,9 @@ function ArrangeReel(
     {{ strategy }}
 
     Repair hint: {{ repair_hint }}
+
+    Candidate transcript context:
+    {{ candidate_contexts }}
 
     Candidates:
     {{ candidates }}
@@ -230,6 +255,7 @@ test ArrangeBasic {
       }
       rationale "the arc is complete when the pattern-match claim explains the hook and loops cleanly"
     }
+    candidate_contexts []
     repair_hint null
   }
 }

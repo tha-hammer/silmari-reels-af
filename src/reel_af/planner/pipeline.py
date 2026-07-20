@@ -10,7 +10,15 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from reel_af.dsl.models import Diagnostic, WordsSidecar
+from reel_af.dsl.compile import compile_composite
+from reel_af.dsl.composite import read_composite
+from reel_af.dsl.models import (
+    CompileContext,
+    DSL_HOOKS_WORKFLOW,
+    Diagnostic,
+    SourceRef,
+    WordsSidecar,
+)
 from reel_af.planner.config import PlannerConfig, load_planner_config
 from reel_af.planner.lint import LintDiagnostic, lint_blueprint
 from reel_af.planner.llm import BamlPlannerLLM, PlannerLLM
@@ -20,6 +28,15 @@ from reel_af.planner.models import (
     DurationPolicy,
     PlannerCandidate,
     Register,
+)
+from reel_af.planner.script_coherence import (
+    build_candidate_contexts,
+    build_script_beats,
+    build_script_transitions,
+    coherence_diagnostics,
+    coherence_repair_hint,
+    contextual_candidate_pool,
+    strategy_candidate_ids,
 )
 from reel_af.planner.serialize import (
     PlannedCutIn,
@@ -32,6 +49,9 @@ from reel_af.planner.verbatim import VerbatimRejection, enforce_verbatim
 PLANNER_EMPTY_CANDIDATE_SET = "planner_empty_candidate_set"
 PLANNER_UNMATCHED_SEGMENT = "planner_unmatched_segment"
 PLANNER_RETENTION_LINT_FAILED = "retention_lint_failed"
+PLANNER_SCRIPT_COHERENCE_FAILED = "planner_script_coherence_failed"
+PLANNER_RENDER_COMPILE_FAILED = "planner_render_compile_failed"
+MAX_SCRIPT_COHERENCE_REPAIR_PASSES = 2
 
 
 @dataclass(frozen=True)
@@ -89,27 +109,73 @@ async def plan(
         }
 
     strategy = await llm.strategize(transcript, candidates, duration_policy)
+    arrange_candidates = contextual_candidate_pool(
+        candidates,
+        words,
+        selected_candidate_ids=strategy_candidate_ids(strategy),
+    )
+    candidate_contexts = build_candidate_contexts(arrange_candidates, words)
 
-    attempts = cfg.max_repair_passes + 1
+    general_repairs = 0
+    coherence_repairs = 0
+    max_coherence_repairs = (
+        0 if cfg.max_repair_passes <= 0 else MAX_SCRIPT_COHERENCE_REPAIR_PASSES
+    )
+    attempts = cfg.max_repair_passes + max_coherence_repairs + 1
     last_unresolved: list[Any] = []
     repair_hint: str | None = None
     for _attempt in range(attempts):
-        blueprint = await llm.arrange(candidates, strategy, repair_hint=repair_hint)
+        blueprint = await llm.arrange(
+            arrange_candidates,
+            strategy,
+            candidate_contexts=candidate_contexts,
+            repair_hint=repair_hint,
+        )
         resolved = resolve_timecodes(
             blueprint.beats,
             words,
-            candidates=candidates,
+            candidates=arrange_candidates,
             floor=cfg.verbatim_floor,
         )
         last_unresolved = [item for item in resolved if not item.resolved]
         if last_unresolved:
+            if general_repairs >= cfg.max_repair_passes:
+                break
+            general_repairs += 1
             repair_hint = _repair_hint(
                 last_unresolved,
-                candidates,
+                arrange_candidates,
                 words,
                 max_chars=cfg.max_repair_hint_chars,
             )
             continue
+
+        script_beats = build_script_beats(blueprint.beats, resolved)
+        transitions = build_script_transitions(script_beats, resolved, words)
+        script_coherence = await llm.check_script_coherence(
+            blueprint,
+            script_beats,
+            transitions,
+            strategy,
+            candidate_contexts,
+            repair_hint=repair_hint,
+        )
+        if not bool(_get(script_coherence, "coherent", False)):
+            if coherence_repairs < max_coherence_repairs:
+                coherence_repairs += 1
+                repair_hint = coherence_repair_hint(
+                    script_coherence,
+                    max_chars=cfg.max_repair_hint_chars,
+                )
+                continue
+            script_coherence_ref = _write_script_coherence(out_dir, script_coherence)
+            return {
+                "error": PLANNER_SCRIPT_COHERENCE_FAILED,
+                "diagnostics": [
+                    _diagnostic_dict(diag) for diag in coherence_diagnostics(script_coherence)
+                ],
+                "script_coherence_ref": script_coherence_ref,
+            }
 
         lint_diags = lint_blueprint(
             blueprint,
@@ -119,12 +185,13 @@ async def plan(
             register=register,
             duration_policy=duration_policy,
             strategy=strategy,
-            candidates=candidates,
+            candidates=arrange_candidates,
         )
         lint_errors = [diag for diag in lint_diags if diag.severity == "error"]
         if lint_errors:
             r7_errors = [diag for diag in lint_errors if diag.rule == "R7"]
-            if r7_errors and _attempt < attempts - 1:
+            if r7_errors and general_repairs < cfg.max_repair_passes:
+                general_repairs += 1
                 repair_hint = _r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars)
                 continue
             return {
@@ -133,6 +200,21 @@ async def plan(
             }
 
         composite = serialize_composite(blueprint, resolved)
+        compiled = _compile_render_composite(composite, words, source_url)
+        if _get(compiled, "status", None) == "error" or _get(compiled, "plan", None) is None:
+            if general_repairs < cfg.max_repair_passes:
+                general_repairs += 1
+                repair_hint = _render_compile_repair_hint(
+                    _get(compiled, "diagnostics", []) or [],
+                    max_chars=cfg.max_repair_hint_chars,
+                )
+                continue
+            return {
+                "error": PLANNER_RENDER_COMPILE_FAILED,
+                "diagnostics": [
+                    _diagnostic_dict(diag) for diag in _get(compiled, "diagnostics", []) or []
+                ],
+            }
         composite_ref = str(Path(out_dir) / "composite.ts.md")
         hook_plan = build_hook_plan(
             source_url=source_url,
@@ -149,9 +231,10 @@ async def plan(
             words,
             hook_plan,
             mined_candidates=mined_candidates,
-            accepted_candidates=candidates,
+            accepted_candidates=arrange_candidates,
             strategy=strategy,
             blueprint=blueprint,
+            script_coherence=script_coherence,
         )
 
     return {
@@ -184,6 +267,7 @@ def _write_triple(
     accepted_candidates: Any | None = None,
     strategy: Any | None = None,
     blueprint: Any | None = None,
+    script_coherence: Any | None = None,
 ) -> dict[str, str]:
     root = Path(out_dir)
     root.mkdir(parents=True, exist_ok=True)
@@ -195,6 +279,7 @@ def _write_triple(
     accepted_candidates_path = root / "accepted-candidates.json"
     strategy_path = root / "strategy.json"
     blueprint_path = root / "blueprint.json"
+    script_coherence_path = root / "script-coherence.json"
 
     composite_path.write_text(composite, encoding="utf-8")
     _write_json(words_path, words)
@@ -203,6 +288,7 @@ def _write_triple(
     _write_json(accepted_candidates_path, accepted_candidates or [])
     _write_json(strategy_path, strategy)
     _write_json(blueprint_path, blueprint)
+    _write_json(script_coherence_path, script_coherence)
 
     return {
         "composite_ref": str(composite_path),
@@ -212,7 +298,16 @@ def _write_triple(
         "accepted_candidates_ref": str(accepted_candidates_path),
         "strategy_ref": str(strategy_path),
         "blueprint_ref": str(blueprint_path),
+        "script_coherence_ref": str(script_coherence_path),
     }
+
+
+def _write_script_coherence(out_dir: str | Path, script_coherence: Any) -> str:
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "script-coherence.json"
+    _write_json(path, script_coherence)
+    return str(path)
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -522,6 +617,41 @@ def _r7_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str
     return hint[:max_chars]
 
 
+def _compile_render_composite(composite: str, words: WordsSidecar, source_url: str) -> Any:
+    return compile_composite(
+        read_composite(composite),
+        words,
+        SourceRef(source_url=source_url),
+        context=CompileContext(
+            workflow=DSL_HOOKS_WORKFLOW,
+            source_url=source_url,
+            delivery_required=True,
+        ),
+    )
+
+
+def _render_compile_repair_hint(diagnostics: Sequence[Diagnostic], *, max_chars: int) -> str:
+    rendered = "; ".join(_diagnostic_summary(diag) for diag in diagnostics)
+    has_join_refusal = any(_get(diag, "code", None) == "JOIN_REFUSED" for diag in diagnostics)
+    if has_join_refusal:
+        hint = (
+            "RENDER-COMPILE failed with JOIN_REFUSED. Use Trans/cut instead of Join unless "
+            "the two adjacent spans are truly forward source-time neighbors after the real DSL "
+            f"compiler aligns them. Diagnostics: {rendered}"
+        )
+    else:
+        hint = f"RENDER-COMPILE failed. Repair the serialized script so it compiles. Diagnostics: {rendered}"
+    return hint[:max_chars]
+
+
+def _diagnostic_summary(diag: Diagnostic) -> str:
+    context = _get(diag, "context", None) or {}
+    context_text = ""
+    if context:
+        context_text = " " + json.dumps(_jsonable(context), sort_keys=True)
+    return f"{_get(diag, 'code', 'UNKNOWN')}: {_get(diag, 'message', '')}{context_text}"
+
+
 def _candidate_for_unresolved(item: Any, candidates: list[Any]) -> Any:
     beat_candidate_id = _get(getattr(item, "beat", None), "candidate_id", None)
     if beat_candidate_id:
@@ -556,6 +686,8 @@ def _get(value: Any, name: str, default: Any = None) -> Any:
 __all__ = [
     "PLANNER_EMPTY_CANDIDATE_SET",
     "PLANNER_RETENTION_LINT_FAILED",
+    "PLANNER_RENDER_COMPILE_FAILED",
+    "PLANNER_SCRIPT_COHERENCE_FAILED",
     "PLANNER_UNMATCHED_SEGMENT",
     "plan",
 ]
