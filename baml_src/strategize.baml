@@ -1,7 +1,7 @@
 function StrategizeReel(
   transcript_text: string,
   candidates: PlannerCandidate[],
-  bounds: DurationBounds
+  duration_policy: DurationPolicy
 ) -> ReelStrategy {
   client PlannerFallback
   prompt #"
@@ -12,19 +12,33 @@ function StrategizeReel(
     REQUIRED OUTPUT DECISIONS:
     - Choose ONE template whose structure fits the candidate chain, not the most exciting quote.
     - Choose ONE hook referencing exactly one candidate_id/occurrence_index.
+    - Define the ArcPlan: promise, thread, completion_criteria, required_candidate_ids, optional
+      candidate_ids, and any excluded candidates.
+    - Propose duration_range_s as latitude for the arc, not a target to hit.
     - Choose ONE primary engagement lever.
     - Choose one CTA plan.
     - Preserve candidate identity.
-    - target_duration_s MUST be within [{{ bounds.min_s }}, {{ bounds.max_s }}]s.
-    - rationale MUST state why the selected template_, hook, target_duration_s, engagement lever,
-      and CTA plan fit the candidate chain and retention rules.
+    - Copy duration_policy into the output unchanged.
+    - rationale MUST state why the selected template_, hook, arc, duration_range_s, engagement
+      lever, and CTA plan fit the candidate chain and retention rules.
 
-    TIGHT TARGET LENGTH BAND:
-    - Pick the shortest band that can resolve the hook promise: 18-24s for one clean idea, 24-32s
-      for a claim plus proof, 32-42s for context plus mechanism, 42-55s only for a real story turn.
-    - If the requested bounds exclude the ideal band, choose the nearest valid 6-10s band inside
-      [{{ bounds.min_s }}, {{ bounds.max_s }}]s.
-    - Do not use a broad max bound as permission to sprawl.
+    CONTENT-DRIVEN LENGTH LATITUDE:
+    - The reel is exactly as long as the content justifies to complete a coherent narrative arc.
+    - Do NOT fit to a requested timecode. Do NOT pad to reach duration_policy.advisory_min_s.
+    - Do NOT truncate a coherent narrative just because duration_policy.advisory_max_s is short.
+    - duration_policy.effective_cap_s is the active cap. Stay under it unless a later cap cut is
+      needed by ArrangeReel.
+    - Use duration_range_s to estimate the coherent arc: 20-40s for one complete idea, 60-100s for
+      a proof/mechanism arc, 120-175s for a source video whose complete narrative needs many
+      non-duplicative beats.
+    - A broad cap is not permission to sprawl. Every required candidate must answer one named
+      completion criterion.
+    - A long source with strong early, middle, and late candidates must not be compressed into the
+      old hook/context/value/payoff/CTA five-beat skeleton by default. Split setup, mechanisms,
+      examples, consequences, payoff, and loop into separate completion criteria when they are
+      distinct source ideas.
+    - A compact five-beat strategy is valid only when the rationale explains why candidates from
+      other source windows are optional, excluded, or unrelated to the chosen complete arc.
 
     TEMPLATE CHOICE:
     - HookContextValuePayoffCta: default for a clear claim, context, mechanism, payoff.
@@ -49,6 +63,15 @@ function StrategizeReel(
     - The hook promise and payoff candidate MUST be the same topic, same tension, and same answer.
     - Reject any hook whose best payoff is merely adjacent, impressive, or from another topic.
     - The final arranged reel must make the viewer feel: "that answered what the first line promised."
+
+    COMPLETION CONTRACT:
+    - completion_criteria must name the minimum conditions for the arc to feel complete: hook
+      promise, minimum context, proof/mechanism/example material, direct payoff, and R8 loop echo.
+    - required_candidate_ids must include every candidate needed for those criteria.
+    - optional_candidate_ids are useful support only; they are first to drop under cap pressure.
+    - excluded_candidate_ids should name attractive candidates that would create a second topic,
+      repeated proof, or padding.
+    - Do not mark an arc complete if the selected candidates cannot resolve the hook.
 
     SPAN POLICY:
     - Quotes must stay VERBATIM.
@@ -85,11 +108,21 @@ function StrategizeReel(
       homework."
     - Banned R9 lever: do not choose Share to imply "share if you agree" or "tag 5 friends." Those
       are generic bait, not a specific distribution cue.
+    - Good 25s arc: one hook, one proof, one payoff, one loop; duration_range_s 22-32s because the
+      content is complete quickly.
+    - Good 85s arc: hook plus context, two non-duplicative mechanisms, one consequence, payoff, and
+      loop; duration_range_s 75-100s because each proof criterion needs a separate source span.
+    - Good 165s arc: a long source where early setup, middle failure, late mechanism, and final
+      payoff all matter; duration_range_s 140-175s, with optional branches excluded.
+    - Over-cap arc: if the complete source story would exceed duration_policy.effective_cap_s, mark
+      optional candidates clearly so ArrangeReel can make a coherent under-cap cut.
+    - Bad short arc: five beats chosen just because older examples were short, or five compound
+      criteria where each criterion hides multiple distinct mechanisms that should be separate beats.
 
     RATIONALE STYLE:
     - Explain the specific choice, not the rules in general.
     - Name the candidate relationship that makes the hook/payoff work.
-    - Name why the target length is tight enough for the idea.
+    - Name why the duration range is enough for the arc without padding.
     - Keep rationale to 1-3 concise sentences.
 
     Candidates:
@@ -97,6 +130,9 @@ function StrategizeReel(
 
     Transcript:
     {{ transcript_text }}
+
+    Duration policy:
+    {{ duration_policy }}
   "#
 }
 
@@ -119,9 +155,12 @@ test StrategizeBasic {
         payoff_worthy true
       }
     ]
-    bounds {
-      min_s 20.0
-      max_s 35.0
+    duration_policy {
+      soft_cap_s 180.0
+      effective_cap_s 180.0
+      advisory_min_s 20.0
+      advisory_max_s 35.0
+      cap_overridden false
     }
   }
 }

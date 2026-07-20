@@ -8,7 +8,7 @@ from typing import Any, Literal, Protocol
 
 from baml_client.types import (
     CandidateSpan,
-    DurationBounds,
+    DurationPolicy,
     PlannerCandidate,
     ReelBlueprint,
     ReelStrategy,
@@ -80,17 +80,16 @@ def _cfg_value(cfg: Any, *names: str, default: Any = None) -> Any:
     return default
 
 
-def _require_bounds(bounds: DurationBounds | None) -> DurationBounds:
-    if bounds is None:
-        raise BamlPlannerInputError("duration bounds are required for BAML strategize")
-    min_s, max_s = _bounds_values(bounds)
-    if min_s <= 0 or max_s <= 0 or max_s < min_s:
-        raise BamlPlannerInputError("duration bounds must be positive and ordered")
-    return bounds
-
-
-def _bounds_values(bounds: DurationBounds) -> tuple[float, float]:
-    return float(_field(bounds, "min_s")), float(_field(bounds, "max_s"))
+def _require_duration_policy(policy: DurationPolicy | None) -> DurationPolicy:
+    if policy is None:
+        raise BamlPlannerInputError("duration policy is required for BAML strategize")
+    soft_cap_s = float(_field(policy, "soft_cap_s"))
+    effective_cap_s = float(_field(policy, "effective_cap_s"))
+    if soft_cap_s <= 0 or effective_cap_s <= 0:
+        raise BamlPlannerInputError("duration policy caps must be positive")
+    if effective_cap_s < soft_cap_s and not bool(_field(policy, "cap_overridden")):
+        raise BamlPlannerInputError("duration policy effective_cap_s must not shrink the soft cap")
+    return policy
 
 
 def _field(value: Any, name: str) -> Any:
@@ -108,6 +107,78 @@ def _optional_field(value: Any, name: str, default: Any = None) -> Any:
 def _require_rationale(value: Any, phase: str) -> None:
     if not str(_optional_field(value, "rationale", "") or "").strip():
         raise BamlPlannerContractError(f"{phase} rationale is required")
+
+
+def _require_completion_rationale(value: Any) -> None:
+    if not str(_optional_field(value, "completion_rationale", "") or "").strip():
+        raise BamlPlannerContractError("ArrangeReel completion_rationale is required")
+
+
+def _duration_range_bounds(value: Any, phase: str) -> tuple[float, float]:
+    duration_range = _optional_field(value, "duration_range_s", None)
+    if duration_range is None:
+        raise BamlPlannerContractError(f"{phase} duration_range_s is required")
+    min_s = float(_field(duration_range, "min_s"))
+    max_s = float(_field(duration_range, "max_s"))
+    rationale = str(_optional_field(duration_range, "rationale", "") or "").strip()
+    if min_s <= 0 or max_s <= 0 or max_s < min_s:
+        raise BamlPlannerContractError(f"{phase} duration_range_s must be positive and ordered")
+    if not rationale:
+        raise BamlPlannerContractError(f"{phase} duration_range_s rationale is required")
+    return min_s, max_s
+
+
+def _require_duration_range(value: Any, phase: str) -> None:
+    _duration_range_bounds(value, phase)
+
+
+def _require_duration_range_under_policy(value: Any, policy: DurationPolicy, phase: str) -> None:
+    _min_s, max_s = _duration_range_bounds(value, phase)
+    effective_cap_s = float(_field(policy, "effective_cap_s"))
+    if max_s > effective_cap_s:
+        raise BamlPlannerContractError(
+            f"{phase} duration_range_s max_s exceeds duration_policy effective_cap_s"
+        )
+
+
+def _require_arc(value: Any, candidates: list[PlannerCandidate], phase: str) -> None:
+    arc = _optional_field(value, "arc", None)
+    if arc is None:
+        raise BamlPlannerContractError(f"{phase} arc is required")
+    criteria = [
+        str(item).strip()
+        for item in (_optional_field(arc, "completion_criteria", None) or [])
+        if str(item).strip()
+    ]
+    required_ids = [
+        str(item).strip()
+        for item in (_optional_field(arc, "required_candidate_ids", None) or [])
+        if str(item).strip()
+    ]
+    if not str(_optional_field(arc, "promise", "") or "").strip():
+        raise BamlPlannerContractError(f"{phase} arc promise is required")
+    if not str(_optional_field(arc, "thread", "") or "").strip():
+        raise BamlPlannerContractError(f"{phase} arc thread is required")
+    if not criteria:
+        raise BamlPlannerContractError(f"{phase} completion_criteria are required")
+    if not required_ids:
+        raise BamlPlannerContractError(f"{phase} required_candidate_ids are required")
+    known_ids = {str(_field(candidate, "candidate_id")) for candidate in candidates}
+    unknown = sorted(set(required_ids) - known_ids)
+    if unknown:
+        raise BamlPlannerContractError(
+            f"{phase} required_candidate_ids are unknown: {', '.join(unknown)}"
+        )
+
+
+def _require_strategy_contract(
+    strategy: ReelStrategy,
+    candidates: list[PlannerCandidate],
+    duration_policy: DurationPolicy,
+) -> None:
+    _require_duration_range_under_policy(strategy, duration_policy, "StrategizeReel")
+    _require_arc(strategy, candidates, "StrategizeReel")
+    _require_rationale(strategy, "StrategizeReel")
 
 
 def _require_candidate_rationales(candidates: list[Any]) -> None:
@@ -138,7 +209,7 @@ class PlannerLLM(Protocol):
         self,
         transcript: str,
         candidates: list[PlannerCandidate],
-        bounds: DurationBounds,
+        duration_policy: DurationPolicy,
     ) -> ReelStrategy:
         """Return a reel strategy for candidate spans."""
 
@@ -175,9 +246,9 @@ class FakePlannerLLM:
         self,
         transcript: str,
         candidates: list[PlannerCandidate],
-        bounds: DurationBounds,
+        duration_policy: DurationPolicy,
     ) -> ReelStrategy:
-        self.calls.append(("strategize", bounds))
+        self.calls.append(("strategize", duration_policy))
         return self.strategy
 
     async def arrange(
@@ -201,7 +272,7 @@ class NeverPlannerLLM:
         self,
         transcript: str,
         candidates: list[PlannerCandidate],
-        bounds: DurationBounds,
+        duration_policy: DurationPolicy,
     ) -> ReelStrategy:
         raise AssertionError("PlannerLLM.strategize must not be called")
 
@@ -242,19 +313,16 @@ class BamlPlannerLLM:
         self,
         transcript: str,
         candidates: list[PlannerCandidate],
-        bounds: DurationBounds,
+        duration_policy: DurationPolicy,
     ) -> ReelStrategy:
-        bounds = _require_bounds(bounds)
+        duration_policy = _require_duration_policy(duration_policy)
         result = await _baml_functions().StrategizeReel(
             transcript,
             candidates,
-            bounds,
+            duration_policy,
             baml_options=self._baml_options(),
         )
-        min_s, max_s = _bounds_values(bounds)
-        if not min_s <= result.target_duration_s <= max_s:
-            raise BamlPlannerContractError("strategy target_duration_s is outside duration bounds")
-        _require_rationale(result, "StrategizeReel")
+        _require_strategy_contract(result, candidates, duration_policy)
         return result
 
     async def arrange(
@@ -272,6 +340,13 @@ class BamlPlannerLLM:
             repair_hint,
             baml_options=self._baml_options(),
         )
+        _require_duration_range_under_policy(
+            result,
+            _field(strategy, "duration_policy"),
+            "ArrangeReel",
+        )
+        _require_arc(result, candidates, "ArrangeReel")
+        _require_completion_rationale(result)
         _require_rationale(result, "ArrangeReel")
         return result
 

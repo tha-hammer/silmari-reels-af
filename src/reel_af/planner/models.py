@@ -6,6 +6,7 @@ from enum import Enum
 from typing import Literal, TypeVar
 
 from baml_client.types import (
+    ArcPlan,
     Beat,
     BeatRole,
     CandidateSpan,
@@ -14,6 +15,8 @@ from baml_client.types import (
     CutIn,
     CutInKind,
     DurationBounds,
+    DurationPolicy,
+    DurationRange,
     Engagement,
     EngagementKind,
     Hook,
@@ -101,6 +104,7 @@ def _enum_value(value: object) -> str:
 
 
 __all__ = [
+    "ArcPlan",
     "Beat",
     "BeatRole",
     "CandidateSpan",
@@ -109,6 +113,8 @@ __all__ = [
     "CutIn",
     "CutInKind",
     "DurationBounds",
+    "DurationPolicy",
+    "DurationRange",
     "Engagement",
     "EngagementKind",
     "Hook",

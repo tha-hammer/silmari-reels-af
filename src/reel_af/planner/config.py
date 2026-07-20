@@ -64,6 +64,12 @@ class PlannerConfig(BaseModel):
     max_transcript_chars: int = _v("max_transcript_chars", gt=0)
     max_candidates: int = _v("max_candidates", gt=0)
     max_beats: int = _v("max_beats", gt=0)
+    r7_soft_cap_s: float = _v("r7_soft_cap_s", gt=0)
+    r7_cap_tolerance_s: float = _v("r7_cap_tolerance_s", ge=0)
+    mine_window_duration_s: float = _v("mine_window_duration_s", gt=0)
+    mine_window_overlap_s: float = _v("mine_window_overlap_s", ge=0)
+    mine_candidates_per_window: int = _v("mine_candidates_per_window", gt=0)
+    mine_max_windows: int = _v("mine_max_windows", gt=0)
     max_repair_hint_chars: int = _v("max_repair_hint_chars", gt=0)
     max_audio_bytes: int = _v("max_audio_bytes", gt=0)
     max_audio_duration_s: float = _v("max_audio_duration_s", gt=0)
@@ -109,6 +115,12 @@ class PlannerConfig(BaseModel):
             or bounds_default.max_s <= bounds_default.min_s
         ):
             raise ValueError("bounds_default must contain finite ordered min_s/max_s values")
+        if not math.isfinite(self.r7_soft_cap_s):
+            raise ValueError("r7_soft_cap_s must be finite")
+        if not math.isfinite(self.r7_cap_tolerance_s):
+            raise ValueError("r7_cap_tolerance_s must be finite")
+        if self.mine_window_overlap_s >= self.mine_window_duration_s:
+            raise ValueError("mine_window_overlap_s must be less than mine_window_duration_s")
         if not self.allow_local_only_asr and not self.remote_asr_chain:
             raise ValueError("remote_asr_chain must not be empty unless allow_local_only_asr=true")
         return self

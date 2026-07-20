@@ -20,7 +20,7 @@ from .globals import DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIM
 class TypeBuilder(type_builder.TypeBuilder):
     def __init__(self):
         super().__init__(classes=set(
-          ["Beat","CandidateSpan","CtaPlan","CutIn","DurationBounds","Engagement","Hook","Interrupt","LoopPlan","PlannerCandidate","ReelBlueprint","ReelStrategy",]
+          ["ArcPlan","Beat","CandidateSpan","CtaPlan","CutIn","DurationBounds","DurationPolicy","DurationRange","Engagement","Hook","Interrupt","LoopPlan","PlannerCandidate","ReelBlueprint","ReelStrategy",]
         ), enums=set(
           ["BeatRole","CtaHardness","CutInKind","EngagementKind","HookType","InterruptKind","Template","XfadeEffect",]
         ), runtime=DO_NOT_USE_DIRECTLY_UNLESS_YOU_KNOW_WHAT_YOURE_DOING_RUNTIME)
@@ -63,8 +63,12 @@ class TypeBuilder(type_builder.TypeBuilder):
 
 
     # #########################################################################
-    # Generated classes 12
+    # Generated classes 15
     # #########################################################################
+
+    @property
+    def ArcPlan(self) -> "ArcPlanViewer":
+        return ArcPlanViewer(self)
 
     @property
     def Beat(self) -> "BeatViewer":
@@ -85,6 +89,14 @@ class TypeBuilder(type_builder.TypeBuilder):
     @property
     def DurationBounds(self) -> "DurationBoundsViewer":
         return DurationBoundsViewer(self)
+
+    @property
+    def DurationPolicy(self) -> "DurationPolicyViewer":
+        return DurationPolicyViewer(self)
+
+    @property
+    def DurationRange(self) -> "DurationRangeViewer":
+        return DurationRangeViewer(self)
 
     @property
     def Engagement(self) -> "EngagementViewer":
@@ -582,14 +594,73 @@ class XfadeEffectValues:
 
 
 # #########################################################################
-# Generated classes 12
+# Generated classes 15
 # #########################################################################
+
+class ArcPlanAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("ArcPlan")
+        self._properties: typing.Set[str] = set([  "promise",  "thread",  "completion_criteria",  "required_candidate_ids",  "optional_candidate_ids",  "excluded_candidate_ids",  ])
+        self._props = ArcPlanProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "ArcPlanProperties":
+        return self._props
+
+
+class ArcPlanViewer(ArcPlanAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class ArcPlanProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def promise(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("promise"))
+    
+    @property
+    def thread(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("thread"))
+    
+    @property
+    def completion_criteria(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("completion_criteria"))
+    
+    @property
+    def required_candidate_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("required_candidate_ids"))
+    
+    @property
+    def optional_candidate_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("optional_candidate_ids"))
+    
+    @property
+    def excluded_candidate_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("excluded_candidate_ids"))
+    
+    
+
 
 class BeatAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("Beat")
-        self._properties: typing.Set[str] = set([  "role",  "span_quote",  "candidate_id",  "occurrence_index",  "max_len_s",  "cutin",  "interrupt_out",  "engagement",  ])
+        self._properties: typing.Set[str] = set([  "role",  "span_quote",  "candidate_id",  "occurrence_index",  "max_len_s",  "completion_role",  "completion_criterion_ids",  "cutin",  "interrupt_out",  "engagement",  ])
         self._props = BeatProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -638,6 +709,14 @@ class BeatProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("max_len_s"))
     
     @property
+    def completion_role(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("completion_role"))
+    
+    @property
+    def completion_criterion_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("completion_criterion_ids"))
+    
+    @property
     def cutin(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("cutin"))
     
@@ -656,7 +735,7 @@ class CandidateSpanAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("CandidateSpan")
-        self._properties: typing.Set[str] = set([  "quote",  "approx_start_s",  "approx_end_s",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
+        self._properties: typing.Set[str] = set([  "quote",  "approx_start_s",  "approx_end_s",  "source_window_id",  "source_window_index",  "source_window_start_s",  "source_window_end_s",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
         self._props = CandidateSpanProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -695,6 +774,22 @@ class CandidateSpanProperties:
     @property
     def approx_end_s(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("approx_end_s"))
+    
+    @property
+    def source_window_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_id"))
+    
+    @property
+    def source_window_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_index"))
+    
+    @property
+    def source_window_start_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_start_s"))
+    
+    @property
+    def source_window_end_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_end_s"))
     
     @property
     def value_score(self) -> type_builder.ClassPropertyViewer:
@@ -860,6 +955,108 @@ class DurationBoundsProperties:
     @property
     def max_s(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("max_s"))
+    
+    
+
+
+class DurationPolicyAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("DurationPolicy")
+        self._properties: typing.Set[str] = set([  "soft_cap_s",  "effective_cap_s",  "advisory_min_s",  "advisory_max_s",  "cap_overridden",  ])
+        self._props = DurationPolicyProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "DurationPolicyProperties":
+        return self._props
+
+
+class DurationPolicyViewer(DurationPolicyAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class DurationPolicyProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def soft_cap_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("soft_cap_s"))
+    
+    @property
+    def effective_cap_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("effective_cap_s"))
+    
+    @property
+    def advisory_min_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("advisory_min_s"))
+    
+    @property
+    def advisory_max_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("advisory_max_s"))
+    
+    @property
+    def cap_overridden(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("cap_overridden"))
+    
+    
+
+
+class DurationRangeAst:
+    def __init__(self, tb: type_builder.TypeBuilder):
+        _tb = tb._tb # type: ignore (we know how to use this private attribute)
+        self._bldr = _tb.class_("DurationRange")
+        self._properties: typing.Set[str] = set([  "min_s",  "max_s",  "rationale",  ])
+        self._props = DurationRangeProperties(self._bldr, self._properties)
+
+    def type(self) -> baml_py.FieldType:
+        return self._bldr.field()
+
+    @property
+    def props(self) -> "DurationRangeProperties":
+        return self._props
+
+
+class DurationRangeViewer(DurationRangeAst):
+    def __init__(self, tb: type_builder.TypeBuilder):
+        super().__init__(tb)
+
+    
+    def list_properties(self) -> typing.List[typing.Tuple[str, type_builder.ClassPropertyViewer]]:
+        return [(name, type_builder.ClassPropertyViewer(self._bldr.property(name))) for name in self._properties]
+    
+
+
+class DurationRangeProperties:
+    def __init__(self, bldr: baml_py.ClassBuilder, properties: typing.Set[str]):
+        self.__bldr = bldr
+        self.__properties = properties # type: ignore (we know how to use this private attribute) # noqa: F821
+
+    
+    
+    @property
+    def min_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("min_s"))
+    
+    @property
+    def max_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("max_s"))
+    
+    @property
+    def rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
     
     
 
@@ -1068,7 +1265,7 @@ class PlannerCandidateAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("PlannerCandidate")
-        self._properties: typing.Set[str] = set([  "candidate_id",  "quote",  "occurrence_index",  "word_range",  "start_s",  "end_s",  "quality",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
+        self._properties: typing.Set[str] = set([  "candidate_id",  "quote",  "occurrence_index",  "word_range",  "start_s",  "end_s",  "source_window_id",  "source_window_index",  "source_window_start_s",  "source_window_end_s",  "quality",  "value_score",  "emotion",  "is_claim",  "payoff_worthy",  "rationale",  ])
         self._props = PlannerCandidateProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1121,6 +1318,22 @@ class PlannerCandidateProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("end_s"))
     
     @property
+    def source_window_id(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_id"))
+    
+    @property
+    def source_window_index(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_index"))
+    
+    @property
+    def source_window_start_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_start_s"))
+    
+    @property
+    def source_window_end_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("source_window_end_s"))
+    
+    @property
     def quality(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("quality"))
     
@@ -1151,7 +1364,7 @@ class ReelBlueprintAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("ReelBlueprint")
-        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "beats",  "loop",  "engagement_primary",  "cta",  "rationale",  ])
+        self._properties: typing.Set[str] = set([  "template_",  "duration_range_s",  "duration_policy",  "arc",  "hook",  "beats",  "loop",  "engagement_primary",  "cta",  "completion_rationale",  "cap_rationale",  "omitted_candidate_ids",  "rationale",  ])
         self._props = ReelBlueprintProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1184,8 +1397,16 @@ class ReelBlueprintProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("template_"))
     
     @property
-    def target_duration_s(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("target_duration_s"))
+    def duration_range_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("duration_range_s"))
+    
+    @property
+    def duration_policy(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("duration_policy"))
+    
+    @property
+    def arc(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("arc"))
     
     @property
     def hook(self) -> type_builder.ClassPropertyViewer:
@@ -1208,6 +1429,18 @@ class ReelBlueprintProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("cta"))
     
     @property
+    def completion_rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("completion_rationale"))
+    
+    @property
+    def cap_rationale(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("cap_rationale"))
+    
+    @property
+    def omitted_candidate_ids(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("omitted_candidate_ids"))
+    
+    @property
     def rationale(self) -> type_builder.ClassPropertyViewer:
         return type_builder.ClassPropertyViewer(self.__bldr.property("rationale"))
     
@@ -1218,7 +1451,7 @@ class ReelStrategyAst:
     def __init__(self, tb: type_builder.TypeBuilder):
         _tb = tb._tb # type: ignore (we know how to use this private attribute)
         self._bldr = _tb.class_("ReelStrategy")
-        self._properties: typing.Set[str] = set([  "template_",  "target_duration_s",  "hook",  "engagement_primary",  "cta",  "rationale",  ])
+        self._properties: typing.Set[str] = set([  "template_",  "duration_range_s",  "duration_policy",  "arc",  "hook",  "engagement_primary",  "cta",  "rationale",  ])
         self._props = ReelStrategyProperties(self._bldr, self._properties)
 
     def type(self) -> baml_py.FieldType:
@@ -1251,8 +1484,16 @@ class ReelStrategyProperties:
         return type_builder.ClassPropertyViewer(self.__bldr.property("template_"))
     
     @property
-    def target_duration_s(self) -> type_builder.ClassPropertyViewer:
-        return type_builder.ClassPropertyViewer(self.__bldr.property("target_duration_s"))
+    def duration_range_s(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("duration_range_s"))
+    
+    @property
+    def duration_policy(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("duration_policy"))
+    
+    @property
+    def arc(self) -> type_builder.ClassPropertyViewer:
+        return type_builder.ClassPropertyViewer(self.__bldr.property("arc"))
     
     @property
     def hook(self) -> type_builder.ClassPropertyViewer:

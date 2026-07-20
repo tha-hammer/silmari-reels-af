@@ -13,7 +13,7 @@ from baml_client.types import (
     CandidateSpan,
     CtaHardness,
     CtaPlan,
-    DurationBounds,
+    DurationPolicy,
     EngagementKind,
     Hook,
     HookType,
@@ -25,6 +25,7 @@ from baml_client.types import (
 )
 from reel_af.planner import llm as llm_mod
 from reel_af.planner.llm import FakePlannerLLM, NeverPlannerLLM, PlannerLLM
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 
 @dataclass
@@ -50,8 +51,8 @@ class _RecordingBaml:
     def __init__(self) -> None:
         self.calls: list[_BamlCall] = []
         self.mine_result = [_candidate("verbatim words")]
-        self.strategy_result = _strategy(target_duration_s=20.0)
-        self.arrange_result = _blueprint(target_duration_s=20.0)
+        self.strategy_result = _strategy()
+        self.arrange_result = _blueprint()
 
     async def MineCandidates(  # noqa: N802 - generated BAML API shape
         self,
@@ -67,12 +68,12 @@ class _RecordingBaml:
         self,
         transcript_text: str,
         candidates: list[PlannerCandidate],
-        bounds: DurationBounds,
+        policy: DurationPolicy,
         *,
         baml_options: dict[str, Any],
     ) -> ReelStrategy:
         self.calls.append(
-            _BamlCall("StrategizeReel", (transcript_text, candidates, bounds), baml_options)
+            _BamlCall("StrategizeReel", (transcript_text, candidates, policy), baml_options)
         )
         return self.strategy_result
 
@@ -105,8 +106,8 @@ def cfg(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
 
 
 @pytest.fixture
-def bounds() -> DurationBounds:
-    return DurationBounds(min_s=15.0, max_s=30.0)
+def policy() -> DurationPolicy:
+    return duration_policy(advisory_min_s=15.0, advisory_max_s=30.0)
 
 
 @pytest.fixture
@@ -116,7 +117,7 @@ def planner_candidates() -> list[PlannerCandidate]:
 
 @pytest.fixture
 def strategy() -> ReelStrategy:
-    return _strategy(target_duration_s=20.0)
+    return _strategy()
 
 
 def _patch_baml(monkeypatch: pytest.MonkeyPatch, rec: _RecordingBaml) -> None:
@@ -174,12 +175,16 @@ def _hook(span_quote: str = "verbatim words") -> Hook:
 
 def _strategy(
     *,
-    target_duration_s: float = 24.0,
-    rationale: str | None = "the template, hook, length, engagement, and CTA fit one thread",
+    range_min_s: float = 18.0,
+    range_max_s: float = 28.0,
+    required_candidate_ids: tuple[str, ...] = ("c001",),
+    rationale: str | None = "the template, hook, arc, range, engagement, and CTA fit one thread",
 ) -> ReelStrategy:
     return ReelStrategy(
         **_template_field(ReelStrategy, Template.HookContextValuePayoffCta),
-        target_duration_s=target_duration_s,
+        duration_range_s=duration_range(min_s=range_min_s, max_s=range_max_s),
+        duration_policy=duration_policy(advisory_min_s=15.0, advisory_max_s=30.0),
+        arc=arc_plan(required_candidate_ids=required_candidate_ids),
         hook=_hook(),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
@@ -189,12 +194,17 @@ def _strategy(
 
 def _blueprint(
     *,
-    target_duration_s: float = 24.0,
+    range_min_s: float = 20.0,
+    range_max_s: float = 35.0,
+    required_candidate_ids: tuple[str, ...] = ("c001",),
+    completion_rationale: str | None = "the hook, proof, payoff, and loop criteria are all covered",
     rationale: str | None = "the beat order builds to payoff and the loop echoes the hook",
 ) -> ReelBlueprint:
     return ReelBlueprint(
         **_template_field(ReelBlueprint, Template.HookContextValuePayoffCta),
-        target_duration_s=target_duration_s,
+        duration_range_s=duration_range(min_s=range_min_s, max_s=range_max_s),
+        duration_policy=duration_policy(),
+        arc=arc_plan(required_candidate_ids=required_candidate_ids),
         hook=_hook("they pattern match"),
         beats=[
             Beat(
@@ -213,6 +223,7 @@ def _blueprint(
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        completion_rationale=completion_rationale,
         rationale=rationale,
     )
 
@@ -222,7 +233,7 @@ def _template_field(model: type[Any], value: Template) -> dict[str, Template]:
     return {field: value}
 
 
-async def test_fake_planner_llm_returns_baml_structs(bounds: DurationBounds):
+async def test_fake_planner_llm_returns_baml_structs(policy: DurationPolicy):
     candidate = _candidate()
     strategy = _strategy()
     blueprint = _blueprint()
@@ -233,7 +244,7 @@ async def test_fake_planner_llm_returns_baml_structs(bounds: DurationBounds):
     )
 
     candidates = await fake.mine("transcript", "educational")
-    planned = await fake.strategize("transcript", candidates, bounds)
+    planned = await fake.strategize("transcript", candidates, policy)
     arranged = await fake.arrange(candidates, planned)
 
     assert candidates == [candidate]
@@ -241,7 +252,7 @@ async def test_fake_planner_llm_returns_baml_structs(bounds: DurationBounds):
     assert arranged is blueprint
     assert fake.calls == [
         ("mine", "educational"),
-        ("strategize", bounds),
+        ("strategize", policy),
         ("arrange", None),
     ]
 
@@ -305,25 +316,25 @@ async def test_mine_enforces_transcript_and_candidate_limits(
         await llm.mine("short transcript", "educational")
 
 
-async def test_strategize_passes_baml_candidates_and_bounds_without_dumping(
+async def test_strategize_passes_baml_candidates_and_policy_without_dumping(
     monkeypatch: pytest.MonkeyPatch,
     cfg: SimpleNamespace,
     planner_candidates: list[PlannerCandidate],
-    bounds: DurationBounds,
+    policy: DurationPolicy,
 ):
     rec = _RecordingBaml()
     _patch_baml(monkeypatch, rec)
 
-    out = await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, bounds)
+    out = await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, policy)
 
     assert rec.calls[0].name == "StrategizeReel"
     assert rec.calls[0].args[1] is planner_candidates
     assert rec.calls[0].args[1][0] is planner_candidates[0]
-    assert rec.calls[0].args[2] is bounds
+    assert rec.calls[0].args[2] is policy
     assert out is rec.strategy_result
 
 
-async def test_strategize_rejects_missing_bounds_before_baml(
+async def test_strategize_rejects_missing_duration_policy_before_baml(
     monkeypatch: pytest.MonkeyPatch,
     cfg: SimpleNamespace,
     planner_candidates: list[PlannerCandidate],
@@ -331,38 +342,66 @@ async def test_strategize_rejects_missing_bounds_before_baml(
     rec = _RecordingBaml()
     _patch_baml(monkeypatch, rec)
 
-    with pytest.raises(llm_mod.BamlPlannerInputError, match="bounds"):
+    with pytest.raises(llm_mod.BamlPlannerInputError, match="duration policy"):
         await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, None)
 
     assert rec.calls == []
 
 
-async def test_strategize_rejects_target_duration_outside_bounds(
+async def test_strategize_rejects_invalid_duration_range(
     monkeypatch: pytest.MonkeyPatch,
     cfg: SimpleNamespace,
     planner_candidates: list[PlannerCandidate],
-    bounds: DurationBounds,
+    policy: DurationPolicy,
 ):
     rec = _RecordingBaml()
-    rec.strategy_result = _strategy(target_duration_s=45.0)
+    rec.strategy_result = _strategy(range_min_s=40.0, range_max_s=30.0)
     _patch_baml(monkeypatch, rec)
 
-    with pytest.raises(llm_mod.BamlPlannerContractError, match="target_duration_s"):
-        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, bounds)
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="duration_range_s"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, policy)
+
+
+async def test_strategize_rejects_duration_range_above_effective_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    policy: DurationPolicy,
+):
+    rec = _RecordingBaml()
+    rec.strategy_result = _strategy(range_max_s=181.0)
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="effective_cap_s"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, policy)
+
+
+async def test_strategize_rejects_unknown_required_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    policy: DurationPolicy,
+):
+    rec = _RecordingBaml()
+    rec.strategy_result = _strategy(required_candidate_ids=("missing",))
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="unknown"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, policy)
 
 
 async def test_strategize_rejects_missing_rationale(
     monkeypatch: pytest.MonkeyPatch,
     cfg: SimpleNamespace,
     planner_candidates: list[PlannerCandidate],
-    bounds: DurationBounds,
+    policy: DurationPolicy,
 ):
     rec = _RecordingBaml()
-    rec.strategy_result = _strategy(target_duration_s=20.0, rationale=None)
+    rec.strategy_result = _strategy(rationale=None)
     _patch_baml(monkeypatch, rec)
 
     with pytest.raises(llm_mod.BamlPlannerContractError, match="StrategizeReel rationale"):
-        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, bounds)
+        await llm_mod.BamlPlannerLLM(cfg=cfg).strategize("t", planner_candidates, policy)
 
 
 async def test_arrange_passes_strategy_object_without_dumping(
@@ -396,10 +435,38 @@ async def test_arrange_rejects_missing_rationale(
     strategy: ReelStrategy,
 ):
     rec = _RecordingBaml()
-    rec.arrange_result = _blueprint(target_duration_s=20.0, rationale=None)
+    rec.arrange_result = _blueprint(rationale=None)
     _patch_baml(monkeypatch, rec)
 
     with pytest.raises(llm_mod.BamlPlannerContractError, match="ArrangeReel rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
+
+
+async def test_arrange_rejects_missing_completion_rationale(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    rec.arrange_result = _blueprint(completion_rationale="")
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="completion_rationale"):
+        await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
+
+
+async def test_arrange_rejects_duration_range_above_strategy_cap(
+    monkeypatch: pytest.MonkeyPatch,
+    cfg: SimpleNamespace,
+    planner_candidates: list[PlannerCandidate],
+    strategy: ReelStrategy,
+):
+    rec = _RecordingBaml()
+    rec.arrange_result = _blueprint(range_max_s=181.0)
+    _patch_baml(monkeypatch, rec)
+
+    with pytest.raises(llm_mod.BamlPlannerContractError, match="effective_cap_s"):
         await llm_mod.BamlPlannerLLM(cfg=cfg).arrange(planner_candidates, strategy)
 
 

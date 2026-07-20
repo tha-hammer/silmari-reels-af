@@ -16,6 +16,9 @@ from . import stream_types
 
 type_map = {
 
+    "types.ArcPlan": types.ArcPlan,
+    "stream_types.ArcPlan": stream_types.ArcPlan,
+
     "types.Beat": types.Beat,
     "stream_types.Beat": stream_types.Beat,
 
@@ -30,6 +33,12 @@ type_map = {
 
     "types.DurationBounds": types.DurationBounds,
     "stream_types.DurationBounds": stream_types.DurationBounds,
+
+    "types.DurationPolicy": types.DurationPolicy,
+    "stream_types.DurationPolicy": stream_types.DurationPolicy,
+
+    "types.DurationRange": types.DurationRange,
+    "stream_types.DurationRange": stream_types.DurationRange,
 
     "types.Engagement": types.Engagement,
     "stream_types.Engagement": stream_types.Engagement,

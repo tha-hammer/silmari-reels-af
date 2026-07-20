@@ -15,6 +15,7 @@ from reel_af.planner.models import (
     ReelBlueprint,
     Template,
 )
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 
 def _cfg(**overrides) -> PlannerConfig:
@@ -95,7 +96,9 @@ def test_hook_window_over_threshold_warns():
 def test_baml_beat_role_member_drives_hook_window_lint():
     bp = ReelBlueprint(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=12.0,
+        duration_range_s=duration_range(min_s=8.0, max_s=12.0),
+        duration_policy=duration_policy(),
+        arc=arc_plan(required_candidate_ids=("c001",)),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="Alpha beta",
@@ -120,6 +123,7 @@ def test_baml_beat_role_member_drives_hook_window_lint():
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        completion_rationale="hook establishes the promise and payoff resolves the hook",
     )
 
     diags = lint_blueprint(bp, words=None, cfg=_cfg())
@@ -197,6 +201,81 @@ def test_strictly_decreasing_back_half_passes_r3():
     diags = lint_blueprint(bp, words=None, cfg=_cfg())
 
     assert not any(d.rule == "R3" for d in diags)
+
+
+def test_long_reel_sectional_r3_allows_non_monotone_local_beats():
+    bp = _blueprint(
+        beats=[
+            {"role": "hook", "span_quote": "a", "duration_s": 3.0},
+            {"role": "context", "span_quote": "b", "duration_s": 6.0},
+            {"role": "value", "span_quote": "c", "duration_s": 7.0},
+            {"role": "value", "span_quote": "d", "duration_s": 6.5},
+            {"role": "value", "span_quote": "e", "duration_s": 4.0},
+            {"role": "payoff", "span_quote": "a", "duration_s": 4.5},
+        ]
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg())
+
+    assert not any(d.rule == "R3" for d in diags)
+
+
+def test_r7_over_cap_errors_with_duration_context():
+    policy = duration_policy(advisory_min_s=5.0, advisory_max_s=8.0, effective_cap_s=8.0)
+    bp = _blueprint(
+        duration_policy=policy.model_dump(mode="json"),
+        arc=arc_plan(required_candidate_ids=("c001", "c002")).model_dump(mode="json"),
+        completion_rationale="hook establishes promise and payoff resolves the hook",
+        beats=[
+            {"role": "hook", "span_quote": "alpha", "candidate_id": "c001", "duration_s": 6.0},
+            {"role": "payoff", "span_quote": "alpha beta", "candidate_id": "c002", "duration_s": 6.0},
+        ],
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg(), duration_policy=policy)
+
+    over_cap = next(d for d in diags if d.rule == "R7" and d.severity == "error")
+    assert "exceeds active cap" in over_cap.message
+    assert over_cap.context["total_duration_s"] == 12.0
+    assert over_cap.context["effective_cap_s"] == 8.0
+
+
+def test_r7_missing_required_candidate_fails_completion_gate():
+    bp = _blueprint(
+        arc=arc_plan(required_candidate_ids=("c001", "c002")).model_dump(mode="json"),
+        duration_policy=duration_policy().model_dump(mode="json"),
+        completion_rationale="hook establishes promise and payoff resolves the hook",
+        beats=[
+            {"role": "hook", "span_quote": "alpha", "candidate_id": "c001", "duration_s": 2.0},
+            {"role": "payoff", "span_quote": "alpha beta", "candidate_id": "c001", "duration_s": 2.0},
+        ],
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg())
+
+    assert any(
+        d.rule == "R7"
+        and d.severity == "error"
+        and "omits required arc candidates" in d.message
+        for d in diags
+    )
+
+
+def test_r7_beat_count_guard_errors():
+    cfg = _cfg(max_beats=1)
+    bp = _blueprint(
+        duration_policy=duration_policy().model_dump(mode="json"),
+        arc=arc_plan(required_candidate_ids=("c001", "c002")).model_dump(mode="json"),
+        completion_rationale="hook establishes promise and payoff resolves the hook",
+        beats=[
+            {"role": "hook", "span_quote": "alpha", "candidate_id": "c001", "duration_s": 2.0},
+            {"role": "payoff", "span_quote": "alpha beta", "candidate_id": "c002", "duration_s": 2.0},
+        ],
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=cfg)
+
+    assert any(d.rule == "R7" and "max_beats" in d.message for d in diags)
 
 
 def test_multiple_primary_ctas_warn():

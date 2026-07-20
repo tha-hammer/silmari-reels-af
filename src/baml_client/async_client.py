@@ -112,19 +112,19 @@ class BamlAsyncClient:
                 "transcript_text": transcript_text,"register": register,
             })
             return typing.cast(typing.List["types.CandidateSpan"], __result__.cast_to(types, types, stream_types, False, __runtime__))
-    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],bounds: types.DurationBounds,
+    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],duration_policy: types.DurationPolicy,
         baml_options: BamlCallOptions = {},
     ) -> types.ReelStrategy:
         # Check if on_tick is provided
         if 'on_tick' in baml_options:
             # Use streaming internally when on_tick is provided
-            __stream__ = self.stream.StrategizeReel(transcript_text=transcript_text,candidates=candidates,bounds=bounds,
+            __stream__ = self.stream.StrategizeReel(transcript_text=transcript_text,candidates=candidates,duration_policy=duration_policy,
                 baml_options=baml_options)
             return await __stream__.get_final_response()
         else:
             # Original non-streaming code
             __result__ = await self.__options.merge_options(baml_options).call_function_async(function_name="StrategizeReel", args={
-                "transcript_text": transcript_text,"candidates": candidates,"bounds": bounds,
+                "transcript_text": transcript_text,"candidates": candidates,"duration_policy": duration_policy,
             })
             return typing.cast(types.ReelStrategy, __result__.cast_to(types, types, stream_types, False, __runtime__))
     
@@ -160,11 +160,11 @@ class BamlStreamClient:
           lambda x: typing.cast(typing.List["types.CandidateSpan"], x.cast_to(types, types, stream_types, False, __runtime__)),
           __ctx__,
         )
-    def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],bounds: types.DurationBounds,
+    def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],duration_policy: types.DurationPolicy,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.BamlStream[stream_types.ReelStrategy, types.ReelStrategy]:
         __ctx__, __result__ = self.__options.merge_options(baml_options).create_async_stream(function_name="StrategizeReel", args={
-            "transcript_text": transcript_text,"candidates": candidates,"bounds": bounds,
+            "transcript_text": transcript_text,"candidates": candidates,"duration_policy": duration_policy,
         })
         return baml_py.BamlStream[stream_types.ReelStrategy, types.ReelStrategy](
           __result__,
@@ -194,11 +194,11 @@ class BamlHttpRequestClient:
             "transcript_text": transcript_text,"register": register,
         }, mode="request")
         return __result__
-    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],bounds: types.DurationBounds,
+    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],duration_policy: types.DurationPolicy,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="StrategizeReel", args={
-            "transcript_text": transcript_text,"candidates": candidates,"bounds": bounds,
+            "transcript_text": transcript_text,"candidates": candidates,"duration_policy": duration_policy,
         }, mode="request")
         return __result__
     
@@ -223,11 +223,11 @@ class BamlHttpStreamRequestClient:
             "transcript_text": transcript_text,"register": register,
         }, mode="stream")
         return __result__
-    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],bounds: types.DurationBounds,
+    async def StrategizeReel(self, transcript_text: str,candidates: typing.List["types.PlannerCandidate"],duration_policy: types.DurationPolicy,
         baml_options: BamlCallOptions = {},
     ) -> baml_py.baml_py.HTTPRequest:
         __result__ = await self.__options.merge_options(baml_options).create_http_request_async(function_name="StrategizeReel", args={
-            "transcript_text": transcript_text,"candidates": candidates,"bounds": bounds,
+            "transcript_text": transcript_text,"candidates": candidates,"duration_policy": duration_policy,
         }, mode="stream")
         return __result__
     

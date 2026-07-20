@@ -104,7 +104,7 @@ def build_judge_messages(evidence: BlueprintEvidence) -> list[dict[str, str]]:
         }
     }
     user_payload = {
-        "task": "Score one short vertical reel plan against named retention dimensions.",
+        "task": "Score one vertical reel plan against named retention dimensions.",
         "bias_controls": [
             "Judge only the evidence fields. Do not infer quality from model/provider/source identity.",
             "Do not reward verbosity, polish, or amount of text. Reward only retention evidence.",

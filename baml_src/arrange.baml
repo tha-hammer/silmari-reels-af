@@ -10,6 +10,7 @@ function ArrangeReel(
     Arrange candidates into an ordered beat list per the strategy. Each beat carries role,
     candidate_id, occurrence_index, VERBATIM span_quote, max_len_s, and at most one interrupt_out.
     If repair_hint is present, repair those exact failed quotes without changing unrelated strategy.
+    completion_rationale MUST explain how the beat list satisfies strategy.arc.completion_criteria.
     rationale MUST explain why this beat order resolves the strategy, why the payoff lands where it
     does, and why the final R8 loop span is the right distinct source echo.
 
@@ -20,6 +21,25 @@ function ArrangeReel(
       by strategy.hook.banner_line and strategy.hook.span_quote.
     - Drop strong but unrelated candidates when they do not move this single thread forward.
     - Do not mix three topics just because all candidates are individually good.
+    - Every beat must satisfy one strategy.arc.completion_criteria item, bridge two named criteria,
+      or provide non-duplicative proof/mechanism for the payoff.
+    - Do not add repeated examples, optional-only branches, or recap beats just to make the reel
+      longer.
+    - Do not default to the old five-beat hook/context/value/payoff/CTA skeleton. If one
+      completion_criteria item contains several distinct source ideas, split those ideas into
+      separate beats when each one is required for coherence.
+
+    CONTENT-DRIVEN LENGTH AND CAP:
+    - First select every beat required to complete strategy.arc.
+    - Then estimate total duration from max_len_s plus explicit black/transition durations.
+    - If the complete arc exceeds strategy.duration_policy.effective_cap_s, reduce to the strongest
+      coherent under-cap cut by dropping optional candidates, repeated proof, and lower-value
+      support first.
+    - Never drop the hook promise, minimum context, proof/mechanism required for credibility,
+      direct payoff, or distinct R8 loop just to fit a shorter advisory preference.
+    - If you omit candidates under cap pressure, fill omitted_candidate_ids and cap_rationale.
+    - The reel may be shorter than strategy.duration_policy.advisory_min_s when the content is
+      already complete. Never pad.
 
     BEAT ORDER THAT BUILDS:
     - Hook: first beat only, use strategy.hook candidate_id/occurrence_index and span_quote or a
@@ -34,8 +54,10 @@ function ArrangeReel(
     R3 PACING ESCALATION:
     - Start with a hook max_len_s <= 3.5.
     - Middle beats may breathe, but every beat longer than 5s needs a cutin or interrupt_out.
-    - The back half must tighten toward the payoff: each back-half max_len_s should be lower than
-      the prior back-half beat unless the quote cannot be shortened.
+    - For short reels, the back half should tighten toward the payoff.
+    - For long reels, use sectional pacing instead of strict monotone duration: intro establishes
+      the promise, middle advances proof without low-change repetition, and payoff-approach beats
+      have higher change density or shorter unresolved median length than the middle.
     - Use a stronger interrupt immediately before the payoff when the source topic turns or stakes rise.
     - Do not place transitions mechanically after every beat.
 
@@ -77,8 +99,11 @@ function ArrangeReel(
       or beat whose candidate start_s is earlier than the prior beat's candidate start_s.
     - Use Trans with a concrete effect for topic turns, rising stakes, or the move into payoff.
     - Use Black only for a hard reset or tonal snap; never as filler.
-    - Use interrupt_out on 2 or 3 beats total, not every beat. Leave at least one middle beat with
-      interrupt_out null unless there are only two beats.
+    - Scale interrupt density to beat count and story turns. Long reels may need more than 2 or 3
+      interrupts, but every interrupt must mark a real source jump, topic turn, stakes rise, or
+      payoff move.
+    - Leave breathing room where the source already carries the beat; do not use transitions as
+      filler.
     - The strongest interrupt should be immediately before the payoff. The final loop beat should
       normally have interrupt_out null.
     - A cutin should clarify a number, mechanism, or contrast already present in the VERBATIM span.
@@ -117,11 +142,24 @@ function ArrangeReel(
     - Good R9 cue: Payoff beat engagement { kind Send, primary true, line "Send this to the dev on
       your team who still lets the AI grade its own homework." }. One recipient, one reason, derived
       from the AI-checking-its-own-work payoff.
+    - Good medium arc: 14 beats, 82s. Hook promises why AI self-checking fails; context explains the
+      failure mode; three proof beats add distinct mechanisms; payoff gives the external-check loop;
+      final loop echoes the hook from a later candidate. No filler.
+    - Good long arc: 24 beats, 166s. Early setup, middle failure cascade, late repair mechanism, and
+      final payoff all satisfy named completion criteria. Optional anecdotes are excluded.
+    - Bad long arc: 24 beats where eight beats repeat the same "teams ship bugs" idea. Repetition is
+      padding unless each quote adds a new mechanism, consequence, or proof.
+    - Bad short arc: 5 beats ending before the proof candidate, even though strategy.arc.required_candidate_ids
+      names the missing proof. Short is not better when the hook remains unresolved.
+    - Bad compressed long-source arc: 5 beats where the value beat hides setup, mechanism, proof, and
+      consequence from four distinct candidates. That is old skeleton bias; split the required ideas.
 
     RATIONALE STYLE:
     - Explain the ordered story arc from hook to payoff.
+    - Name how the beats satisfy strategy.arc.completion_criteria.
     - Name the loop candidate_id/occurrence_index and why it is distinct from the hook source span.
     - Mention the one R9 cue placement if present.
+    - Mention cap_rationale only when the complete arc needed an under-cap cut.
     - Keep rationale to 2-4 concise sentences.
 
     Strategy:
@@ -154,7 +192,30 @@ test ArrangeBasic {
     ]
     strategy {
       template_ HookContextValuePayoffCta
-      target_duration_s 24.0
+      duration_range_s {
+        min_s 20.0
+        max_s 35.0
+        rationale "one complete idea can resolve without padding"
+      }
+      duration_policy {
+        soft_cap_s 180.0
+        effective_cap_s 180.0
+        advisory_min_s 20.0
+        advisory_max_s 35.0
+        cap_overridden false
+      }
+      arc {
+        promise "They fake reasoning."
+        thread "pattern matching can feel like reasoning"
+        completion_criteria [
+          "hook names the fake reasoning tension",
+          "payoff explains what pattern matching means",
+          "loop echoes the hook without reusing the source span"
+        ]
+        required_candidate_ids ["c001"]
+        optional_candidate_ids []
+        excluded_candidate_ids []
+      }
       hook {
         type CuriosityGap
         banner_line "They fake it."
@@ -167,6 +228,7 @@ test ArrangeBasic {
         hardness Soft
         placements ["end"]
       }
+      rationale "the arc is complete when the pattern-match claim explains the hook and loops cleanly"
     }
     repair_hint null
   }

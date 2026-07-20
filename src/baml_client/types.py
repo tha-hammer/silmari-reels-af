@@ -104,8 +104,16 @@ class XfadeEffect(str, Enum):
     NoEffect = "NoEffect"
 
 # #########################################################################
-# Generated classes (12)
+# Generated classes (15)
 # #########################################################################
+
+class ArcPlan(BaseModel):
+    promise: str
+    thread: str
+    completion_criteria: typing.List[str]
+    required_candidate_ids: typing.List[str]
+    optional_candidate_ids: typing.Optional[typing.List[str]] = None
+    excluded_candidate_ids: typing.Optional[typing.List[str]] = None
 
 class Beat(BaseModel):
     role: BeatRole
@@ -113,6 +121,8 @@ class Beat(BaseModel):
     candidate_id: str
     occurrence_index: int
     max_len_s: float
+    completion_role: typing.Optional[str] = None
+    completion_criterion_ids: typing.Optional[typing.List[str]] = None
     cutin: typing.Optional["CutIn"] = None
     interrupt_out: typing.Optional["Interrupt"] = None
     engagement: typing.Optional["Engagement"] = None
@@ -121,6 +131,10 @@ class CandidateSpan(BaseModel):
     quote: str
     approx_start_s: typing.Optional[float] = None
     approx_end_s: typing.Optional[float] = None
+    source_window_id: typing.Optional[str] = None
+    source_window_index: typing.Optional[int] = None
+    source_window_start_s: typing.Optional[float] = None
+    source_window_end_s: typing.Optional[float] = None
     value_score: float
     emotion: typing.Optional[str] = None
     is_claim: typing.Optional[bool] = None
@@ -142,6 +156,18 @@ class CutIn(BaseModel):
 class DurationBounds(BaseModel):
     min_s: float
     max_s: float
+
+class DurationPolicy(BaseModel):
+    soft_cap_s: float
+    effective_cap_s: float
+    advisory_min_s: typing.Optional[float] = None
+    advisory_max_s: typing.Optional[float] = None
+    cap_overridden: bool
+
+class DurationRange(BaseModel):
+    min_s: float
+    max_s: float
+    rationale: str
 
 class Engagement(BaseModel):
     kind: EngagementKind
@@ -173,6 +199,10 @@ class PlannerCandidate(BaseModel):
     word_range: typing.List[int]
     start_s: float
     end_s: float
+    source_window_id: typing.Optional[str] = None
+    source_window_index: typing.Optional[int] = None
+    source_window_start_s: typing.Optional[float] = None
+    source_window_end_s: typing.Optional[float] = None
     quality: float
     value_score: float
     emotion: typing.Optional[str] = None
@@ -182,17 +212,24 @@ class PlannerCandidate(BaseModel):
 
 class ReelBlueprint(BaseModel):
     template_: Template
-    target_duration_s: float
+    duration_range_s: "DurationRange"
+    duration_policy: "DurationPolicy"
+    arc: "ArcPlan"
     hook: "Hook"
     beats: typing.List["Beat"]
     loop: "LoopPlan"
     engagement_primary: EngagementKind
     cta: "CtaPlan"
+    completion_rationale: str
+    cap_rationale: typing.Optional[str] = None
+    omitted_candidate_ids: typing.Optional[typing.List[str]] = None
     rationale: typing.Optional[str] = None
 
 class ReelStrategy(BaseModel):
     template_: Template
-    target_duration_s: float
+    duration_range_s: "DurationRange"
+    duration_policy: "DurationPolicy"
+    arc: "ArcPlan"
     hook: "Hook"
     engagement_primary: EngagementKind
     cta: "CtaPlan"

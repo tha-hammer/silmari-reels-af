@@ -20,9 +20,10 @@ from reel_af.planner.models import (
     Template,
 )
 from reel_af.planner.pipeline import plan
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://www.youtube.com/watch?v=repair123"
-EXPECTED_HINT = "candidate c001 below_floor: 'paraphrase' near 'verbatim words'"
+EXPECTED_HINT = "candidate c001 below_floor: 'paraphrase' near 'verbatim words fix works'"
 
 
 def _words() -> WordsSidecar:
@@ -30,6 +31,8 @@ def _words() -> WordsSidecar:
         words=[
             DslWord(w="verbatim", start=0.0, end=0.4),
             DslWord(w="words", start=0.5, end=0.9),
+            DslWord(w="fix", start=1.0, end=1.4),
+            DslWord(w="works", start=1.5, end=1.9),
         ]
     )
 
@@ -43,7 +46,9 @@ def _cfg(**overrides) -> PlannerConfig:
 def _strategy() -> ReelStrategy:
     return ReelStrategy(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=12.0,
+        duration_range_s=duration_range(min_s=8.0, max_s=12.0),
+        duration_policy=duration_policy(),
+        arc=arc_plan(required_candidate_ids=("c001",)),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="Verbatim words",
@@ -59,7 +64,9 @@ def _strategy() -> ReelStrategy:
 def _blueprint(quote: str) -> ReelBlueprint:
     return ReelBlueprint(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=12.0,
+        duration_range_s=duration_range(min_s=8.0, max_s=12.0),
+        duration_policy=duration_policy(),
+        arc=arc_plan(required_candidate_ids=("c001",)),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="Verbatim words",
@@ -74,16 +81,24 @@ def _blueprint(quote: str) -> ReelBlueprint:
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=3.0,
+            ),
+            Beat(
+                role=BeatRole.Payoff,
+                span_quote="fix works",
+                candidate_id="c001",
+                occurrence_index=0,
+                max_len_s=3.0,
             )
         ],
         loop=LoopPlan(
             strategy="tie_final_to_hook",
-            final_span_quote=quote,
+            final_span_quote="fix works",
             candidate_id="c001",
             occurrence_index=0,
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        completion_rationale="hook establishes the promise and payoff resolves the hook",
     )
 
 
@@ -95,9 +110,9 @@ class _HintSensitiveLLM:
     async def mine(self, transcript, register):
         return [
             CandidateSpan(
-                quote="verbatim words",
+                quote="verbatim words fix works",
                 approx_start_s=0.0,
-                approx_end_s=0.9,
+                approx_end_s=1.9,
                 value_score=0.9,
                 emotion="plain",
                 is_claim=False,
@@ -105,7 +120,7 @@ class _HintSensitiveLLM:
             )
         ]
 
-    async def strategize(self, transcript, candidates, bounds):
+    async def strategize(self, transcript, candidates, policy):
         return _strategy()
 
     async def arrange(self, candidates, strategy, *, repair_hint=None):

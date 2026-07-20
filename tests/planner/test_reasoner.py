@@ -21,6 +21,7 @@ from reel_af.planner.models import (
     Template,
     XfadeEffect,
 )
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://www.youtube.com/watch?v=abc123"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
@@ -46,13 +47,15 @@ class _FakePlannerLLM:
             )
         ]
 
-    async def strategize(self, transcript, candidates, bounds):
+    async def strategize(self, transcript, candidates, policy):
         return None
 
     async def arrange(self, candidates, strategy, repair_hint=None):
         return ReelBlueprint(
             template_=Template.HookContextValuePayoffCta,
-            target_duration_s=24.0,
+            duration_range_s=duration_range(min_s=18.0, max_s=42.0),
+            duration_policy=duration_policy(),
+            arc=arc_plan(required_candidate_ids=("c001",)),
             hook=Hook(
                 type=HookType.CuriosityGap,
                 banner_line="They don't reason.",
@@ -89,6 +92,10 @@ class _FakePlannerLLM:
             ),
             engagement_primary=EngagementKind.Send,
             cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+            completion_rationale=(
+                "The hook establishes the promise, proof explains the mechanism, "
+                "payoff resolves the hook, and loop echoes it."
+            ),
         )
 
 

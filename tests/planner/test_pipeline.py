@@ -10,9 +10,12 @@ from reel_af.dsl.composite import read_composite
 from reel_af.dsl.models import (
     DSL_HOOKS_WORKFLOW,
     CompileContext,
+    DslWord,
     SourceRef,
+    WordsSidecar,
     validate_renderable,
 )
+from reel_af.planner.config import PlannerConfig, load_planner_config
 from reel_af.planner.models import (
     Beat,
     BeatRole,
@@ -25,12 +28,18 @@ from reel_af.planner.models import (
     Interrupt,
     InterruptKind,
     LoopPlan,
+    PlannerCandidate,
     ReelBlueprint,
     ReelStrategy,
     Template,
     XfadeEffect,
 )
-from reel_af.planner.pipeline import plan
+from reel_af.planner.pipeline import (
+    _cap_candidates_with_source_diversity,
+    _transcript_windows,
+    plan,
+)
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://www.youtube.com/watch?v=abc123"
 FIXTURES = Path(__file__).resolve().parents[1] / "dsl" / "fixtures"
@@ -64,7 +73,7 @@ class _FakePlannerLLM:
             )
         ]
 
-    async def strategize(self, transcript, candidates, bounds):
+    async def strategize(self, transcript, candidates, policy):
         self.strategize_calls += 1
         return _strategy()
 
@@ -82,7 +91,9 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
     )
     return ReelBlueprint(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=24.0,
+        duration_range_s=duration_range(min_s=18.0, max_s=42.0),
+        duration_policy=duration_policy(advisory_min_s=15.0, advisory_max_s=45.0),
+        arc=arc_plan(required_candidate_ids=("c001",)),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="They don't reason.",
@@ -143,6 +154,10 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        completion_rationale=(
+            "The hook establishes the promise, the middle proof explains the mechanism, "
+            "the payoff resolves the hook, and the final loop echoes the hook."
+        ),
         rationale="the order moves from AI skepticism to the tighter-loop payoff and loop echo",
     )
 
@@ -150,7 +165,9 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
 def _strategy() -> ReelStrategy:
     return ReelStrategy(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=24.0,
+        duration_range_s=duration_range(min_s=18.0, max_s=42.0),
+        duration_policy=duration_policy(advisory_min_s=15.0, advisory_max_s=45.0),
+        arc=arc_plan(required_candidate_ids=("c001",)),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="They don't reason.",
@@ -160,12 +177,78 @@ def _strategy() -> ReelStrategy:
         ),
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
-        rationale="the template uses one AI-process thread with a tight target duration and soft CTA",
+        rationale="the template uses one AI-process arc with enough latitude and a soft CTA",
     )
 
 
 def _seed_words():
     return load_words(FIXTURES / "source.words.json")
+
+
+def _cfg(**overrides) -> PlannerConfig:
+    data = load_planner_config().model_dump()
+    data.update(overrides)
+    return PlannerConfig.model_validate(data)
+
+
+def _planner_candidate(
+    candidate_id: str,
+    *,
+    source_window_index: int,
+    value_score: float,
+) -> PlannerCandidate:
+    return PlannerCandidate(
+        candidate_id=candidate_id,
+        quote=f"{candidate_id} proof",
+        occurrence_index=0,
+        word_range=[0, 1],
+        start_s=float(source_window_index * 600),
+        end_s=float(source_window_index * 600 + 2),
+        source_window_id=f"w{source_window_index:03d}",
+        source_window_index=source_window_index,
+        source_window_start_s=float(source_window_index * 600),
+        source_window_end_s=float(source_window_index * 600 + 180),
+        quality=1.0,
+        value_score=value_score,
+        rationale="accepted high-value proof span",
+    )
+
+
+def test_transcript_windows_cover_long_source_with_bounded_count():
+    words = WordsSidecar(
+        words=[
+            DslWord(w="early", start=0.0, end=0.5),
+            DslWord(w="setup", start=0.5, end=1.0),
+            DslWord(w="middle", start=900.0, end=900.5),
+            DslWord(w="proof", start=900.5, end=901.0),
+            DslWord(w="late", start=1679.0, end=1679.5),
+            DslWord(w="payoff", start=1679.5, end=1680.0),
+        ]
+    )
+    cfg = _cfg(mine_window_duration_s=180.0, mine_window_overlap_s=15.0, mine_max_windows=12)
+
+    windows = _transcript_windows(words, cfg)
+
+    assert 1 < len(windows) <= cfg.mine_max_windows
+    assert windows[0].start_s == 0.0
+    assert windows[-1].end_s == 1680.0
+    assert any("early setup" in window.text for window in windows)
+    assert any("middle proof" in window.text for window in windows)
+    assert any("late payoff" in window.text for window in windows)
+
+
+def test_candidate_cap_preserves_source_window_diversity():
+    cfg = _cfg(max_candidates=3, mine_candidates_per_window=1)
+    candidates = [
+        _planner_candidate("early", source_window_index=0, value_score=0.70),
+        _planner_candidate("middle", source_window_index=1, value_score=0.99),
+        _planner_candidate("middle-b", source_window_index=1, value_score=0.98),
+        _planner_candidate("late", source_window_index=2, value_score=0.71),
+    ]
+
+    selected = _cap_candidates_with_source_diversity(candidates, cfg)
+
+    assert [candidate.source_window_index for candidate in selected] == [0, 1, 2]
 
 
 async def test_plan_promise_compiles_ok(tmp_path):

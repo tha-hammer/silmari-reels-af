@@ -23,8 +23,16 @@ class StreamState(BaseModel, typing.Generic[StreamStateValueT]):
     value: StreamStateValueT
     state: typing_extensions.Literal["Pending", "Incomplete", "Complete"]
 # #########################################################################
-# Generated classes (12)
+# Generated classes (15)
 # #########################################################################
+
+class ArcPlan(BaseModel):
+    promise: typing.Optional[str] = None
+    thread: typing.Optional[str] = None
+    completion_criteria: typing.List[str]
+    required_candidate_ids: typing.List[str]
+    optional_candidate_ids: typing.Optional[typing.List[str]] = None
+    excluded_candidate_ids: typing.Optional[typing.List[str]] = None
 
 class Beat(BaseModel):
     role: typing.Optional[types.BeatRole] = None
@@ -32,6 +40,8 @@ class Beat(BaseModel):
     candidate_id: typing.Optional[str] = None
     occurrence_index: typing.Optional[int] = None
     max_len_s: typing.Optional[float] = None
+    completion_role: typing.Optional[str] = None
+    completion_criterion_ids: typing.Optional[typing.List[str]] = None
     cutin: typing.Optional["CutIn"] = None
     interrupt_out: typing.Optional["Interrupt"] = None
     engagement: typing.Optional["Engagement"] = None
@@ -40,6 +50,10 @@ class CandidateSpan(BaseModel):
     quote: typing.Optional[str] = None
     approx_start_s: typing.Optional[float] = None
     approx_end_s: typing.Optional[float] = None
+    source_window_id: typing.Optional[str] = None
+    source_window_index: typing.Optional[int] = None
+    source_window_start_s: typing.Optional[float] = None
+    source_window_end_s: typing.Optional[float] = None
     value_score: typing.Optional[float] = None
     emotion: typing.Optional[str] = None
     is_claim: typing.Optional[bool] = None
@@ -61,6 +75,18 @@ class CutIn(BaseModel):
 class DurationBounds(BaseModel):
     min_s: typing.Optional[float] = None
     max_s: typing.Optional[float] = None
+
+class DurationPolicy(BaseModel):
+    soft_cap_s: typing.Optional[float] = None
+    effective_cap_s: typing.Optional[float] = None
+    advisory_min_s: typing.Optional[float] = None
+    advisory_max_s: typing.Optional[float] = None
+    cap_overridden: typing.Optional[bool] = None
+
+class DurationRange(BaseModel):
+    min_s: typing.Optional[float] = None
+    max_s: typing.Optional[float] = None
+    rationale: typing.Optional[str] = None
 
 class Engagement(BaseModel):
     kind: typing.Optional[types.EngagementKind] = None
@@ -92,6 +118,10 @@ class PlannerCandidate(BaseModel):
     word_range: typing.List[int]
     start_s: typing.Optional[float] = None
     end_s: typing.Optional[float] = None
+    source_window_id: typing.Optional[str] = None
+    source_window_index: typing.Optional[int] = None
+    source_window_start_s: typing.Optional[float] = None
+    source_window_end_s: typing.Optional[float] = None
     quality: typing.Optional[float] = None
     value_score: typing.Optional[float] = None
     emotion: typing.Optional[str] = None
@@ -101,17 +131,24 @@ class PlannerCandidate(BaseModel):
 
 class ReelBlueprint(BaseModel):
     template_: typing.Optional[types.Template] = None
-    target_duration_s: typing.Optional[float] = None
+    duration_range_s: typing.Optional["DurationRange"] = None
+    duration_policy: typing.Optional["DurationPolicy"] = None
+    arc: typing.Optional["ArcPlan"] = None
     hook: typing.Optional["Hook"] = None
     beats: typing.List["Beat"]
     loop: typing.Optional["LoopPlan"] = None
     engagement_primary: typing.Optional[types.EngagementKind] = None
     cta: typing.Optional["CtaPlan"] = None
+    completion_rationale: typing.Optional[str] = None
+    cap_rationale: typing.Optional[str] = None
+    omitted_candidate_ids: typing.Optional[typing.List[str]] = None
     rationale: typing.Optional[str] = None
 
 class ReelStrategy(BaseModel):
     template_: typing.Optional[types.Template] = None
-    target_duration_s: typing.Optional[float] = None
+    duration_range_s: typing.Optional["DurationRange"] = None
+    duration_policy: typing.Optional["DurationPolicy"] = None
+    arc: typing.Optional["ArcPlan"] = None
     hook: typing.Optional["Hook"] = None
     engagement_primary: typing.Optional[types.EngagementKind] = None
     cta: typing.Optional["CtaPlan"] = None

@@ -18,7 +18,7 @@ from reel_af.dsl.models import (
     WordsSidecar,
 )
 from reel_af.planner.config import PlannerConfig, load_planner_config
-from reel_af.planner.lint import lint_blueprint
+from reel_af.planner.lint import estimate_blueprint_duration_s, lint_blueprint
 from reel_af.planner.serialize import resolve_timecodes, serialize_composite
 
 from .models import BeatEvidence, BlueprintEvidence, GateCheck, PreGateResult
@@ -95,6 +95,7 @@ def evaluate_blueprint_pre_gates(
         artifact_kind="blueprint",
         source_url=source_url,
         compile_status=compile_check.status,
+        compiled_duration_s=compile_check.score,
         lint_diagnostics=lint_payload,
     )
     return gates, evidence, {}
@@ -180,7 +181,9 @@ def evaluate_artifact_triple(
         case_id=case_id,
         source_url=source_url,
         compile_status=compile_check.status,
+        compiled_duration_s=compile_check.score,
         lint_diagnostics=lint_payload,
+        source_duration_s=_source_duration_s(words),
         blueprint_payload=blueprint_payload,
         strategy_payload=strategy_payload,
         mined_candidates=mined_candidates,
@@ -247,6 +250,7 @@ def _compile_blueprint_check(
         GateCheck(
             name="compile",
             passed=compiled.status == "ok",
+            score=_compiled_duration(compiled),
             status=compiled.status,
             summary=f"compile status={compiled.status}",
             diagnostics=diagnostics,
@@ -276,10 +280,16 @@ def _compile_artifact_check(doc: Any, words: WordsSidecar, *, source_url: str) -
     return GateCheck(
         name="compile",
         passed=compiled.status == "ok",
+        score=_compiled_duration(compiled),
         status=compiled.status,
         summary=f"compile status={compiled.status}",
         diagnostics=diagnostics,
     )
+
+
+def _compiled_duration(compiled: Any) -> float | None:
+    plan = getattr(compiled, "plan", None)
+    return _optional_float(getattr(plan, "duration_s", None))
 
 
 def _blueprint_evidence(
@@ -290,15 +300,27 @@ def _blueprint_evidence(
     artifact_kind: str,
     source_url: str,
     compile_status: str | None,
+    compiled_duration_s: float | None,
     lint_diagnostics: list[dict[str, Any]],
 ) -> BlueprintEvidence:
     beats = list(_get(blueprint, "beats", []))
+    estimated_duration_s = estimate_blueprint_duration_s(beats, resolved)
     return BlueprintEvidence(
         case_id=case_id,
         artifact_kind=artifact_kind,
         source_url=source_url,
         template=_wire(_get(blueprint, "template_", None)),
-        target_duration_s=_optional_float(_get(blueprint, "target_duration_s", None)),
+        legacy_target_duration_s=_legacy_target_duration_s(blueprint),
+        duration_range_s=_dump_value(_get(blueprint, "duration_range_s", {})) or {},
+        duration_policy=_dump_value(_get(blueprint, "duration_policy", {})) or {},
+        beat_count=len(beats),
+        estimated_duration_s=estimated_duration_s,
+        compiled_duration_s=compiled_duration_s,
+        completion_rationale=_optional_str(_get(blueprint, "completion_rationale", None)),
+        cap_rationale=_optional_str(_get(blueprint, "cap_rationale", None)),
+        omitted_candidate_ids=[
+            str(item) for item in (_get(blueprint, "omitted_candidate_ids", []) or [])
+        ],
         hook_banner=_optional_str(_get(_get(blueprint, "hook", {}), "banner_line", None)),
         hook_span_quote=_optional_str(_get(_get(blueprint, "hook", {}), "span_quote", None)),
         loop_final_span_quote=_optional_str(
@@ -326,7 +348,9 @@ def _artifact_evidence(
     case_id: str,
     source_url: str,
     compile_status: str | None,
+    compiled_duration_s: float | None,
     lint_diagnostics: list[dict[str, Any]],
+    source_duration_s: float | None,
     blueprint_payload: Mapping[str, Any] | None = None,
     strategy_payload: Mapping[str, Any] | None = None,
     mined_candidates: Sequence[Any] | None = None,
@@ -337,6 +361,7 @@ def _artifact_evidence(
     source = blueprint_payload or derived
     beats = list(_get(source, "beats", []) or [])
     cut_ins = _cut_ins_from_beats(beats)
+    estimated_duration_s = estimate_blueprint_duration_s(beats, aligned)
     if not cut_ins:
         cut_ins = [_dump_value(item) for item in clip.get("cut_ins") or []]
     notes = []
@@ -354,7 +379,19 @@ def _artifact_evidence(
         artifact_kind="triple",
         source_url=source_url,
         template=_wire(_get(source, "template_", _get(source, "template", "derived_from_composite"))),
-        target_duration_s=_optional_float(_get(source, "target_duration_s", None)),
+        legacy_target_duration_s=_legacy_target_duration_s(source),
+        duration_range_s=_dump_value(_get(source, "duration_range_s", {})) or {},
+        duration_policy=_dump_value(_get(source, "duration_policy", {})) or {},
+        beat_count=len(beats),
+        estimated_duration_s=estimated_duration_s,
+        compiled_duration_s=compiled_duration_s,
+        completion_rationale=_optional_str(_get(source, "completion_rationale", None)),
+        cap_rationale=_optional_str(_get(source, "cap_rationale", None)),
+        omitted_candidate_ids=[str(item) for item in (_get(source, "omitted_candidate_ids", []) or [])],
+        candidate_source_coverage=_candidate_source_coverage(
+            accepted_candidates or mined_candidates or [],
+            source_duration_s=source_duration_s,
+        ),
         hook_banner=_optional_str(_get(_get(source, "hook", {}), "banner_line", None)),
         hook_span_quote=_optional_str(_get(_get(source, "hook", {}), "span_quote", None)),
         loop_final_span_quote=_optional_str(
@@ -414,7 +451,7 @@ def _derived_blueprint_from_artifacts(
     final_quote = segments[-1].normalized_text if segments else ""
     return {
         "template": "derived_from_composite",
-        "target_duration_s": _target_duration(beats),
+        "legacy_target_duration_s": _target_duration(beats),
         "hook": {
             "banner_line": clip.get("hook") or clip.get("title") or "",
             "span_quote": clip.get("excerpt") or (segments[0].normalized_text if segments else ""),
@@ -488,6 +525,109 @@ def _target_duration(beats: Sequence[Mapping[str, Any]]) -> float | None:
     return float(sum(durations))
 
 
+def _legacy_target_duration_s(source: Any) -> float | None:
+    return _optional_float(
+        _get(source, "legacy_target_duration_s", _get(source, "target_duration_s", None))
+    )
+
+
+def _source_duration_s(words: WordsSidecar) -> float | None:
+    candidates: list[float] = []
+    for word in getattr(words, "words", []) or []:
+        end = _optional_float(getattr(word, "end", None))
+        if end is not None:
+            candidates.append(end)
+    for segment in getattr(words, "segments", []) or []:
+        end = _optional_float(getattr(segment, "end_s", None))
+        if end is not None:
+            candidates.append(end)
+    return max(candidates) if candidates else None
+
+
+def _candidate_source_coverage(
+    candidates: Sequence[Any],
+    *,
+    source_duration_s: float | None,
+) -> dict[str, Any]:
+    if not candidates:
+        return {}
+
+    total = source_duration_s
+    observed_end: list[float] = []
+    entries: list[dict[str, Any]] = []
+    buckets = {"early": 0, "mid": 0, "late": 0, "unknown": 0}
+    windows: dict[str, dict[str, Any]] = {}
+
+    for candidate in candidates:
+        start = _candidate_start_s(candidate)
+        end = _optional_float(_get(candidate, "end_s", _get(candidate, "source_window_end_s", None)))
+        if end is not None:
+            observed_end.append(end)
+        if start is None:
+            bucket = "unknown"
+        else:
+            observed_end.append(start)
+            duration = total or max(observed_end or [start]) or start
+            bucket = _coverage_bucket(start, duration)
+        buckets[bucket] += 1
+
+        window_id = _optional_str(_get(candidate, "source_window_id", None))
+        window_index = _optional_float(_get(candidate, "source_window_index", None))
+        if window_id or window_index is not None:
+            key = window_id or str(int(window_index or 0))
+            window = windows.setdefault(
+                key,
+                {
+                    "source_window_id": window_id,
+                    "source_window_index": int(window_index) if window_index is not None else None,
+                    "count": 0,
+                    "start_s": _optional_float(_get(candidate, "source_window_start_s", None)),
+                    "end_s": _optional_float(_get(candidate, "source_window_end_s", None)),
+                },
+            )
+            window["count"] += 1
+
+        entries.append(
+            {
+                "candidate_id": _optional_str(_get(candidate, "candidate_id", None)),
+                "bucket": bucket,
+                "start_s": start,
+                "end_s": end,
+                "source_window_id": window_id,
+            }
+        )
+
+    duration = total or (max(observed_end) if observed_end else None)
+    return {
+        "source_duration_s": duration,
+        "count": len(candidates),
+        "early": buckets["early"],
+        "mid": buckets["mid"],
+        "late": buckets["late"],
+        "unknown": buckets["unknown"],
+        "windows": [windows[key] for key in sorted(windows)],
+        "candidates": entries,
+    }
+
+
+def _candidate_start_s(candidate: Any) -> float | None:
+    start = _optional_float(_get(candidate, "start_s", None))
+    if start is not None:
+        return start
+    return _optional_float(_get(candidate, "source_window_start_s", None))
+
+
+def _coverage_bucket(start_s: float, source_duration_s: float) -> str:
+    if source_duration_s <= 0:
+        return "unknown"
+    third = source_duration_s / 3.0
+    if start_s < third:
+        return "early"
+    if start_s < third * 2:
+        return "mid"
+    return "late"
+
+
 def _read_optional_json(path: Path) -> Any | None:
     if not path.exists():
         return None
@@ -550,7 +690,9 @@ def _planner_rationale(
         rationale["strategize"] = {
             "rationale": strategy_reason,
             "template": _wire(_get(strategy, "template_", _get(strategy, "template", None))),
-            "target_duration_s": _optional_float(_get(strategy, "target_duration_s", None)),
+            "duration_range_s": _dump_value(_get(strategy, "duration_range_s", {})) or {},
+            "duration_policy": _dump_value(_get(strategy, "duration_policy", {})) or {},
+            "arc": _dump_value(_get(strategy, "arc", {})) or {},
             "hook": _dump_value(_get(strategy, "hook", {})),
             "engagement_primary": _wire(_get(strategy, "engagement_primary", None)),
             "cta": _dump_value(_get(strategy, "cta", {})),
@@ -560,6 +702,14 @@ def _planner_rationale(
     if arrange_reason:
         rationale["arrange"] = {
             "rationale": arrange_reason,
+            "duration_range_s": _dump_value(_get(blueprint, "duration_range_s", {})) or {},
+            "duration_policy": _dump_value(_get(blueprint, "duration_policy", {})) or {},
+            "arc": _dump_value(_get(blueprint, "arc", {})) or {},
+            "completion_rationale": _optional_str(_get(blueprint, "completion_rationale", None)),
+            "cap_rationale": _optional_str(_get(blueprint, "cap_rationale", None)),
+            "omitted_candidate_ids": [
+                str(item) for item in (_get(blueprint, "omitted_candidate_ids", []) or [])
+            ],
             "loop": _dump_value(_get(blueprint, "loop", {})),
             "engagement_lines": _engagement_lines(list(_get(blueprint, "beats", []) or [])),
             "cta": _dump_value(_get(blueprint, "cta", {})),

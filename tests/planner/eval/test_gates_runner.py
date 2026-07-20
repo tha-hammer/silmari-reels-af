@@ -15,10 +15,10 @@ from reel_af.planner.eval.runner import (
 from reel_af.planner.models import (
     Beat,
     BeatRole,
-    CutIn,
-    CutInKind,
     CtaHardness,
     CtaPlan,
+    CutIn,
+    CutInKind,
     Engagement,
     EngagementKind,
     Hook,
@@ -31,6 +31,7 @@ from reel_af.planner.models import (
     XfadeEffect,
 )
 from reel_af.planner.serialize import build_hook_plan, resolve_timecodes, serialize_composite
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 SRC = "https://youtu.be/eval123"
 BASELINE = Path(__file__).resolve().parent / "fixtures" / "BASELINE-0"
@@ -100,7 +101,21 @@ def _blueprint(
 ) -> ReelBlueprint:
     return ReelBlueprint(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=6.2,
+        duration_range_s=duration_range(
+            min_s=5.0,
+            max_s=8.0,
+            rationale="the launch-risk arc is complete without padding inside this range",
+        ),
+        duration_policy=duration_policy(advisory_min_s=1.0, advisory_max_s=10.0),
+        arc=arc_plan(
+            required_candidate_ids=("c001", "c002", "c003", "c004"),
+            completion_criteria=(
+                "hook establishes the launch-risk promise",
+                "context explains how process catches drift",
+                "proof shows tighter loops expose mistakes",
+                "payoff resolves why paying now protects launch",
+            ),
+        ),
         hook=Hook(
             type=HookType.BoldClaim,
             banner_line="Pay now before launch.",
@@ -177,6 +192,11 @@ def _blueprint(
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=cta_placements or ["end"]),
         rationale=rationale,
+        completion_rationale=(
+            "hook establishes the launch-risk promise, context explains process drift, "
+            "proof shows tighter loops expose mistakes, and payoff resolves why paying now "
+            "protects launch"
+        ),
     )
 
 
@@ -195,6 +215,12 @@ def test_blueprint_pre_gates_pass_for_clean_reel():
         "retention_lint": True,
         "compile": True,
     }
+    assert evidence.beat_count == 4
+    assert evidence.duration_range_s["max_s"] == 8.0
+    assert evidence.duration_policy["effective_cap_s"] == 180.0
+    assert evidence.estimated_duration_s is not None and evidence.estimated_duration_s > 0
+    assert evidence.compiled_duration_s is not None and evidence.compiled_duration_s > 0
+    assert evidence.completion_rationale
     assert evidence.beats[0].duration_s <= 3.5
     assert evidence.loop_final_span_quote == "pay now protects launch"
 
@@ -265,7 +291,9 @@ def test_artifact_triple_reads_blueprint_sidecars(tmp_path):
         json.dumps(
             {
                 "template_": "hook_context_value_payoff_cta",
-                "target_duration_s": 6.2,
+                "duration_range_s": blueprint.duration_range_s.model_dump(mode="json"),
+                "duration_policy": blueprint.duration_policy.model_dump(mode="json"),
+                "arc": blueprint.arc.model_dump(mode="json"),
                 "hook": blueprint.hook.model_dump(mode="json"),
                 "engagement_primary": "send",
                 "cta": {"hardness": "soft", "placements": ["end"]},
@@ -299,11 +327,47 @@ def test_artifact_triple_reads_blueprint_sidecars(tmp_path):
                 {
                     "candidate_id": "c001",
                     "quote": "pay now before launch",
+                    "start_s": 0.0,
+                    "end_s": 1.1,
+                    "source_window_id": "window-000",
+                    "source_window_index": 0,
+                    "source_window_start_s": 0.0,
+                    "source_window_end_s": 2.0,
                     "value_score": 0.91,
                     "emotion": "urgency",
                     "is_claim": True,
                     "payoff_worthy": True,
                     "rationale": "accepted reason",
+                },
+                {
+                    "candidate_id": "c003",
+                    "quote": "tighter loops expose mistakes faster",
+                    "start_s": 3.2,
+                    "end_s": 4.8,
+                    "source_window_id": "window-001",
+                    "source_window_index": 1,
+                    "source_window_start_s": 2.0,
+                    "source_window_end_s": 4.5,
+                    "value_score": 0.84,
+                    "emotion": "clarity",
+                    "is_claim": False,
+                    "payoff_worthy": False,
+                    "rationale": "mid-source proof",
+                },
+                {
+                    "candidate_id": "c004",
+                    "quote": "pay now protects launch",
+                    "start_s": 5.1,
+                    "end_s": 6.2,
+                    "source_window_id": "window-002",
+                    "source_window_index": 2,
+                    "source_window_start_s": 4.5,
+                    "source_window_end_s": 6.2,
+                    "value_score": 0.88,
+                    "emotion": "relief",
+                    "is_claim": True,
+                    "payoff_worthy": True,
+                    "rationale": "late-source payoff",
                 }
             ],
             indent=2,
@@ -322,6 +386,16 @@ def test_artifact_triple_reads_blueprint_sidecars(tmp_path):
 
     assert gates.passed
     assert refs["blueprint_ref"].endswith("blueprint.json")
+    assert evidence.beat_count == 4
+    assert evidence.duration_range_s["max_s"] == 8.0
+    assert evidence.duration_policy["effective_cap_s"] == 180.0
+    assert evidence.estimated_duration_s is not None and evidence.estimated_duration_s > 0
+    assert evidence.compiled_duration_s is not None and evidence.compiled_duration_s > 0
+    assert evidence.completion_rationale
+    assert evidence.candidate_source_coverage["early"] == 1
+    assert evidence.candidate_source_coverage["mid"] == 1
+    assert evidence.candidate_source_coverage["late"] == 1
+    assert len(evidence.candidate_source_coverage["windows"]) == 3
     assert evidence.engagement_lines == ["Send this to a founder before launch."]
     assert evidence.cta["hardness"] in {"Soft", "soft"}
     assert evidence.cut_ins[0]["beat_index"] == 2
@@ -331,7 +405,14 @@ def test_artifact_triple_reads_blueprint_sidecars(tmp_path):
         == "accepted reason"
     )
     assert evidence.planner_rationale["strategize"]["rationale"] == "strategy reason"
+    assert evidence.planner_rationale["strategize"]["arc"]["required_candidate_ids"] == [
+        "c001",
+        "c002",
+        "c003",
+        "c004",
+    ]
     assert evidence.planner_rationale["arrange"]["rationale"] == "arrange reason"
+    assert evidence.planner_rationale["arrange"]["completion_rationale"]
 
 
 def test_baseline_zero_fixture_is_committed_and_scores_with_warning_only_lint(tmp_path):

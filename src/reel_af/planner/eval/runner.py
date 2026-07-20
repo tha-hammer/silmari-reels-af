@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any
 
 from reel_af.dsl.compile import load_words
-from reel_af.planner.paths import evals_dir
 from reel_af.planner.models import ReelBlueprint
+from reel_af.planner.paths import evals_dir
 
 from .gates import evaluate_artifact_triple, evaluate_blueprint_pre_gates
 from .judge import OpenRouterJudge

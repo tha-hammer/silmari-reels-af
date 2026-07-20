@@ -35,7 +35,6 @@ def _words() -> WordsSidecar:
 def _bp() -> SimpleNamespace:
     return SimpleNamespace(
         template_="hook_context_value_payoff_cta",
-        target_duration_s=28.0,
         hook=SimpleNamespace(
             type="curiosity_gap",
             banner_line="They fake it.",

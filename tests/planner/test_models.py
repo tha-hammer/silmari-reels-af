@@ -5,11 +5,14 @@ from pydantic import ValidationError
 
 from baml_client import types as baml_types
 from reel_af.planner.models import (
+    ArcPlan,
     Beat,
     CandidateSpan,
     CtaPlan,
     CutIn,
     CutInKind,
+    DurationPolicy,
+    DurationRange,
     Hook,
     HookType,
     Interrupt,
@@ -24,6 +27,7 @@ from reel_af.planner.models import (
     validate_cut_in,
     validate_interrupt,
 )
+from tests.planner.factories import arc_plan, duration_policy, duration_range
 
 
 def test_models_facade_reexports_generated_baml_types():
@@ -34,6 +38,9 @@ def test_models_facade_reexports_generated_baml_types():
     assert Beat is baml_types.Beat
     assert ReelStrategy is baml_types.ReelStrategy
     assert ReelBlueprint is baml_types.ReelBlueprint
+    assert DurationPolicy is baml_types.DurationPolicy
+    assert DurationRange is baml_types.DurationRange
+    assert ArcPlan is baml_types.ArcPlan
     assert HookType is baml_types.HookType
     assert Template is baml_types.Template
 
@@ -116,7 +123,9 @@ def test_cut_in_is_relative_and_semantic_validator_checks_payload():
 def test_blueprint_round_trips():
     bp = ReelBlueprint(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=28.0,
+        duration_range_s=duration_range(min_s=18.0, max_s=28.0),
+        duration_policy=duration_policy(),
+        arc=arc_plan(),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="They fake it.",
@@ -146,17 +155,21 @@ def test_blueprint_round_trips():
         ),
         engagement_primary=baml_types.EngagementKind.Send,
         cta=CtaPlan(hardness=baml_types.CtaHardness.Soft, placements=["end"]),
+        completion_rationale="hook, proof, payoff, and loop criteria are covered",
     )
 
     assert ReelBlueprint.model_validate(bp.model_dump()) == bp
     assert bp.model_dump()["template_"] == "HookContextValuePayoffCta"
     assert "template" not in ReelBlueprint.model_fields
+    assert "target_duration_s" not in ReelBlueprint.model_fields
 
 
 def test_strategy_uses_template_field_not_template_suffix():
     strategy = ReelStrategy(
         template_=Template.HookContextValuePayoffCta,
-        target_duration_s=24.0,
+        duration_range_s=duration_range(),
+        duration_policy=duration_policy(),
+        arc=arc_plan(),
         hook=Hook(
             type=HookType.CuriosityGap,
             banner_line="Hello",
@@ -170,6 +183,7 @@ def test_strategy_uses_template_field_not_template_suffix():
 
     assert strategy.template_ is Template.HookContextValuePayoffCta
     assert "template" not in ReelStrategy.model_fields
+    assert "target_duration_s" not in ReelStrategy.model_fields
     assert strategy.model_dump()["template_"] == "HookContextValuePayoffCta"
 
 
@@ -177,7 +191,26 @@ def test_generated_types_allow_extra_fields_from_baml_runtime():
     bp = ReelBlueprint.model_validate(
         {
             "template_": "Listicle",
-            "target_duration_s": 28.0,
+            "duration_range_s": {
+                "min_s": 18.0,
+                "max_s": 28.0,
+                "rationale": "one list arc completes without padding",
+            },
+            "duration_policy": {
+                "soft_cap_s": 180.0,
+                "effective_cap_s": 180.0,
+                "advisory_min_s": 10.0,
+                "advisory_max_s": 180.0,
+                "cap_overridden": False,
+            },
+            "arc": {
+                "promise": "three ideas",
+                "thread": "one list thread",
+                "completion_criteria": ["hook", "payoff", "loop"],
+                "required_candidate_ids": ["c001"],
+                "optional_candidate_ids": [],
+                "excluded_candidate_ids": [],
+            },
             "hook": {
                 "type": "Number",
                 "banner_line": "Three ideas",
@@ -202,6 +235,7 @@ def test_generated_types_allow_extra_fields_from_baml_runtime():
             },
             "engagement_primary": "Save",
             "cta": {"hardness": "Soft", "placements": ["end"]},
+            "completion_rationale": "the list hook, payoff, and loop are covered",
             "surprise": 1,
         }
     )

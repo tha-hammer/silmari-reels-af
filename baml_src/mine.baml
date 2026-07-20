@@ -5,8 +5,12 @@ function MineCandidates(transcript_text: string, register: string) -> CandidateS
     {{ _.role("user") }}
     Register: {{ register }}
 
-    Mine CandidateSpan objects that can carry a short reel. Quote VERBATIM.
+    Mine CandidateSpan objects that can carry a content-driven reel. Quote VERBATIM.
     approx_start_s/approx_end_s are optional hints, never authoritative timecodes.
+    The caller may pass one source window rather than the whole transcript; still judge spans by
+    source value, not by filling a quota. Across windows, the planner will preserve whole-source
+    coverage, so do not cluster around only one moment when the transcript contains stronger
+    early/middle/late material.
 
     Selection bar:
     - Prefer spans that are BOTH hook-worthy and payoff-worthy.
@@ -20,6 +24,8 @@ function MineCandidates(transcript_text: string, register: string) -> CandidateS
     - Reject generic statements that could appear in any video, summary sentences with no concrete
       consequence, and context-only spans that need another missing sentence to matter.
     - Never emit low-value spans just to fill the list.
+    - Never pad candidate output to satisfy length. A complete reel can be short, medium, or long,
+      depending on what the source actually supports.
 
     value_score must use the full 0-1 range:
     - 0.90-1.00: reel anchor; strong hook/payoff, memorable language, concrete consequence.
@@ -66,6 +72,20 @@ function MineCandidates(transcript_text: string, register: string) -> CandidateS
     BAD reject: "The team shipped on Friday. It was fine." -> context-only setup with no payoff.
     GOOD keep: "support woke up to 200 tickets because no one ran the parser against real
     transcripts." -> value_score 0.93, emotion "alarm", is_claim true, payoff_worthy true.
+
+    Example 4 long-form source windows:
+    Window A: "The audit failed because the demo only used friendly transcripts."
+    Window B: "The second failure was worse: the planner found proof but never linked it to the
+    payoff."
+    Window C: "The fix was not a longer reel. The fix was requiring every beat to pay off one
+    named criterion."
+    GOOD keep from A, B, and C when each span supplies a different required part of one arc.
+    BAD reject: five near-identical examples from Window B when A and C contain the setup and
+    payoff. That clustering makes the arc incomplete.
+
+    Negative long-form example:
+    BAD keep: "another team had the same problem" repeated three times from different moments.
+    Repetition is not proof unless each quote adds a new mechanism, consequence, or payoff.
 
     --- TRANSCRIPT ---
     {{ transcript_text }}

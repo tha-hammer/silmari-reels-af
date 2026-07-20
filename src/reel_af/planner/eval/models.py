@@ -97,7 +97,16 @@ class BlueprintEvidence(BaseModel):
     artifact_kind: Literal["blueprint", "triple"]
     source_url: str
     template: str | None = None
-    target_duration_s: float | None = None
+    legacy_target_duration_s: float | None = None
+    duration_range_s: dict[str, Any] = Field(default_factory=dict)
+    duration_policy: dict[str, Any] = Field(default_factory=dict)
+    beat_count: int = 0
+    estimated_duration_s: float | None = None
+    compiled_duration_s: float | None = None
+    completion_rationale: str | None = None
+    cap_rationale: str | None = None
+    omitted_candidate_ids: list[str] = Field(default_factory=list)
+    candidate_source_coverage: dict[str, Any] = Field(default_factory=dict)
     hook_banner: str | None = None
     hook_span_quote: str | None = None
     loop_final_span_quote: str | None = None

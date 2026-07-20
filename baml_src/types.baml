@@ -73,6 +73,10 @@ class CandidateSpan {
   quote string
   approx_start_s float?
   approx_end_s float?
+  source_window_id string?
+  source_window_index int?
+  source_window_start_s float?
+  source_window_end_s float?
   value_score float
   emotion string?
   is_claim bool?
@@ -87,6 +91,10 @@ class PlannerCandidate {
   word_range int[]
   start_s float
   end_s float
+  source_window_id string?
+  source_window_index int?
+  source_window_start_s float?
+  source_window_end_s float?
   quality float
   value_score float
   emotion string?
@@ -130,6 +138,8 @@ class Beat {
   candidate_id string
   occurrence_index int
   max_len_s float
+  completion_role string?
+  completion_criterion_ids string[]?
   cutin CutIn?
   interrupt_out Interrupt?
   engagement Engagement?
@@ -152,9 +162,34 @@ class DurationBounds {
   max_s float
 }
 
+class DurationPolicy {
+  soft_cap_s float
+  effective_cap_s float
+  advisory_min_s float?
+  advisory_max_s float?
+  cap_overridden bool
+}
+
+class DurationRange {
+  min_s float
+  max_s float
+  rationale string
+}
+
+class ArcPlan {
+  promise string
+  thread string
+  completion_criteria string[]
+  required_candidate_ids string[]
+  optional_candidate_ids string[]?
+  excluded_candidate_ids string[]?
+}
+
 class ReelStrategy {
   template_ Template
-  target_duration_s float
+  duration_range_s DurationRange
+  duration_policy DurationPolicy
+  arc ArcPlan
   hook Hook
   engagement_primary EngagementKind
   cta CtaPlan
@@ -163,11 +198,16 @@ class ReelStrategy {
 
 class ReelBlueprint {
   template_ Template
-  target_duration_s float
+  duration_range_s DurationRange
+  duration_policy DurationPolicy
+  arc ArcPlan
   hook Hook
   beats Beat[]
   loop LoopPlan
   engagement_primary EngagementKind
   cta CtaPlan
+  completion_rationale string
+  cap_rationale string?
+  omitted_candidate_ids string[]?
   rationale string?
 }

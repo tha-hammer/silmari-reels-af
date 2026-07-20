@@ -9,11 +9,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
-from reel_af.dsl.models import WordsSidecar
+from reel_af.dsl.models import FADE_TO_COLOR_EFFECTS, WordsSidecar
 from reel_af.planner.config import PlannerConfig, load_planner_config
 from reel_af.planner.models import BeatRole
 
-LintRule = Literal["R1", "R2", "R3", "R4", "R8", "R11", "R12"]
+LintRule = Literal["R1", "R2", "R3", "R4", "R7", "R8", "R11", "R12"]
 LintSeverity = Literal["warning", "error"]
 
 
@@ -26,6 +26,7 @@ class LintDiagnostic(BaseModel):
     severity: LintSeverity
     message: str
     locus: str | None = None
+    context: dict[str, Any] | None = None
 
 
 def lint_blueprint(
@@ -35,8 +36,11 @@ def lint_blueprint(
     *,
     resolved: Sequence[Any] | None = None,
     register: str | None = None,
+    duration_policy: Any | None = None,
+    strategy: Any | None = None,
+    candidates: Sequence[Any] | None = None,
 ) -> list[LintDiagnostic]:
-    """Run deterministic producer retention lint rules R1/R2/R3/R4/R8/R11/R12."""
+    """Run deterministic producer retention lint rules R1/R2/R3/R4/R7/R8/R11/R12."""
     cfg = cfg or load_planner_config()
     beats = list(_items(_get(blueprint, "beats", [])))
     findings: list[LintDiagnostic] = []
@@ -46,14 +50,27 @@ def lint_blueprint(
     findings.extend(_lint_r2(beats, resolved, cfg, register or _get(blueprint, "register", None)))
     findings.extend(_lint_r4(beats, resolved, words, cfg))
     findings.extend(_lint_r8(blueprint, beats, cfg))
+    findings.extend(_lint_r7(blueprint, beats, resolved, cfg, duration_policy, strategy, candidates))
     findings.extend(_lint_r3(beats, resolved))
     findings.extend(_lint_r12(blueprint, beats))
 
     return findings
 
 
-def _diag(rule: LintRule, severity: LintSeverity, message: str, locus: str | None = None):
-    return LintDiagnostic(rule=rule, severity=severity, message=message, locus=locus)
+def _diag(
+    rule: LintRule,
+    severity: LintSeverity,
+    message: str,
+    locus: str | None = None,
+    context: dict[str, Any] | None = None,
+) -> LintDiagnostic:
+    return LintDiagnostic(
+        rule=rule,
+        severity=severity,
+        message=message,
+        locus=locus,
+        context=context,
+    )
 
 
 def _lint_r11(blueprint: Any, cfg: PlannerConfig) -> list[LintDiagnostic]:
@@ -175,6 +192,8 @@ def _lint_r3(beats: Sequence[Any], resolved: Sequence[Any] | None) -> list[LintD
         for duration in [_duration_s(beat, _resolved_at(resolved, index))]
         if duration is not None
     ]
+    if len(durations) >= 6:
+        return _lint_r3_sectional(beats, durations)
     back_half = durations[len(durations) // 2 :]
     if len(back_half) < 2:
         return []
@@ -187,6 +206,251 @@ def _lint_r3(beats: Sequence[Any], resolved: Sequence[Any] | None) -> list[LintD
             )
         ]
     return []
+
+
+def _lint_r3_sectional(beats: Sequence[Any], durations: Sequence[float]) -> list[LintDiagnostic]:
+    third = max(1, len(durations) // 3)
+    middle = durations[third : third * 2] or durations[third:]
+    payoff_approach = durations[third * 2 :] or durations[-third:]
+    if not middle or not payoff_approach:
+        return []
+    middle_change_density = _change_density(beats[third : third * 2])
+    payoff_change_density = _change_density(beats[third * 2 :])
+    if _median(payoff_approach) <= _median(middle):
+        return []
+    if payoff_change_density > middle_change_density:
+        return []
+    return [
+        _diag(
+            "R3",
+            "warning",
+            "Long-reel payoff approach should tighten by duration or higher change density.",
+        )
+    ]
+
+
+def _lint_r7(
+    blueprint: Any,
+    beats: Sequence[Any],
+    resolved: Sequence[Any] | None,
+    cfg: PlannerConfig,
+    duration_policy: Any | None,
+    strategy: Any | None,
+    candidates: Sequence[Any] | None,
+) -> list[LintDiagnostic]:
+    policy = duration_policy or _get(blueprint, "duration_policy", None)
+    arc = _get(strategy, "arc", None) or _get(blueprint, "arc", None)
+    if policy is None and arc is None and not _get(blueprint, "completion_rationale", None):
+        return []
+
+    findings: list[LintDiagnostic] = []
+    if policy is not None:
+        total_duration_s = estimate_blueprint_duration_s(beats, resolved)
+        effective_cap_s = float(_get(policy, "effective_cap_s", cfg.r7_soft_cap_s))
+        tolerance_s = float(cfg.r7_cap_tolerance_s)
+        if total_duration_s > effective_cap_s + tolerance_s:
+            findings.append(
+                _diag(
+                    "R7",
+                    "error",
+                    (
+                        f"Blueprint duration {total_duration_s:.2f}s exceeds active "
+                        f"cap {effective_cap_s:.2f}s."
+                    ),
+                    context={
+                        "total_duration_s": total_duration_s,
+                        "effective_cap_s": effective_cap_s,
+                        "cap_overridden": bool(_get(policy, "cap_overridden", False)),
+                        "advisory_min_s": _get(policy, "advisory_min_s", None),
+                        "advisory_max_s": _get(policy, "advisory_max_s", None),
+                    },
+                )
+            )
+        advisory_min_s = _get(policy, "advisory_min_s", None)
+        if advisory_min_s is not None and total_duration_s < float(advisory_min_s):
+            findings.append(
+                _diag(
+                    "R7",
+                    "warning",
+                    (
+                        f"Blueprint duration {total_duration_s:.2f}s is below advisory "
+                        f"minimum {float(advisory_min_s):.2f}s; this is allowed only "
+                        "when completion_rationale shows the arc is complete."
+                    ),
+                    context={"total_duration_s": total_duration_s, "advisory_min_s": advisory_min_s},
+                )
+            )
+        advisory_max_s = _get(policy, "advisory_max_s", None)
+        if (
+            advisory_max_s is not None
+            and total_duration_s > float(advisory_max_s)
+            and total_duration_s <= effective_cap_s + tolerance_s
+        ):
+            findings.append(
+                _diag(
+                    "R7",
+                    "warning",
+                    (
+                        f"Blueprint duration {total_duration_s:.2f}s exceeds advisory "
+                        f"maximum {float(advisory_max_s):.2f}s but remains under active cap."
+                    ),
+                    context={"total_duration_s": total_duration_s, "advisory_max_s": advisory_max_s},
+                )
+            )
+
+    if len(beats) > cfg.max_beats:
+        findings.append(
+            _diag(
+                "R7",
+                "error",
+                f"Blueprint has {len(beats)} beats, above max_beats={cfg.max_beats}.",
+                context={"beat_count": len(beats), "max_beats": cfg.max_beats},
+            )
+        )
+
+    findings.extend(validate_arc_completion(strategy or blueprint, blueprint, candidates or []))
+    findings.extend(_lint_beat_completion_roles(beats, strategy or blueprint))
+    return findings
+
+
+def estimate_blueprint_duration_s(
+    beats: Sequence[Any],
+    resolved: Sequence[Any] | None = None,
+) -> float:
+    total = 0.0
+    for index, beat in enumerate(beats):
+        duration = _duration_s(beat, _resolved_at(resolved, index))
+        if duration is not None:
+            total += max(0.0, float(duration))
+        interrupt = _get(beat, "interrupt_out", None)
+        if interrupt is None:
+            continue
+        kind = _wire_token(_get(interrupt, "kind", ""))
+        dur_s = float(_get(interrupt, "dur_s", _get(interrupt, "duration_s", 0.0)) or 0.0)
+        if kind == "black":
+            total += dur_s
+        elif kind == "trans":
+            effect = _wire_token(_get(interrupt, "effect", "fade"))
+            if effect != "none" and effect not in FADE_TO_COLOR_EFFECTS:
+                total -= dur_s
+    return max(0.0, total)
+
+
+def validate_arc_completion(
+    strategy: Any,
+    blueprint: Any,
+    candidates: Sequence[Any],
+) -> list[LintDiagnostic]:
+    arc = _get(strategy, "arc", None) or _get(blueprint, "arc", None)
+    if arc is None:
+        return [_diag("R7", "error", "ArcPlan is required for content-driven length.")]
+
+    criteria = [str(item).strip() for item in (_get(arc, "completion_criteria", []) or []) if str(item).strip()]
+    required_ids = [str(item).strip() for item in (_get(arc, "required_candidate_ids", []) or []) if str(item).strip()]
+    if not str(_get(arc, "promise", "") or "").strip():
+        return [_diag("R7", "error", "ArcPlan promise is required.")]
+    if not str(_get(arc, "thread", "") or "").strip():
+        return [_diag("R7", "error", "ArcPlan thread is required.")]
+    if not criteria:
+        return [_diag("R7", "error", "ArcPlan completion_criteria are required.")]
+    if not required_ids:
+        return [_diag("R7", "error", "ArcPlan required_candidate_ids are required.")]
+
+    findings: list[LintDiagnostic] = []
+    beats = list(_items(_get(blueprint, "beats", [])))
+    beat_candidate_ids = {str(_get(beat, "candidate_id", "")) for beat in beats if _get(beat, "candidate_id", None)}
+    omitted_ids = {str(item) for item in (_get(blueprint, "omitted_candidate_ids", []) or [])}
+    cap_rationale = str(_get(blueprint, "cap_rationale", "") or "").strip()
+    missing_ids = sorted(set(required_ids) - beat_candidate_ids)
+    missing_without_cap = [candidate_id for candidate_id in missing_ids if candidate_id not in omitted_ids]
+    if missing_without_cap:
+        findings.append(
+            _diag(
+                "R7",
+                "error",
+                "Blueprint omits required arc candidates: " + ", ".join(missing_without_cap),
+                context={"missing_candidate_ids": missing_without_cap},
+            )
+        )
+    omitted_required = sorted(set(required_ids) & omitted_ids)
+    if omitted_required and not cap_rationale:
+        findings.append(
+            _diag(
+                "R7",
+                "error",
+                "Required arc candidates may be omitted only with cap_rationale.",
+                context={"omitted_required_candidate_ids": omitted_required},
+            )
+        )
+
+    completion_rationale = str(_get(blueprint, "completion_rationale", "") or "").strip()
+    if not completion_rationale:
+        findings.append(_diag("R7", "error", "Blueprint completion_rationale is required."))
+    elif not _mentions_completion_criteria(completion_rationale, criteria):
+        findings.append(
+            _diag(
+                "R7",
+                "warning",
+                "completion_rationale should reference the declared completion criteria.",
+            )
+        )
+
+    roles = {_beat_role(beat) for beat in beats}
+    for required_role in (BeatRole.Hook, BeatRole.Payoff):
+        if required_role not in roles:
+            findings.append(
+                _diag("R7", "error", f"Blueprint missing required {required_role.value} beat.")
+            )
+    final_quote = str(_get(_get(blueprint, "loop", {}), "final_span_quote", "") or "").strip()
+    last_quote = str(_get(beats[-1], "span_quote", "") or "").strip() if beats else ""
+    if final_quote and last_quote and final_quote != last_quote:
+        findings.append(_diag("R7", "error", "Loop final_span_quote must match final beat."))
+    known_ids = {str(_get(candidate, "candidate_id", "")) for candidate in candidates}
+    unknown_required = sorted(set(required_ids) - known_ids) if known_ids else []
+    if unknown_required:
+        findings.append(
+            _diag(
+                "R7",
+                "error",
+                "ArcPlan references unknown required candidates: " + ", ".join(unknown_required),
+            )
+        )
+    return findings
+
+
+def _lint_beat_completion_roles(beats: Sequence[Any], strategy: Any) -> list[LintDiagnostic]:
+    arc = _get(strategy, "arc", None)
+    if arc is None:
+        return []
+    required_ids = {str(item) for item in (_get(arc, "required_candidate_ids", []) or [])}
+    optional_ids = {str(item) for item in (_get(arc, "optional_candidate_ids", []) or [])}
+    findings: list[LintDiagnostic] = []
+    for index, beat in enumerate(beats):
+        if _get(beat, "completion_role", None) or _get(beat, "completion_criterion_ids", None):
+            continue
+        candidate_id = str(_get(beat, "candidate_id", "") or "")
+        role = _beat_role(beat)
+        if candidate_id in required_ids or role in {BeatRole.Hook, BeatRole.Payoff, BeatRole.Cta}:
+            continue
+        if candidate_id in optional_ids:
+            findings.append(
+                _diag(
+                    "R7",
+                    "warning",
+                    "Optional beat should declare the completion role it supports.",
+                    locus=f"beat[{index}]",
+                )
+            )
+            continue
+        findings.append(
+            _diag(
+                "R7",
+                "warning",
+                "Beat should satisfy a criterion, bridge criteria, or add non-duplicative proof.",
+                locus=f"beat[{index}]",
+            )
+        )
+    return findings
 
 
 def _lint_r12(blueprint: Any, beats: Sequence[Any]) -> list[LintDiagnostic]:
@@ -258,6 +522,61 @@ def _token_overlap(left: str, right: str) -> float:
     return len(left_tokens & right_tokens) / min(len(left_tokens), len(right_tokens))
 
 
+def _mentions_completion_criteria(rationale: str, criteria: Sequence[str]) -> bool:
+    rationale_tokens = set(_tokens(rationale))
+    if not rationale_tokens:
+        return False
+    for criterion in criteria:
+        criterion_tokens = set(_tokens(criterion))
+        if criterion_tokens and len(rationale_tokens & criterion_tokens) >= min(2, len(criterion_tokens)):
+            return True
+    return False
+
+
+def _change_density(beats: Sequence[Any]) -> float:
+    if not beats:
+        return 0.0
+    changed = sum(1 for beat in beats if _has_adjacent_change(beat))
+    return changed / len(beats)
+
+
+def _median(values: Sequence[float]) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    midpoint = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[midpoint]
+    return (ordered[midpoint - 1] + ordered[midpoint]) / 2
+
+
+def _wire_token(value: Any) -> str:
+    if isinstance(value, Enum):
+        value = value.value
+    aliases = {
+        "Black": "black",
+        "Join": "join",
+        "Trans": "trans",
+        "Zoom": "zoom",
+        "Visual": "visual",
+        "NoEffect": "none",
+        "Dissolve": "dissolve",
+        "Smoothleft": "smoothleft",
+        "Smoothright": "smoothright",
+        "Smoothup": "smoothup",
+        "Smoothdown": "smoothdown",
+        "Hblur": "hblur",
+        "Circleopen": "circleopen",
+        "Radial": "radial",
+        "Pixelize": "pixelize",
+        "Fadeblack": "fadeblack",
+        "Fadewhite": "fadewhite",
+        "Fade": "fade",
+    }
+    text = str(value)
+    return aliases.get(text, text.lower())
+
+
 def _tokens(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", text.lower())
 
@@ -318,4 +637,9 @@ def _display_texts(blueprint: Any) -> Iterable[str]:
             yield str(line)
 
 
-__all__ = ["LintDiagnostic", "lint_blueprint"]
+__all__ = [
+    "LintDiagnostic",
+    "estimate_blueprint_duration_s",
+    "lint_blueprint",
+    "validate_arc_completion",
+]
