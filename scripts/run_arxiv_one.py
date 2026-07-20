@@ -14,6 +14,8 @@ from pathlib import Path
 
 import aiohttp
 
+from resolve_output_dir import resolve_output_dir
+
 CONTROL_PLANE = "http://localhost:8080"
 TIMEOUT_S = 1800  # papers take longer (heavier video, longer script)
 
@@ -24,7 +26,7 @@ DEFAULT_URL = "https://arxiv.org/abs/2501.12948"
 async def main():
     url = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_URL
     label = sys.argv[2] if len(sys.argv) > 2 else "arxiv_one"
-    out_dir = f"output/scientific/{label}"
+    out_dir = resolve_output_dir("scientific", label)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None)) as s:

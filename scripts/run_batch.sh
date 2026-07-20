@@ -14,12 +14,10 @@ ARTICLES=(
   "https://abyss.fish/your_dotfiles_are_not_a_distro|culture"
 )
 
-mkdir -p output/batch
-
 for entry in "${ARTICLES[@]}"; do
   url="${entry%%|*}"
   genre="${entry##*|}"
-  out_dir="output/batch/${genre}"
+  out_dir="$(python3 scripts/resolve_output_dir.py batch "$genre")"
   rm -rf "$out_dir"
   mkdir -p "$out_dir"
 
@@ -75,5 +73,6 @@ print(f'  timings       : {r.get(\"timings_s\")}')
 done
 
 echo
-echo "All outputs in output/batch/"
-ls -la output/batch/*/reel.mp4 2>/dev/null || true
+batch_parent="$(dirname "$(python3 scripts/resolve_output_dir.py batch summary)")"
+echo "All outputs under $batch_parent/batch-*/"
+ls -la "$batch_parent"/batch-*/reel.mp4 2>/dev/null || true

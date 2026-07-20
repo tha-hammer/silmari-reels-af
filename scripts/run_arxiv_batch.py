@@ -13,6 +13,8 @@ from pathlib import Path
 
 import aiohttp
 
+from resolve_output_dir import resolve_output_dir
+
 CONTROL_PLANE = "http://localhost:8080"
 TIMEOUT_S = 1800
 
@@ -24,7 +26,7 @@ PAPERS = [
 
 
 async def _kick(session, label, url):
-    out = f"output/scientific/{label}"
+    out = resolve_output_dir("scientific", label)
     Path(out).mkdir(parents=True, exist_ok=True)
     async with session.post(
         f"{CONTROL_PLANE}/api/v1/execute/async/reel-af.reel_article_to_reel",

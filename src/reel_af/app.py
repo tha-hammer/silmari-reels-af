@@ -128,7 +128,6 @@ CAROUSEL_DEFAULT_PRESET = str(_CAROUSEL_CFG["default_preset"])
 CAROUSEL_DEFAULT_CROP = str(_CAROUSEL_CFG["default_crop"])
 _CAROUSEL_MIN_SLIDE_COUNT = int(_CAROUSEL_CFG["min_slide_count"])
 _CAROUSEL_RUN_ID_HEX_CHARS = int(_CAROUSEL_CFG["run_id_hex_chars"])
-_CAROUSEL_OUTPUT_ROOT = str(_CAROUSEL_CFG["output_root"])
 _CAROUSEL_OUTPUT_DIR_PREFIX = str(_CAROUSEL_CFG["output_dir_prefix"])
 _CAROUSEL_OPENROUTER_ERROR = str(_CAROUSEL_CFG["missing_openrouter_error"])
 _CAROUSEL_PROMPT_COUNT_ERROR_TEMPLATE = str(
@@ -455,9 +454,7 @@ async def article_to_reel(
         return {"error": "OPENROUTER_API_KEY not set in env."}
 
     run_id = uuid.uuid4().hex[:8]
-    out_path = (
-        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"article-{run_id}")
-    )
+    out_path = Path(out_dir) if out_dir else runs_dir("article", run_id)
     out_path.mkdir(parents=True, exist_ok=True)
     media_dir = out_path / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
@@ -546,9 +543,7 @@ async def topic_to_reel(
         return {"error": "OPENROUTER_API_KEY not set in env."}
 
     run_id = uuid.uuid4().hex[:8]
-    out_path = (
-        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"topic-{run_id}")
-    )
+    out_path = Path(out_dir) if out_dir else runs_dir("topic", run_id)
     out_path.mkdir(parents=True, exist_ok=True)
     media_dir = out_path / "media"
     media_dir.mkdir(parents=True, exist_ok=True)
@@ -834,7 +829,7 @@ async def composite_to_reel(
         -d '{"input":{"url":"https://youtu.be/…","preset":"middle-third-dynamic"}}'
     """
     run_id = uuid.uuid4().hex[:8]
-    out_path = Path(out_dir) if out_dir else (Path.cwd() / "output" / f"composite-{run_id}")
+    out_path = Path(out_dir) if out_dir else runs_dir("composite", run_id)
     out_path.mkdir(parents=True, exist_ok=True)
     chrome = os.getenv("CHROMIUM_PATH") or None
 
@@ -949,7 +944,7 @@ async def plan_carousel_prompts(planner_app: Any, essence: Essence, count: int) 
 
 
 def _default_carousel_output_dir(run_id: str) -> Path:
-    return Path.cwd() / _CAROUSEL_OUTPUT_ROOT / f"{_CAROUSEL_OUTPUT_DIR_PREFIX}-{run_id}"
+    return runs_dir(_CAROUSEL_OUTPUT_DIR_PREFIX, run_id)
 
 
 def _has_openrouter_api_key() -> bool:
@@ -1285,9 +1280,7 @@ async def research_to_reel(
         return {"error": "empty_selection", "source_execution_id": source_execution_id}
 
     run_id = uuid.uuid4().hex[:8]
-    out_path = (
-        Path(out_dir) if out_dir else (Path.cwd() / "output" / f"research-{run_id}")
-    )
+    out_path = Path(out_dir) if out_dir else runs_dir("research", run_id)
     out_path.mkdir(parents=True, exist_ok=True)
     media_dir = out_path / "media"
     media_dir.mkdir(parents=True, exist_ok=True)

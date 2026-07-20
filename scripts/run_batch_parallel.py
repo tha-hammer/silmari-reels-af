@@ -18,6 +18,8 @@ from typing import Any
 
 import aiohttp
 
+from resolve_output_dir import resolve_output_dir
+
 CONTROL_PLANE = "http://localhost:8080"
 TIMEOUT_S = 900
 
@@ -29,7 +31,7 @@ ARTICLES: list[tuple[str, str]] = [
 
 
 async def _kick_off(session: aiohttp.ClientSession, genre: str, url: str) -> tuple[str, str, str]:
-    out_dir = f"output/batch/{genre}"
+    out_dir = resolve_output_dir("batch", genre)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     payload = {"input": {"url": url, "out_dir": out_dir}}
     async with session.post(

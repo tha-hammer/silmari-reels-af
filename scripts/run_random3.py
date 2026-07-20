@@ -12,6 +12,8 @@ from pathlib import Path
 
 import aiohttp
 
+from resolve_output_dir import resolve_output_dir
+
 CONTROL_PLANE = "http://localhost:8080"
 TIMEOUT_S = 1200
 
@@ -23,7 +25,7 @@ ARTICLES = [
 
 
 async def _kick_off(session, genre, url):
-    out_dir = f"output/random3/{genre}"
+    out_dir = resolve_output_dir("random3", genre)
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     payload = {"input": {"url": url, "out_dir": out_dir}}
     async with session.post(

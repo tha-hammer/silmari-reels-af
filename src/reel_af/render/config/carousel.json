@@ -5,7 +5,6 @@
   "min_slide_count": 1,
   "negative_idx_error_template": "slide idx must be >= 0, got {idx}",
   "output_dir_prefix": "carousel",
-  "output_root": "output",
   "planner_wrong_count_error_template": "prompt_planner returned {actual} prompts, expected {expected}",
   "prompt_system": "You are an image-prompt planner for a still-image carousel. Given the distilled essence of a document, produce exactly N ordered image prompts one per slide. Each prompt is a self-contained visual scene description that carries the claim, mechanism, or evidence. Do not request text, letters, captions, charts with readable labels, or UI copy in the image.",
   "prompt_user_template": "N = {n}\nCORE CLAIM: {core_claim}\nMECHANISM: {mechanism}\nEVIDENCE: {evidence}\nCONTENT MODE: {content_mode}\nDOMAIN: {domain}",

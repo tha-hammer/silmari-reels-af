@@ -17,6 +17,7 @@ build/
 
 # Pipeline outputs (renders + intermediates)
 output/
+/out/
 /resources/runs/*
 !/resources/runs/.gitkeep
 /resources/evals/*

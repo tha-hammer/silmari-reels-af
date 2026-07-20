@@ -28,6 +28,8 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
+from reel_af.planner.paths import runs_dir
+
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 load_dotenv(_PROJECT_ROOT / ".env")
 
@@ -337,7 +339,7 @@ def composite(
     from reel_af.render.composite_pipeline import composite_to_reel
 
     _require_key()
-    work = out_dir or (_PROJECT_ROOT / "out" / "composite")
+    work = out_dir or runs_dir("cli-composite", "default")
 
     console.rule("[bold]composite_to_reel")
     console.print(f"  url:  [cyan]{url}[/cyan]")
@@ -444,7 +446,7 @@ def reels(
 
     fps = int(cfg.get("fps", 30))
     reel_s = float(cfg["reel_seconds"])
-    work = out_dir or (_PROJECT_ROOT / "out" / "reels" / preset)
+    work = out_dir or runs_dir("cli-reels", preset)
     work.mkdir(parents=True, exist_ok=True)
 
     console.rule(f"[bold]reels · {preset}")
