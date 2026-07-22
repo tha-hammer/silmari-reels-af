@@ -40,6 +40,16 @@ from deps import (
     default_deps,
 )
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
+from projects import (
+    project_asset_view,
+    project_view,
+    validate_asset_title,
+    validate_asset_type,
+    validate_link_url,
+    validate_project_description,
+    validate_project_name,
+    validate_source_asset_ref,
+)
 from reel_jobs import (
     A1_DELIVERY_UNAVAILABLE,
     DELIVERY_REQUIRED_TARGETS,
@@ -111,6 +121,37 @@ def _is_upload(method: str, sub: str) -> bool:
 
 def _is_source_asset_list(method: str, sub: str) -> bool:
     return method == "GET" and sub == "v1/source-assets"
+
+
+# AF-4pz.4/.5 — Projects CRUD + attached assets. Pure predicates like siblings.
+_PROJECT_RE = re.compile(r"^v1/projects/([^/]+)$")
+_PROJECT_ASSETS_RE = re.compile(r"^v1/projects/([^/]+)/assets$")
+_PROJECT_ASSET_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)$")
+
+
+def _is_projects_collection(method: str, sub: str) -> bool:
+    return method in ("GET", "POST") and sub == "v1/projects"
+
+
+def _project_target(method: str, sub: str) -> str | None:
+    if method not in ("GET", "PATCH", "DELETE"):
+        return None
+    m = _PROJECT_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _project_assets_target(method: str, sub: str) -> str | None:
+    if method not in ("GET", "POST"):
+        return None
+    m = _PROJECT_ASSETS_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _project_asset_target(method: str, sub: str) -> tuple[str, str] | None:
+    if method != "DELETE":
+        return None
+    m = _PROJECT_ASSET_RE.match(sub)
+    return (m.group(1), m.group(2)) if m else None
 
 
 def _is_research_run(method: str, sub: str) -> bool:
@@ -788,6 +829,98 @@ def _handle_upload(deps: AppDeps) -> tuple[Response, int]:
     return jsonify({**handle, "asset_id": str(asset.asset_id)}), HTTP_CREATED
 
 
+def _handle_projects_collection(deps: AppDeps) -> tuple[Response, int]:
+    """AF-4pz.4: POST create / GET list — org-scoped, owner-stamped."""
+    ctx = deps.identity.resolve(request)
+    if request.method == "GET":
+        return jsonify(
+            {"projects": [project_view(p) for p in deps.projects.list_for_org(ctx)]}
+        ), 200
+    deps.access_guard.authorize_create(ctx)
+    body = request.get_json(silent=True) or {}
+    project = deps.projects.create(
+        ctx,
+        project_id=deps.uuid_factory(),
+        name=validate_project_name(body.get("name")),
+        description=validate_project_description(body.get("description")),
+        now=deps.clock.now(),
+    )
+    return jsonify(project_view(project)), HTTP_CREATED
+
+
+def _handle_project(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-4pz.4: GET one / PATCH rename / DELETE soft — foreign concealed 404."""
+    ctx = deps.identity.resolve(request)
+    if request.method == "GET":
+        return jsonify(project_view(deps.projects.get(ctx, project_id))), 200
+    deps.access_guard.authorize_create(ctx)
+    if request.method == "DELETE":
+        deps.projects.soft_delete(ctx, project_id, now=deps.clock.now())
+        return Response(status=204), 204
+    body = request.get_json(silent=True) or {}
+    name = validate_project_name(body["name"]) if "name" in body else None
+    description = (
+        validate_project_description(body["description"]) if "description" in body else None
+    )
+    updated = deps.projects.update(
+        ctx, project_id, name=name, description=description, now=deps.clock.now()
+    )
+    return jsonify(project_view(updated)), 200
+
+
+def _handle_project_assets(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-4pz.5: POST add / GET list assets. The project resolves first (404
+    conceals foreign/absent) BEFORE any upload or row write."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    if request.method == "GET":
+        assets = deps.project_assets.list_for_project(ctx, project.project_id)
+        return jsonify({"assets": [project_asset_view(a) for a in assets]}), 200
+
+    deps.access_guard.authorize_create(ctx)
+    is_multipart = request.content_type and request.content_type.startswith("multipart/")
+    body = request.form if is_multipart else (request.get_json(silent=True) or {})
+    asset_type = validate_asset_type(body.get("asset_type"))
+    title = validate_asset_title(body.get("title"))
+
+    source_asset_id = bucket_key = url = None
+    if asset_type == "link":
+        url = validate_link_url(body.get("url"))
+    elif asset_type == "video" and not is_multipart:
+        # Reuse of a persisted upload — org-scoped resolve, 404 conceals foreign.
+        ref = validate_source_asset_ref(body.get("source_asset_id"))
+        source_asset_id = deps.source_assets.get(ctx, ref).asset_id
+    else:
+        # image/document (and fresh video) uploads ride the existing store —
+        # same validation, org-prefixed key, canonical 400/413/503 guards.
+        handle = deps.uploads.store(ctx, request.files.get("file"))
+        bucket_key = handle["path"]
+
+    asset = deps.project_assets.add(
+        ctx,
+        asset_id=deps.uuid_factory(),
+        project_id=project.project_id,
+        asset_type=asset_type,
+        source_asset_id=source_asset_id,
+        bucket_key=bucket_key,
+        url=url,
+        title=title,
+        now=deps.clock.now(),
+    )
+    return jsonify(project_asset_view(asset)), HTTP_CREATED
+
+
+def _handle_project_asset_delete(
+    deps: AppDeps, project_id: str, asset_id: str
+) -> tuple[Response, int]:
+    """AF-4pz.5: soft-remove one attached asset (project resolves first)."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    deps.access_guard.authorize_create(ctx)
+    deps.project_assets.soft_delete(ctx, project.project_id, asset_id, now=deps.clock.now())
+    return Response(status=204), 204
+
+
 def _handle_source_asset_list(deps: AppDeps) -> tuple[Response, int]:
     # AF-02f: the caller's durable uploads. Org-scoping lives in the repo SQL
     # (rows are filtered by the resolved ctx.org_id; soft-deleted excluded).
@@ -836,6 +969,17 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
         return _handle_upload(deps)
     if _is_source_asset_list(method, subpath):
         return _handle_source_asset_list(deps)
+    if _is_projects_collection(method, subpath):
+        return _handle_projects_collection(deps)
+    project_assets_id = _project_assets_target(method, subpath)
+    if project_assets_id is not None:
+        return _handle_project_assets(deps, project_assets_id)
+    project_asset_ids = _project_asset_target(method, subpath)
+    if project_asset_ids is not None:
+        return _handle_project_asset_delete(deps, *project_asset_ids)
+    project_id = _project_target(method, subpath)
+    if project_id is not None:
+        return _handle_project(deps, project_id)
     if _is_carousel_create(method, subpath):
         return _handle_carousel_create(deps)
     if _is_research_run(method, subpath):

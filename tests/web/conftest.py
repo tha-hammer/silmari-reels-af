@@ -308,6 +308,115 @@ class FakeSourceAssetRepo:
         raise NotFound("source asset not found", code="source_asset_not_found")
 
 
+class FakeProjectRepo:
+    """AF-4pz.4: org-scoped project CRUD fake (mirrors PgProjectRepo)."""
+
+    def __init__(self, projects: list | None = None):
+        self._projects = list(projects or [])
+        self.created: list = []
+        self.list_calls: list = []
+        self.updated: list = []
+        self.soft_deleted: list = []
+
+    def create(self, ctx, *, project_id, name, description, now):
+        from projects import ProjectRef
+
+        self.created.append({
+            "ctx": ctx, "project_id": project_id, "name": name,
+            "description": description, "now": now,
+        })
+        ref = ProjectRef(
+            project_id=project_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            name=name, description=description, created_at=now, updated_at=now,
+        )
+        self._projects.append(ref)
+        return ref
+
+    def list_for_org(self, ctx):
+        self.list_calls.append(ctx)
+        return [
+            p for p in self._projects
+            if p.org_id == ctx.org_id and p.project_id not in self.soft_deleted
+        ]
+
+    def get(self, ctx, project_id):
+        for project in self._projects:
+            if (
+                str(project.project_id) == str(project_id)
+                and project.org_id == ctx.org_id
+                and project.project_id not in self.soft_deleted
+            ):
+                return project
+        raise NotFound("project not found", code="project_not_found")
+
+    def update(self, ctx, project_id, *, name=None, description=None, now=None):
+        project = self.get(ctx, project_id)
+        self.updated.append((ctx, project.project_id, name, description))
+        updated = type(project)(
+            project_id=project.project_id, org_id=project.org_id,
+            created_by=project.created_by,
+            name=name if name is not None else project.name,
+            description=description if description is not None else project.description,
+            created_at=project.created_at, updated_at=now,
+        )
+        self._projects = [
+            updated if p.project_id == project.project_id else p for p in self._projects
+        ]
+        return updated
+
+    def soft_delete(self, ctx, project_id, *, now=None):
+        project = self.get(ctx, project_id)
+        self.soft_deleted.append(project.project_id)
+
+
+class FakeProjectAssetRepo:
+    """AF-4pz.5: project asset fake (mirrors PgProjectAssetRepo)."""
+
+    def __init__(self):
+        self._assets: list = []
+        self.added: list = []
+        self.list_calls: list = []
+        self.soft_deleted: list = []
+
+    def add(self, ctx, *, asset_id, project_id, asset_type, source_asset_id,
+            bucket_key, url, title, now):
+        from projects import ProjectAssetRef
+
+        self.added.append({
+            "ctx": ctx, "asset_id": asset_id, "project_id": project_id,
+            "asset_type": asset_type, "source_asset_id": source_asset_id,
+            "bucket_key": bucket_key, "url": url, "title": title, "now": now,
+        })
+        ref = ProjectAssetRef(
+            asset_id=asset_id, project_id=project_id, org_id=ctx.org_id,
+            asset_type=asset_type, source_asset_id=source_asset_id,
+            bucket_key=bucket_key, url=url, title=title, created_at=now,
+        )
+        self._assets.append(ref)
+        return ref
+
+    def list_for_project(self, ctx, project_id):
+        self.list_calls.append((ctx, project_id))
+        return [
+            a for a in self._assets
+            if str(a.project_id) == str(project_id)
+            and a.org_id == ctx.org_id
+            and a.asset_id not in self.soft_deleted
+        ]
+
+    def soft_delete(self, ctx, project_id, asset_id, *, now=None):
+        for asset in self._assets:
+            if (
+                str(asset.asset_id) == str(asset_id)
+                and str(asset.project_id) == str(project_id)
+                and asset.org_id == ctx.org_id
+                and asset.asset_id not in self.soft_deleted
+            ):
+                self.soft_deleted.append(asset.asset_id)
+                return
+        raise NotFound("project asset not found", code="project_asset_not_found")
+
+
 class FakeStorage:
     """In-memory StoragePort for unit tests. Plans 1 and 6 reuse this in their tests."""
 
@@ -641,6 +750,8 @@ def make_deps(
     consumer_state: _ConsumerState | None = None,
     uuid_factory=None,
     source_assets: FakeSourceAssetRepo | None = None,
+    projects: "FakeProjectRepo | None" = None,
+    project_assets: "FakeProjectAssetRepo | None" = None,
 ) -> AppDeps:
     # INT-02: the three consumer-store fakes share ONE state so the C5 effect is atomic.
     state = consumer_state or _ConsumerState()
@@ -662,6 +773,8 @@ def make_deps(
         uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
         source_assets=source_assets or FakeSourceAssetRepo(),
+        projects=projects or FakeProjectRepo(),
+        project_assets=project_assets or FakeProjectAssetRepo(),
     )
     # INT-04: the lineage read model is self-composed over the same org-scoped repos.
     from lineage import LineageView  # noqa: E402 - lazy: avoids import cycle at module load
