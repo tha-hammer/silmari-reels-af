@@ -29,6 +29,10 @@ TARGET_ARTICLE = "reel-af.reel_article_to_reel"  # future; not visible/allowlist
 # name are coupled. Externally owned: do not rename without migration notes.
 TARGET_DSL_HOOKS = "reel-af.reel_dsl_hooks_to_reels"
 DSL_HOOKS_SOURCE_MODE = "dsl_hooks"
+# A1 transcript-to-plan target (AF-a8o) — leg 1 of the browser A1 chain. Same
+# SDK-derived naming coupling as TARGET_DSL_HOOKS (app.transcript_to_plan).
+TARGET_TRANSCRIPT = "reel-af.reel_transcript_to_plan"
+TRANSCRIPT_SOURCE_MODE = "a1_transcript"
 # Query keys that mark the historical deterministic clip-plan article seed
 # (plan_clips.py emitted `?t=<start>&reel_end=<end>`). Not a DSL-hooks input.
 _ARTICLE_SEED_QUERY_KEYS = frozenset({"t", "reel_end"})
@@ -67,9 +71,27 @@ RESEARCH_DEFAULTS = _load_research_defaults()
 
 # Only targets with a visible preset in web/index.html are allowlisted (plan §1).
 # Plan 5 adds the two text targets used by the create-from-research fan-out.
+# AF-a8o adds TARGET_TRANSCRIPT: the a1 preset submits leg 1 directly and the
+# browser chains leg 2 (TARGET_DSL_HOOKS) from its returned artifact refs.
 ALLOWLISTED_TARGETS = frozenset(
-    {TARGET_TOPIC, TARGET_COMPOSITE, TARGET_TEXT_REEL, TARGET_TEXT_CAROUSEL, TARGET_DSL_HOOKS}
+    {
+        TARGET_TOPIC,
+        TARGET_COMPOSITE,
+        TARGET_TEXT_REEL,
+        TARGET_TEXT_CAROUSEL,
+        TARGET_DSL_HOOKS,
+        TARGET_TRANSCRIPT,
+    }
 )
+
+# Where _resolve_cp_input injects the presigned file-mode upload URL. The
+# composite reasoner's param is ``url``; both A1 reasoners take ``source_url``.
+# Default (absent target) stays ``url`` so composite behavior is byte-identical.
+PRESIGN_CP_KEY_BY_TARGET = {
+    TARGET_TRANSCRIPT: "source_url",
+    TARGET_DSL_HOOKS: "source_url",
+}
+PRESIGN_CP_KEY_DEFAULT = "url"
 
 TITLE_MAX = 120
 
@@ -103,10 +125,18 @@ TOPIC_ALLOWED_INPUT_KEYS = frozenset({"topic"}) | _METADATA_INPUT_KEYS
 # clip_idx, plus explicitly-allowlisted finish render overrides. Article/topic/
 # clip-plan shapes (topic/url/text/preset/count/source) are deliberately absent —
 # the DSL-hooks target fails closed against them before any row or CP dispatch.
+# ``source`` (AF-a8o) is the DROP-FILE alternative to ``source_url``: an
+# org-owned upload handle, presigned server-side into ``source_url`` at dispatch.
 DSL_HOOKS_ALLOWED_INPUT_KEYS = (
-    frozenset({"source_url", "composite_ref", "words_ref", "hook_ref", "clip_idx", "overrides"})
+    frozenset(
+        {"source_url", "source", "composite_ref", "words_ref", "hook_ref", "clip_idx", "overrides"}
+    )
     | _METADATA_INPUT_KEYS
 )
+# A1 transcript-to-plan (AF-a8o, leg 1): exactly one of a public source_url or
+# an org-owned upload handle. register/clip_count stay server-side defaults —
+# the browser cannot tune the planner (follow-up bead if ever needed).
+TRANSCRIPT_ALLOWED_INPUT_KEYS = frozenset({"source_url", "source"}) | _METADATA_INPUT_KEYS
 # Finish/render overrides allowlisted for this workflow — a SUBSET of web
 # tunables.TUNABLES (the single source of truth for override validation), so the
 # two can never disagree about a key's type/bounds. `raw`/`fast` are deliberately
@@ -225,6 +255,30 @@ def _validated_artifact_ref(raw_input: dict, key: str) -> str:
             code="invalid_artifact_ref",
         )
     return ref
+
+
+def _validated_upload_handle(raw_handle) -> str:
+    """Guard: a file-mode upload handle is a non-empty string (bool is not str)."""
+    if not isinstance(raw_handle, str) or not raw_handle.strip():
+        raise BadRequest("source must be a non-empty upload handle", code="invalid_source")
+    return raw_handle.strip()
+
+
+def _reject_both_sources(raw_input: dict) -> None:
+    """Guard: URL mode and FILE mode are exclusive (explicit ``null`` means absent)."""
+    if raw_input.get("source_url") is not None and raw_input.get("source") is not None:
+        raise BadRequest(
+            "provide either source_url or source, not both", code="invalid_source"
+        )
+
+
+def _validated_a1_source_url(raw_url) -> str:
+    """Guard: A1 source URLs are unscoped http(s) — no article-seed query keys."""
+    if not isinstance(raw_url, str) or not _is_valid_url(raw_url.strip()):
+        raise BadRequest("source_url must be a non-empty http(s) URL", code="invalid_url")
+    source_url = raw_url.strip()
+    _reject_article_seed_url(source_url)
+    return source_url
 
 
 def _parse_clip_idx(raw_input: dict) -> int:
@@ -450,17 +504,19 @@ def build_submission(
         )
 
     if target == TARGET_DSL_HOOKS:
-        # A1 DSL-hooks: artifact refs + source_url only. Every guard below runs
-        # before the caller inserts a row or dispatches (server.py ordering).
+        # A1 DSL-hooks: artifact refs + exactly one source (URL or upload handle,
+        # AF-a8o). Every guard below runs before the caller inserts a row or
+        # dispatches (server.py ordering).
         _reject_unsupported_fields(raw_input, DSL_HOOKS_ALLOWED_INPUT_KEYS)
+        _reject_both_sources(raw_input)
 
-        raw_url = raw_input.get("source_url")
-        if not isinstance(raw_url, str) or not _is_valid_url(raw_url.strip()):
-            raise BadRequest(
-                "source_url must be a non-empty http(s) URL", code="invalid_url"
-            )
-        source_url = raw_url.strip()
-        _reject_article_seed_url(source_url)
+        source_url: str | None = None
+        source_handle: str | None = None
+        if raw_input.get("source") is not None:
+            # FILE mode: _resolve_cp_input presigns the handle into source_url.
+            source_handle = _validated_upload_handle(raw_input["source"])
+        else:
+            source_url = _validated_a1_source_url(raw_input.get("source_url"))
 
         refs = {
             key: _validated_artifact_ref(raw_input, key)
@@ -469,7 +525,9 @@ def build_submission(
         clip_idx = _parse_clip_idx(raw_input)
         overrides = _validated_dsl_hooks_overrides(raw_input.get("overrides"))
 
-        cp_input = {"source_url": source_url, **refs, "clip_idx": clip_idx}
+        cp_input = {**refs, "clip_idx": clip_idx}
+        if source_url is not None:
+            cp_input["source_url"] = source_url
         if overrides:
             cp_input["overrides"] = overrides
         return ReelSubmission(
@@ -484,6 +542,46 @@ def build_submission(
                 "clip_idx": clip_idx,
             },
             cp_input=cp_input,
+            source_handle=source_handle,
+        )
+
+    if target == TARGET_TRANSCRIPT:
+        # A1 transcript-to-plan (AF-a8o, leg 1): exactly one source; delivers
+        # DATA (the artifact-ref triple) that the browser feeds into leg 2.
+        _reject_unsupported_fields(raw_input, TRANSCRIPT_ALLOWED_INPUT_KEYS)
+        _reject_both_sources(raw_input)
+
+        if raw_input.get("source") is not None:
+            handle = _validated_upload_handle(raw_input["source"])
+            return ReelSubmission(
+                target=target,
+                title="a1 plan"[:TITLE_MAX],
+                source_url=None,
+                topic=None,
+                source_research_run_id=source_research_run_id,
+                params={
+                    "target": target,
+                    "source_mode": TRANSCRIPT_SOURCE_MODE,
+                    "source_input": "file",
+                },
+                cp_input={},  # _resolve_cp_input presigns the handle into source_url
+                source_handle=handle,
+            )
+        if raw_input.get("source_url") is None:
+            raise BadRequest("source_url or source is required", code="missing_source")
+        source_url = _validated_a1_source_url(raw_input["source_url"])
+        return ReelSubmission(
+            target=target,
+            title="a1 plan"[:TITLE_MAX],
+            source_url=source_url,
+            topic=None,
+            source_research_run_id=source_research_run_id,
+            params={
+                "target": target,
+                "source_mode": TRANSCRIPT_SOURCE_MODE,
+                "source_input": "url",
+            },
+            cp_input={"source_url": source_url},
         )
 
     # Unreachable: target is allowlisted above. Guard against a future target

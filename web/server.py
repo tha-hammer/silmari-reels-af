@@ -44,6 +44,8 @@ from reel_jobs import (
     A1_DELIVERY_UNAVAILABLE,
     DELIVERY_REQUIRED_TARGETS,
     FORBIDDEN_IDENTITY_FIELDS,
+    PRESIGN_CP_KEY_BY_TARGET,
+    PRESIGN_CP_KEY_DEFAULT,
     TERMINAL_STATUSES,
     TEXT_TARGET_BY_OUTPUT,
     ReelJobStatus,
@@ -331,7 +333,10 @@ def _resolve_cp_input(deps: AppDeps, ctx, submission) -> dict:
         if not _belongs_to_org(ctx, submission.source_handle):
             raise NotFound("upload handle not found", code="upload_not_found")  # no presign, no row, no CP
         cp_input.pop("source", None)
-        cp_input["url"] = deps.uploads.presign(ctx, submission.source_handle)  # 503 if store unconfigured
+        # Target-aware param name (AF-a8o): composite consumes ``url``; the A1
+        # reasoners (transcript_to_plan / dsl_hooks_to_reels) consume ``source_url``.
+        cp_key = PRESIGN_CP_KEY_BY_TARGET.get(submission.target, PRESIGN_CP_KEY_DEFAULT)
+        cp_input[cp_key] = deps.uploads.presign(ctx, submission.source_handle)  # 503 if store unconfigured
     return cp_input
 
 
