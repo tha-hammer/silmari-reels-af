@@ -755,6 +755,9 @@ class CompositeDeps:
     has_audio: Any
     transcribe: Any
     probe_duration: Any
+    # AF-4pz.1: opt-in word-timings cache (content-checksum keyed). None ⇒
+    # passthrough; production wires BucketTranscriptionCache (fail-soft).
+    transcription_cache: Any = None
 
 
 def _ffprobe_duration(src: Path) -> float:
@@ -771,12 +774,14 @@ def _ffprobe_duration(src: Path) -> float:
 def _default_composite_deps() -> CompositeDeps:
     from reel_af.render.captions import caption_words, has_audio_stream
     from reel_af.render.hooks import download_crisp_source
+    from reel_af.render.transcription_cache import BucketTranscriptionCache
 
     return CompositeDeps(
         download=download_crisp_source,
         has_audio=has_audio_stream,
         transcribe=caption_words,
         probe_duration=_ffprobe_duration,
+        transcription_cache=BucketTranscriptionCache(),  # AF-4pz.1: fail-soft
     )
 
 
@@ -826,7 +831,18 @@ def _run_composite_reels(
     source_has_audio = deps.has_audio(src)
     if not source_has_audio:
         return {"error": SOURCE_NO_AUDIO_TRACK_MESSAGE, "code": SOURCE_NO_AUDIO_TRACK_CODE}
-    words = deps.transcribe(src, workdir=out_path)
+    # AF-4pz.1: whisper is the most expensive step — reuse cached word timings
+    # keyed by source content checksum; the 2nd+ reel from the same source
+    # skips the whisper subprocess entirely. getattr: stub deps without the
+    # seam mean "no cache" (pure passthrough).
+    from reel_af.render.transcription_cache import cached_words
+
+    words = cached_words(
+        src,
+        transcribe=deps.transcribe,
+        cache=getattr(deps, "transcription_cache", None),
+        workdir=out_path,
+    )
     dur = float(deps.probe_duration(src))
     n = int(dur // reel_s)
     if n < 1:
