@@ -54,6 +54,9 @@ FEATURE_SCHEMA: dict[str, set[str]] = {
         "id", "org_id", "created_by", "client_request_id", "title", "source_url", "topic",
         "source_research_run_id", "params", "status", "result_ref",
         "execution_id", "created_at", "completed_at",
+        # AF-8bk: project membership (migration 115) — now written on submit
+        # and read by list_for_project.
+        "project_id",
     },
     "carousel": {
         "id", "org_id", "created_by", "client_request_id", "status",
@@ -539,14 +542,15 @@ class PgReelJobRepo(_SharedSchema):
                 cur.execute(
                     "insert into deepresearch.reel_job "
                     "(id, org_id, created_by, client_request_id, title, source_url, topic, "
-                    " source_research_run_id, params, status, created_at) "
-                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s) "
+                    " source_research_run_id, project_id, params, status, created_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s) "
                     "on conflict (org_id, created_by, client_request_id) do nothing "
                     "returning id",
                     (
                         job_id, ctx.org_id, ctx.user_id, client_request_id, submission.title,
                         submission.source_url, submission.topic,
                         submission.source_research_run_id,
+                        getattr(submission, "project_id", None),
                         json.dumps(submission.params), now,
                     ),
                 )
@@ -583,6 +587,31 @@ class PgReelJobRepo(_SharedSchema):
             (completed_at, job_id, ctx.org_id),
         )
         return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="failed")
+
+    def list_for_project(self, ctx, project_id):  # pragma: no cover - integration
+        """AF-8bk: a project's reels, org-scoped, newest first."""
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id, created_at "
+                    "from deepresearch.reel_job "
+                    "where project_id = %s and org_id = %s "
+                    "order by created_at desc",
+                    (project_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
+                execution_id=row[4], result_ref=row[5], completed_at=row[6],
+                source_research_run_id=row[7], created_at=row[8],
+            )
+            for row in rows
+        ]
 
     def get_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
         conn = _connect(_database_url())

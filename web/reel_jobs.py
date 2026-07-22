@@ -197,6 +197,9 @@ class ReelSubmission:
     # bucket key at dispatch (404 conceals foreign/absent), then presigned like
     # the handle path. A reference, never trusted for ownership.
     source_asset_id: uuid.UUID | None = None
+    # AF-8bk: optional project membership — validated against the caller's org
+    # by the route (mirrors source_research_run_id), stamped onto reel_job.
+    project_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -211,6 +214,7 @@ class ReelJobRef:
     params: dict = field(default_factory=dict)
     source_research_run_id: uuid.UUID | None = None  # provenance (Plan 4, ISC-25)
     created: bool = True  # False when insert_or_get_queued returned an existing row (idempotency)
+    created_at: datetime | None = None  # AF-8bk: surfaced by list_for_project
 
 
 @dataclass(frozen=True)

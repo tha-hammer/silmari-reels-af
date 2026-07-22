@@ -20,7 +20,8 @@
     "projectAssetDownloadPath": "/api/v1/projects/{id}/assets/{assetId}/download",
     "sourceAssetsPath": "/api/v1/source-assets",
     "executePath": "/api/v1/execute/async/{target}",
-    "pollPath": "/api/v1/executions/{id}"
+    "pollPath": "/api/v1/executions/{id}",
+    "projectReelsPath": "/api/v1/projects/{id}/reels"
   },
   "loginPath": "/login",
   "homePath": "/",
@@ -245,7 +246,31 @@
     $("reelsList").textContent = "";
     $("reelsEmpty").hidden = !has;
     $("reelsEmpty").textContent = CFG.ui.emptyReels;
-    if (has && !opts.skipAssets) await loadAssets();
+    if (has && !opts.skipAssets) { await loadAssets(); await loadReels(); }
+  }
+
+  // AF-8bk: the project's durable reels (stamped reel_job.project_id).
+  async function loadReels() {
+    const body = await call(fill(API.projectReelsPath, { id: state.current.project_id }));
+    for (const reel of body.reels) {
+      $("reelsEmpty").hidden = true;
+      const li = document.createElement("li");
+      const kind = document.createElement("span");
+      kind.className = "kind"; kind.textContent = "REEL";
+      const label = document.createElement("span");
+      label.className = "label"; label.textContent = reel.job_id;
+      const stat = document.createElement("span");
+      stat.className = "kind"; stat.style.width = "auto";
+      stat.textContent = reel.status.toUpperCase();
+      li.append(kind, label, stat);
+      if (reel.download_url) {
+        const link = document.createElement("a");
+        link.href = reel.download_url; link.target = "_blank"; link.rel = "noopener";
+        link.textContent = "DOWNLOAD ▾";
+        li.appendChild(link);
+      }
+      $("reelsList").appendChild(li);
+    }
   }
 
   $("createProject").addEventListener("click", async () => {
@@ -364,9 +389,10 @@
         { method: "POST",
           headers: { "Content-Type": "application/json",
                      "Idempotency-Key": window.crypto.randomUUID() },
-          body: JSON.stringify({ input: {
-            source_asset_id: asset.asset_id, preset: preset, count: count,
-          } }) });
+          body: JSON.stringify({
+            project_id: state.current.project_id,   // AF-8bk: roll under the project
+            input: { source_asset_id: asset.asset_id, preset: preset, count: count },
+          }) });
       row.setStatus(`QUEUED · ${submitted.execution_id}`);
       await pollReel(submitted.execution_id, row);
     } catch (err) {

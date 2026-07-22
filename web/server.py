@@ -18,6 +18,7 @@ disable SuperTokens). The module-level ``app`` uses ``default_deps()`` and does
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import os
@@ -128,6 +129,7 @@ _PROJECT_RE = re.compile(r"^v1/projects/([^/]+)$")
 _PROJECT_ASSETS_RE = re.compile(r"^v1/projects/([^/]+)/assets$")
 _PROJECT_ASSET_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)$")
 _PROJECT_ASSET_DOWNLOAD_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)/download$")
+_PROJECT_REELS_RE = re.compile(r"^v1/projects/([^/]+)/reels$")
 
 
 def _is_projects_collection(method: str, sub: str) -> bool:
@@ -160,6 +162,13 @@ def _project_asset_download_target(method: str, sub: str) -> tuple[str, str] | N
         return None
     m = _PROJECT_ASSET_DOWNLOAD_RE.match(sub)
     return (m.group(1), m.group(2)) if m else None
+
+
+def _project_reels_target(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _PROJECT_REELS_RE.match(sub)
+    return m.group(1) if m else None
 
 
 def _is_research_run(method: str, sub: str) -> bool:
@@ -440,14 +449,35 @@ def _log_orphaned_dispatch(deps: AppDeps, ctx, *, job_id, execution_id, crid, ta
     )
 
 
+def _project_ref_id(deps: AppDeps, ctx, body: dict | None) -> uuid.UUID | None:
+    """AF-8bk: optional top-level ``project_id`` — a reference, never trusted
+    for ownership. UUID-validated (400), then resolved org-scoped through the
+    projects repo so a foreign/absent project is concealed as 404 BEFORE any
+    row or CP dispatch (mirrors ``_source_research_run_id``)."""
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("project_id")
+    if raw in (None, ""):
+        return None
+    try:
+        project_id = uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise BadRequest("project_id must be a UUID", code="invalid_project_id") from exc
+    return deps.projects.get(ctx, project_id).project_id   # 404 conceals
+
+
 def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)            # 401 / 403 / 503, before any CP call
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
     body = request.get_json(silent=True)
     source_research_run_id = _source_research_run_id(deps, ctx, body)
+    project_id = _project_ref_id(deps, ctx, body)   # 400 malformed / 404 foreign / None
     submission = build_submission(
         target, body, source_research_run_id=source_research_run_id
     )                                               # 400 (incl. forbidden identity fields)
+    if project_id is not None:
+        # Single-point stamp (frozen dataclass): reels roll under their project.
+        submission = dataclasses.replace(submission, project_id=project_id)
     cp_input = _resolve_cp_input(deps, ctx, submission)  # file-mode: ctx-owned handle → url (404/503)
 
     job_id = deps.uuid_factory()
@@ -929,6 +959,29 @@ def _handle_project_asset_delete(
     return Response(status=204), 204
 
 
+def _handle_project_reels(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-8bk: the project's durable reels (org-scoped; project resolves first).
+    ``download_url`` carries result_ref only when it is browser-deliverable
+    (T10 discipline — never a node-local path)."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    reels = deps.reel_jobs.list_for_project(ctx, project.project_id)
+    return jsonify({"reels": [
+        {
+            "job_id": str(ref.job_id),
+            "status": ref.status,
+            "execution_id": ref.execution_id,
+            "download_url": ref.result_ref if _is_browser_deliverable_url_str(ref.result_ref) else None,
+            "created_at": ref.created_at.isoformat() if getattr(ref, "created_at", None) else None,
+        }
+        for ref in reels
+    ]}), 200
+
+
+def _is_browser_deliverable_url_str(ref) -> bool:
+    return isinstance(ref, str) and (ref.startswith("https://") or ref.startswith("http://"))
+
+
 def _handle_project_asset_download(
     deps: AppDeps, project_id: str, asset_id: str
 ) -> tuple[Response, int]:
@@ -1005,6 +1058,9 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     download_ids = _project_asset_download_target(method, subpath)
     if download_ids is not None:
         return _handle_project_asset_download(deps, *download_ids)
+    project_reels_id = _project_reels_target(method, subpath)
+    if project_reels_id is not None:
+        return _handle_project_reels(deps, project_reels_id)
     project_asset_ids = _project_asset_target(method, subpath)
     if project_asset_ids is not None:
         return _handle_project_asset_delete(deps, *project_asset_ids)

@@ -29,6 +29,8 @@ REQUIRED_API_PATHS = {
     # AF-4pz.7: cut reels from a project video (reuse-source submit + poll).
     "executePath": "/api/v1/execute/async/{target}",
     "pollPath": "/api/v1/executions/{id}",
+    # AF-8bk: durable per-project reels listing.
+    "projectReelsPath": "/api/v1/projects/{id}/reels",
 }
 REQUIRED_ELEMENT_IDS = (
     "projectsList", "projectsEmpty", "newProjectName", "createProject",

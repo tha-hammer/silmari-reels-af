@@ -92,6 +92,7 @@ class FakeReelJobRepo:
         self._runs_by_exec: dict = {}    # execution_id -> research_run_id
         self._jobs_by_exec: dict = {}    # execution_id -> ReelJobRef
         self._jobs_by_id: dict = {}      # INT-04 lineage: job_id -> ReelJobRef (read-by-id + reverse)
+        self._by_project: dict = {}      # AF-8bk: (org_id, project_id) -> [job_id]
 
     def ensure_ready(self) -> None:
         pass
@@ -109,12 +110,22 @@ class FakeReelJobRepo:
         # Thread provenance from the submission (Plan 4) so read-back surfaces it.
         srr = getattr(submission, "source_research_run_id", None)
         ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
-                         status="queued", source_research_run_id=srr)
+                         status="queued", source_research_run_id=srr, created_at=now)
         self._by_key[key] = ref
+        # AF-8bk: project-scoped read-back.
+        project_id = getattr(submission, "project_id", None)
+        if project_id is not None:
+            self._by_project.setdefault((ctx.org_id, project_id), []).append(job_id)
         return ref
 
     def set_existing(self, key, ref: ReelJobRef) -> None:
         self._by_key[key] = ref
+
+    def list_for_project(self, ctx, project_id):
+        """AF-8bk: a project's reels (org-scoped), current refs, newest first."""
+        job_ids = self._by_project.get((ctx.org_id, project_id), [])
+        current = {ref.job_id: ref for ref in self._by_key.values()}
+        return [current[j] for j in reversed(job_ids) if j in current]
 
     def attach_execution_id(self, ctx, job_id, execution_id) -> ReelJobRef:
         if self._attach_error is not None:
