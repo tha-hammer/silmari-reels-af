@@ -598,6 +598,149 @@ async def test_plan_writes_multi_clip_hook_plan_and_composite_artifacts(tmp_path
         validate_renderable(compiled.plan)
 
 
+async def test_multi_clip_triple_consumes_requested_clip_idx_through_real_consumer(
+    tmp_path, monkeypatch
+):
+    fetched_segments = []
+    words = _seed_words()
+    llm = _FakePlannerLLM(
+        _clip_blueprint(
+            candidate_id="c001",
+            hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            payoff_quote="And the moment you trust the feeling, you ship the bug.",
+            banner_line="They don't reason.",
+        ),
+        _clip_blueprint(
+            candidate_id="c002",
+            hook_quote="So the fix isn't a smarter model. It's a tighter loop.",
+            payoff_quote="A loop you can actually see closing.",
+            banner_line="The fix is a tighter loop.",
+        ),
+        candidates=_multi_clip_candidates(),
+        strategies=[
+            _strategy_for(
+                "c001",
+                "They don't reason. They pattern-match at a scale that feels like reasoning.",
+            ),
+            _strategy_for("c002", "So the fix isn't a smarter model. It's a tighter loop."),
+        ],
+    )
+
+    def _fake_fetch_segment(request):
+        fetched_segments.append(request.segment_id)
+        request.target_path.write_bytes(b"not-real-video")
+        return request.target_path
+
+    async def _fake_stitch_footage_reel(*args, **kwargs):
+        path = tmp_path / "base-clip-2.mp4"
+        path.write_bytes(b"not-real-video")
+        return path
+
+    async def _fake_finish_reel(*args, **kwargs):
+        path = tmp_path / "final-clip-2.mp4"
+        path.write_bytes(b"not-real-video")
+        return path
+
+    monkeypatch.setattr(app_mod, "stitch_footage_reel", _fake_stitch_footage_reel)
+    monkeypatch.setattr(app_mod, "finish_reel", _fake_finish_reel)
+
+    res = await plan(
+        SRC,
+        words=words,
+        register="educational",
+        bounds={"min_s": 8, "max_s": 30},
+        llm=llm,
+        out_dir=tmp_path / "producer",
+        clip_count=2,
+        cfg=_cfg(max_repair_passes=0),
+    )
+    hook_plan = json.loads(Path(res["hook_ref"]).read_text(encoding="utf-8"))
+    clip2 = hook_plan["clips"][1]
+
+    out = await dsl_hooks_to_reels(
+        SRC,
+        clip2["composite_ref"],
+        res["words_ref"],
+        res["hook_ref"],
+        clip_idx=2,
+        out_dir=str(tmp_path / "consume"),
+        fetch_segment=_fake_fetch_segment,
+        uploader=lambda *args, **kwargs: "https://bucket.example.com/reel-clip-2.mp4",
+        text_provider=object(),
+        image_provider=object(),
+        artifact_fetch=lambda ref: Path(ref).read_bytes(),
+    )
+
+    assert clip2["composite_ref"] != res["composite_ref"]
+    assert out.get("error") is None, out
+    assert out["clip_idx"] == 2
+    assert out["target_workflow"] == DSL_HOOKS_WORKFLOW
+    assert out["download_url"] == "https://bucket.example.com/reel-clip-2.mp4"
+    assert "clip_dispatches" not in out
+    assert fetched_segments
+
+
+async def test_multi_clip_triple_missing_clip_idx_fails_closed_before_render(
+    tmp_path, monkeypatch
+):
+    render_called = False
+
+    async def _fake_stitch_footage_reel(*args, **kwargs):
+        nonlocal render_called
+        render_called = True
+        return tmp_path / "must-not-render.mp4"
+
+    monkeypatch.setattr(app_mod, "stitch_footage_reel", _fake_stitch_footage_reel)
+
+    res = await plan(
+        SRC,
+        words=_seed_words(),
+        register="educational",
+        bounds={"min_s": 8, "max_s": 30},
+        llm=_FakePlannerLLM(
+            _clip_blueprint(
+                candidate_id="c001",
+                hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+                payoff_quote="And the moment you trust the feeling, you ship the bug.",
+                banner_line="They don't reason.",
+            ),
+            _clip_blueprint(
+                candidate_id="c002",
+                hook_quote="So the fix isn't a smarter model. It's a tighter loop.",
+                payoff_quote="A loop you can actually see closing.",
+                banner_line="The fix is a tighter loop.",
+            ),
+            candidates=_multi_clip_candidates(),
+            strategies=[
+                _strategy_for(
+                    "c001",
+                    "They don't reason. They pattern-match at a scale that feels like reasoning.",
+                ),
+                _strategy_for("c002", "So the fix isn't a smarter model. It's a tighter loop."),
+            ],
+        ),
+        out_dir=tmp_path / "producer",
+        clip_count=2,
+        cfg=_cfg(max_repair_passes=0),
+    )
+
+    out = await dsl_hooks_to_reels(
+        SRC,
+        res["composite_ref"],
+        res["words_ref"],
+        res["hook_ref"],
+        clip_idx=99,
+        out_dir=str(tmp_path / "consume"),
+        fetch_segment=lambda req: req.target_path,
+        uploader=lambda *args, **kwargs: "https://bucket.example.com/reel.mp4",
+        artifact_fetch=lambda ref: Path(ref).read_bytes(),
+    )
+
+    assert out["error"] == "dsl_artifact_unavailable"
+    assert "clip_idx=99" in out["detail"]
+    assert render_called is False
+
+
 async def test_multi_clip_compile_failure_writes_no_partial_core_artifacts(
     tmp_path, monkeypatch
 ):
