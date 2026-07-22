@@ -14,11 +14,18 @@ from reel_af.dsl.models import (
 from reel_af.render.footage_stitch import (
     FootageFilterGraph,
     SegmentAssetValidationError,
+    ThreePhaseUnsupportedError,
+    _body_extract_cmd,
+    _concat_cmd,
+    _concat_list_text,
     _ffmpeg_cmd,
     _fold_cmd,
     _normalize_cmd,
+    _transition_clip_cmd,
+    _video_encode_opts,
     build_footage_filtergraph,
     plan_pairwise_stitch,
+    plan_three_phase_stitch,
 )
 
 
@@ -297,3 +304,251 @@ def test_non_pre_normalized_input_keeps_spatial_normalization():
     fc = graph.filter_complex
     assert "scale=1080:1920:force_original_aspect_ratio=increase" in fc
     assert "crop=1080:1920,setsar=1,fps=30,format=yuv420p[v0]" in fc
+
+
+# ── AF-77e · three-phase normalize → transition-only → concat-copy ─
+
+
+def _two_segment_reel(effect: str, duration_s: float, *, audio_fade: bool = True,
+                      total: float) -> FootageReel:
+    return FootageReel(
+        source_url="fixture",
+        segments=[
+            SourceSegment(segment_id="seg-1", source_url="fixture", start_s=0.0, end_s=1.0, text="one"),
+            SourceSegment(segment_id="seg-2", source_url="fixture", start_s=1.0, end_s=2.0, text="two"),
+        ],
+        transitions=[
+            Transition(before_index=0, after_index=1, effect=effect,
+                       duration_s=duration_s, audio_fade=audio_fade),
+        ],
+        duration_s=total,
+    )
+
+
+def test_three_phase_plan_geometry():
+    """B1: bodies + isolated transition windows tile the reel exactly."""
+    plan = plan_three_phase_stitch(_three_segment_reel(), _three_segment_assets())
+    assert [s.kind for s in plan.norm_steps] == ["source", "black", "source"]
+    assert len(plan.transition_steps) == 1
+    step = plan.transition_steps[0]
+    assert (step.position, step.left_idx, step.right_idx) == (2, 1, 2)
+    assert step.effect == "dissolve"
+    assert step.transition_duration_s == pytest.approx(0.2)
+    # dissolve window comes from the black segment's own tail (0.5 - 0.2)
+    assert step.left_tail_offset_s == pytest.approx(0.3)
+    assert step.result_duration_s == pytest.approx(0.2)
+    got = [(e.kind, e.index, e.inpoint_s, e.duration_s) for e in plan.concat_entries]
+    assert got == [
+        ("body", 0, pytest.approx(0.0), pytest.approx(1.0)),
+        ("body", 1, pytest.approx(0.0), pytest.approx(0.3)),
+        ("transition", 2, pytest.approx(0.0), pytest.approx(0.2)),
+        ("body", 2, pytest.approx(0.2), pytest.approx(0.8)),
+    ]
+    assert plan.total_duration_s == pytest.approx(2.3)
+    assert sum(e.duration_s for e in plan.concat_entries) == pytest.approx(2.3)
+
+
+def test_three_phase_keyframes_only_at_nonzero_body_inpoints():
+    """B2: stream-copy body cuts need a keyframe exactly at the inpoint."""
+    plan = plan_three_phase_stitch(_three_segment_reel(), _three_segment_assets())
+    assert plan.keyframe_times == ((), (), (pytest.approx(0.2),))
+
+
+def test_three_phase_all_none_is_pure_concat():
+    """B3: no transition clips — whole normalized segments concat-copied."""
+    reel = _two_segment_reel("none", 0.0, total=2.0)
+    plan = plan_three_phase_stitch(reel, _three_segment_assets())
+    assert plan.transition_steps == ()
+    got = [(e.kind, e.index, e.inpoint_s, e.duration_s) for e in plan.concat_entries]
+    assert got == [
+        ("body", 0, pytest.approx(0.0), pytest.approx(1.0)),
+        ("body", 1, pytest.approx(0.0), pytest.approx(1.0)),
+    ]
+
+
+def test_three_phase_fade_to_color_window_is_two_d():
+    """B4: fade-to-color renders fade-out(D) + fade-in(D) → a 2D clip."""
+    reel = _two_segment_reel("fadeblack", 0.3, total=2.0)
+    plan = plan_three_phase_stitch(reel, _three_segment_assets())
+    step = plan.transition_steps[0]
+    assert step.result_duration_s == pytest.approx(0.6)
+    got = [(e.kind, e.index, e.inpoint_s, e.duration_s) for e in plan.concat_entries]
+    assert got == [
+        ("body", 0, pytest.approx(0.0), pytest.approx(0.7)),
+        ("transition", 1, pytest.approx(0.0), pytest.approx(0.6)),
+        ("body", 1, pytest.approx(0.3), pytest.approx(0.7)),
+    ]
+    assert sum(e.duration_s for e in plan.concat_entries) == pytest.approx(2.0)
+
+
+def test_three_phase_single_segment():
+    """B5: one segment → one body entry, no transitions."""
+    plan = plan_three_phase_stitch(
+        _single_source_reel(), {"seg-1": _pre_normalized_asset(False)}
+    )
+    assert plan.transition_steps == ()
+    assert [(e.kind, e.index) for e in plan.concat_entries] == [("body", 0)]
+
+
+def _overlap_window_reel() -> FootageReel:
+    """Pairwise-valid reel whose middle segment (0.4s) cannot host both its
+    incoming and outgoing 0.3s dissolve windows (0.6s > 0.4s)."""
+    return FootageReel(
+        source_url="fixture",
+        segments=[
+            SourceSegment(segment_id="seg-1", source_url="fixture", start_s=0.0, end_s=1.0, text="one"),
+            BlackSegment(duration_s=0.4),
+            SourceSegment(segment_id="seg-2", source_url="fixture", start_s=1.0, end_s=2.0, text="two"),
+        ],
+        transitions=[
+            Transition(before_index=0, after_index=1, effect="dissolve", duration_s=0.3),
+            Transition(before_index=1, after_index=2, effect="dissolve", duration_s=0.3),
+        ],
+        duration_s=1.8,
+    )
+
+
+def test_three_phase_rejects_overlapping_windows():
+    """B6: middle segment shorter than head+tail windows → unsupported."""
+    with pytest.raises(ThreePhaseUnsupportedError):
+        plan_three_phase_stitch(_overlap_window_reel(), _three_segment_assets())
+
+
+def test_overlap_reel_stays_pairwise_valid():
+    """B7: the overlap reel is fully valid for the pairwise fold — three-phase
+    unsupportedness must trigger a fallback, never a rejection."""
+    plan = plan_pairwise_stitch(_overlap_window_reel(), _three_segment_assets())
+    assert len(plan.fold_steps) == 2
+    assert plan.total_duration_s == pytest.approx(1.8)
+
+
+def test_encode_opts_carry_closed_gop():
+    """B9: deterministic keyframe cadence — closed GOP for exact copy cuts."""
+    opts = _video_encode_opts()
+    joined = " ".join(opts)
+    assert "-g 60" in joined
+    assert "-keyint_min 60" in joined
+    assert "-sc_threshold 0" in joined
+
+
+def test_normalize_cmd_forces_keyframes_at_body_inpoints():
+    """B10: forced keyframe where the body stream-copy cut begins."""
+    plan = plan_three_phase_stitch(_three_segment_reel(), _three_segment_assets())
+    step = plan.norm_steps[2]
+    cmd = _normalize_cmd(step, Path("/tmp/n.mp4"), keyframe_times=(0.2,))
+    assert cmd[cmd.index("-force_key_frames") + 1] == "0.200"
+    assert cmd.count("-i") <= 1
+    # default stays keyframe-free (pairwise callers unchanged)
+    assert "-force_key_frames" not in _normalize_cmd(step, Path("/tmp/n.mp4"))
+
+
+def test_transition_clip_cmd_decodes_windows_only():
+    """B11: 2 inputs, left tail via input seek, xfade at offset 0, acrossfade."""
+    plan = plan_three_phase_stitch(_three_segment_reel(), _three_segment_assets())
+    step = plan.transition_steps[0]
+    cmd = _transition_clip_cmd(Path("/tmp/l.mp4"), Path("/tmp/r.mp4"), step, Path("/tmp/t.mp4"))
+    assert cmd.count("-i") == 2
+    assert cmd[cmd.index("-ss") + 1] == "0.300"
+    joined = " ".join(cmd)
+    assert "xfade=transition=dissolve:duration=0.200:offset=0.000" in joined
+    assert "acrossfade=d=0.200" in joined
+
+
+def test_transition_clip_cmd_hard_audio_cut_uses_right_head():
+    """B12: audio_fade=False keeps the pairwise hard cut — the window's audio
+    is the right head only (left body already carries audio to the cut)."""
+    reel = _two_segment_reel("dissolve", 0.2, audio_fade=False, total=1.8)
+    plan = plan_three_phase_stitch(reel, _three_segment_assets())
+    step = plan.transition_steps[0]
+    cmd = _transition_clip_cmd(Path("/tmp/l.mp4"), Path("/tmp/r.mp4"), step, Path("/tmp/t.mp4"))
+    joined = " ".join(cmd)
+    assert "acrossfade" not in joined
+    assert "[1:a]atrim=end=0.200" in joined
+
+
+def test_transition_clip_cmd_fade_to_color():
+    """B13: fade-out + fade-in + concat, white for fadewhite."""
+    reel = _two_segment_reel("fadewhite", 0.3, total=2.0)
+    plan = plan_three_phase_stitch(reel, _three_segment_assets())
+    step = plan.transition_steps[0]
+    cmd = _transition_clip_cmd(Path("/tmp/l.mp4"), Path("/tmp/r.mp4"), step, Path("/tmp/t.mp4"))
+    joined = " ".join(cmd)
+    assert "fade=t=out:st=0.000:d=0.300:color=white" in joined
+    assert "fade=t=in:st=0:d=0.300:color=white" in joined
+    assert "concat=n=2:v=1:a=0[v]" in joined
+    assert "afade=t=out" in joined and "afade=t=in" in joined
+
+
+def test_body_extract_cmd_stream_copies():
+    """B14: bodies are remuxed (-c copy), never re-encoded."""
+    plan = plan_three_phase_stitch(_three_segment_reel(), _three_segment_assets())
+    entry = plan.concat_entries[-1]  # body 2: inpoint 0.2, dur 0.8
+    cmd = _body_extract_cmd(Path("/tmp/n.mp4"), entry, Path("/tmp/b.mp4"))
+    assert cmd[cmd.index("-ss") + 1] == "0.200"
+    assert cmd[cmd.index("-t") + 1] == "0.800"
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert "libx264" not in cmd
+
+
+def test_concat_list_text_quotes_paths():
+    """B15: concat demuxer list format with single-quote escaping."""
+    text = _concat_list_text([Path("/tmp/a.mp4"), Path("/tmp/it's.mp4")])
+    assert text.splitlines() == [
+        "file '/tmp/a.mp4'",
+        "file '/tmp/it'\\''s.mp4'",
+    ]
+
+
+def test_concat_cmd_copies_without_reencode():
+    """B16: the assemble pass is -f concat -c copy — zero re-encode."""
+    cmd = _concat_cmd(Path("/tmp/list.txt"), Path("/tmp/out.mp4"))
+    assert cmd[cmd.index("-f") + 1] == "concat"
+    assert cmd[cmd.index("-safe") + 1] == "0"
+    assert cmd[cmd.index("-c") + 1] == "copy"
+    assert "libx264" not in cmd
+
+
+def _install_fake_ffmpeg(monkeypatch) -> list[list[str]]:
+    """Capture every ffmpeg invocation and materialize its output file."""
+    import reel_af.render.footage_stitch as fs
+
+    captured: list[list[str]] = []
+
+    async def fake_run(cmd, *, timeout_s):
+        captured.append([str(part) for part in cmd])
+        Path(cmd[-1]).write_bytes(b"stub")
+
+    monkeypatch.setattr(fs, "_run_ffmpeg", fake_run)
+    return captured
+
+
+@pytest.mark.asyncio
+async def test_stitch_uses_three_phase_when_supported(monkeypatch, tmp_path):
+    """B17: supported reel → normalize/transition/body/concat, no pairwise folds."""
+    from reel_af.render.footage_stitch import stitch_footage_reel
+
+    captured = _install_fake_ffmpeg(monkeypatch)
+    out = await stitch_footage_reel(
+        _three_segment_reel(), _three_segment_assets(), tmp_path / "out", "run-3p"
+    )
+    assert out.exists()
+    outputs = [cmd[-1] for cmd in captured]
+    assert not any("fold-" in path for path in outputs)
+    assert sum("norm-" in path for path in outputs) == 3
+    assert sum("trans-" in path for path in outputs) == 1
+    assert any("-f" in cmd and "concat" in cmd for cmd in captured)
+
+
+@pytest.mark.asyncio
+async def test_stitch_falls_back_to_pairwise_when_unsupported(monkeypatch, tmp_path):
+    """B18: overlapping windows → the pairwise fold still renders."""
+    from reel_af.render.footage_stitch import stitch_footage_reel
+
+    captured = _install_fake_ffmpeg(monkeypatch)
+    out = await stitch_footage_reel(
+        _overlap_window_reel(), _three_segment_assets(), tmp_path / "out", "run-fb"
+    )
+    assert out.exists()
+    outputs = [cmd[-1] for cmd in captured]
+    assert sum("fold-" in path for path in outputs) == 2
+    assert not any("-f" in cmd and "concat" in cmd for cmd in captured)
