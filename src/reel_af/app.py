@@ -1823,6 +1823,16 @@ async def dsl_hooks_to_reels(
         "target_workflow": DSL_HOOKS_WORKFLOW,
         "clip_idx": clip_idx,
         "segment_count": len(result.plan.segments),
+        # B24 — the CP emitter (BuildReelCompletedOutboxRecord) reads
+        # beat_count/source_execution_id/duration_s straight from this
+        # ResultPayload and zero-degrades anything missing. beat_count
+        # aliases the segment count until the v2 contract carries
+        # segment_count first-class (AF-z92). source_execution_id
+        # correlates the upstream A1 planner run via the clip's
+        # idempotency key (a1:<run>:clip:<idx>); first-class CP lineage
+        # is the v2 follow-up.
+        "beat_count": len(result.plan.segments),
+        "source_execution_id": str(clip.get("idempotency_key") or hook_ref),
         "cut_in_count": len(cut_ins),
         "duration_s": result.plan.duration_s,
         "source": "dsl_hooks",
@@ -1889,6 +1899,24 @@ async def transcript_to_plan(
         return result
     except Exception as exc:  # noqa: BLE001 — reasoners return errors, never raise
         return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
+
+
+def _reel_completed_payload(result: dict) -> dict:
+    """B24: the frozen ``com.silmari.reel.completed/v1`` DTO for a successful
+    DSL-hooks result (six required fields, additionalProperties:false).
+
+    Mirrors research_to_reel's ``reel_dto``. ``beat_count`` aliases the
+    segment count until the v2 contract (first-class segment_count, AF-z92)
+    supersedes it.
+    """
+    return {
+        "run_id": result["run_id"],
+        "status": "succeeded",
+        "reel_ref": result["download_url"],
+        "source_execution_id": result["source_execution_id"],
+        "duration_s": result["duration_s"],
+        "beat_count": result["beat_count"],
+    }
 
 
 def _overlay_plan_for(cut_ins: list, reel) -> dict:

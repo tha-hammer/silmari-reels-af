@@ -1,11 +1,13 @@
 {
   "result": {
+    "beat_count": 4,
     "clip_idx": 1,
     "cut_in_count": 2,
     "download_url": "https://bucket.example.com/outputs/GOLDEN/reel.mp4",
     "duration_s": 10.730000000000002,
     "segment_count": 4,
     "source": "dsl_hooks",
+    "source_execution_id": "a1:20260715T093000Z-abc123-7f3a9c:clip:1",
     "target_workflow": "dsl_hooks"
   },
   "status": "succeeded"
