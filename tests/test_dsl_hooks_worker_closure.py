@@ -179,7 +179,14 @@ def _patch_fast_render(monkeypatch, tmp_path):
         path.write_bytes(b"final-video")
         return path
 
+    async def fake_apply_overlays(reel, segment_assets, overlay_plan, out_dir,
+                                  run_id, *, image_provider, concurrency=None):
+        # B1: the overlay draw stage is part of the faked render span — the
+        # real one would reject the empty fake asset map.
+        return segment_assets
+
     monkeypatch.setattr(app_mod, "download_segments", fake_download_segments)
+    monkeypatch.setattr(app_mod, "apply_overlays", fake_apply_overlays)
     monkeypatch.setattr(app_mod, "stitch_footage_reel", fake_stitch_footage_reel)
     monkeypatch.setattr(app_mod, "finish_reel", fake_finish_reel)
 

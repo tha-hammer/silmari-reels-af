@@ -86,6 +86,11 @@ from reel_af.render.finish import FinishContext, finish_reel  # noqa: E402
 from reel_af.render.finish_config import ReelFinishConfig  # noqa: E402
 from reel_af.render.footage_stitch import download_segments, stitch_footage_reel  # noqa: E402
 from reel_af.render.images import generate_first_frame  # noqa: E402
+from reel_af.render.overlay_stitch import (  # noqa: E402
+    apply_overlays,
+    openrouter_overlay_image_provider,
+)
+from reel_af.render.overlays import active_cut_ins_for_segment  # noqa: E402
 from reel_af.render.presets import load_preset  # noqa: E402
 
 app = Agent(
@@ -1542,6 +1547,7 @@ DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE = "dsl_artifact_unavailable"
 DSL_HOOKS_ERROR_INVALID_SOURCE_URL = "invalid_source_url"
 DSL_HOOKS_ERROR_COMPILE_FAILED = "dsl_compile_failed"
 DSL_HOOKS_ERROR_CUTIN_INVALID = "dsl_cutin_invalid"
+DSL_HOOKS_ERROR_CUTIN_IMAGE_UNAVAILABLE = "dsl_cutin_image_unavailable"
 DSL_HOOKS_ERROR_RENDER_FAILED = "dsl_render_failed"
 
 
@@ -1669,9 +1675,10 @@ async def dsl_hooks_to_reels(
 
     Worker contract (research steps 1-11): read composite/words → parse markers →
     resolve/align → compile with CompileContext → reject compile errors → validate
-    renderability → map cut-ins (B9a: validated, NOT rendered — B9b deferred) →
-    download segments → stitch 1080x1920 → finish (banner/captions/image cut-ins,
-    no raw opt-out) → deliver.
+    renderability → map cut-ins (B9a: validated, fail-closed) → download segments →
+    draw cut-ins per segment via overlay_stitch (B1: the single overlay
+    subsystem; finish's image_cutins are gated off) → stitch 1080x1920 → finish
+    (banner/captions, no raw opt-out) → deliver.
 
     Delivery is REQUIRED: unlike the other reasoners, a missing browser URL is
     terminal ``delivery_unavailable``. A node-local ``video_path`` is never
@@ -1741,7 +1748,7 @@ async def dsl_hooks_to_reels(
                 "diagnostics": _diag_dicts(result.diagnostics)}
 
     # B9a — map/validate A1 cut-ins. An unanchored cut-in fails closed rather than
-    # being silently dropped. Slice A does NOT render them (B9b deferred).
+    # being silently dropped.
     cut_ins, cut_in_diags = map_cut_ins(clip.get("cut_ins", []), reel=result.plan)
     if cut_in_diags:
         return {
@@ -1749,11 +1756,36 @@ async def dsl_hooks_to_reels(
             "diagnostics": _diag_dicts(cut_in_diags),
         }
 
-    # Steps 8-10 — fetch real footage, stitch vertical, finish by default.
+    # B1 fail-closed guard — a visual cut-in needs a generated image; with no
+    # image provider it cannot draw, and silent dropping is forbidden. Terminal
+    # BEFORE any render side effect.
+    if image_provider is None and any(c.type == "visual" for c in cut_ins):
+        return {
+            "error": DSL_HOOKS_ERROR_CUTIN_IMAGE_UNAVAILABLE,
+            "detail": "visual cut-ins require an image provider; none available",
+        }
+
+    # Steps 8-10 — fetch real footage, draw cut-ins per segment (B1), stitch
+    # vertical, finish by default.
     try:
         assets = await asyncio.to_thread(
             download_segments, result.plan, work / "segments", fetch_segment
         )
+        if cut_ins:
+            # B1 — cut-ins DRAW through the single overlay subsystem
+            # (render/overlay_stitch → overlays.py). Overlaid segments come
+            # back pre_normalized=True so the stitcher normalizes the
+            # 1080x1920 canvas exactly once (no double scale/crop). Finish's
+            # LLM-picked image cut-ins are gated off in _finish_config_for so
+            # nothing composites twice.
+            assets = await apply_overlays(
+                result.plan,
+                assets,
+                _overlay_plan_for(cut_ins, result.plan),
+                work,
+                run_id,
+                image_provider=openrouter_overlay_image_provider(image_provider),
+            )
         base = await stitch_footage_reel(
             result.plan, assets, work / "base", run_id=run_id
         )
@@ -1859,6 +1891,26 @@ async def transcript_to_plan(
         return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
 
 
+def _overlay_plan_for(cut_ins: list, reel) -> dict:
+    """B1: group validated cut-ins by the source segments they intersect.
+
+    Pure edit-decision data for ``apply_overlays``: ``{segment_id: [cut_ins]}``.
+    Black segments carry no source footage and are excluded; a cut-in spanning
+    a boundary appears in each overlapping segment (the overlay library clamps
+    it per segment by design). Windows are absolute source time on both sides.
+    """
+    plan: dict = {}
+    for segment in reel.segments:
+        if getattr(segment, "kind", None) != "source":
+            continue
+        active = active_cut_ins_for_segment(
+            cut_ins, segment.start_s, segment.end_s - segment.start_s
+        )
+        if active:
+            plan[segment.segment_id] = active
+    return plan
+
+
 def _cut_ins_are_wellformed(raw_cut_ins: list) -> bool:
     """Pure question: can every raw cut-in be typed? Malformed ones are surfaced
     by map_cut_ins as CUTIN_INVALID rather than exploding CompileContext."""
@@ -1880,17 +1932,17 @@ def _media_provider():
 def _finish_config_for(image_provider: Any) -> ReelFinishConfig:
     """Finish config for the DSL-hooks workflow.
 
-    Guard: image cut-ins REQUIRE an image provider — ``generate_image_cutins``
-    calls ``provider.generate_image`` unconditionally. With no provider,
-    ``image_count=0`` degrades cut-ins out rather than crashing the whole reel.
-    The hook banner and safe-zone captions still burn, so the reel stays valid.
-    There is no raw/fast opt-out on this workflow either way.
+    B1 single-subsystem rule: DSL cut-ins draw per segment through
+    ``render/overlay_stitch`` (overlays.py) BEFORE stitch, so finish's
+    LLM-picked ``image_cutins`` are gated off (``image_count=0``) regardless
+    of provider — exactly one subsystem composites overlays, never both
+    (double-composite hazard). The hook banner and safe-zone captions still
+    burn, so the reel stays valid. There is no raw/fast opt-out on this
+    workflow either way.
     """
 
-    cfg = ReelFinishConfig()
-    if image_provider is None:
-        return cfg.model_copy(update={"image_count": 0})
-    return cfg
+    _ = image_provider  # provider now only feeds the overlay_stitch pass
+    return ReelFinishConfig().model_copy(update={"image_count": 0})
 
 
 def _health() -> dict:
