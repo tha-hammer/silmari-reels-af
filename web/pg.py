@@ -67,6 +67,17 @@ FEATURE_SCHEMA: dict[str, set[str]] = {
         "content_type", "size_bytes", "checksum", "status", "created_at",
         "deleted_at",
     },
+    # AF-4pz.3: Projects group media + reels (root migration 115). Schema-only
+    # bead — repos land with the CRUD beads (AF-4pz.4/.5). reel_job.project_id
+    # is intentionally NOT in reel_job's required set until a repo uses it.
+    "project": {
+        "id", "org_id", "created_by", "name", "description",
+        "created_at", "updated_at", "deleted_at",
+    },
+    "project_asset": {
+        "id", "project_id", "org_id", "asset_type", "source_asset_id",
+        "bucket_key", "url", "title", "created_at", "deleted_at",
+    },
     # INT-02 consumer-owned tables (root-applied migration; asserted here, fail-closed 503
     # until applied — consumes, never vendors). ``processed_messages`` PK = CloudEvents id
     # (the idempotency key); ``event_cursor`` PK = consumer (reel-af's durable cursor).
