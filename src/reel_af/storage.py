@@ -134,15 +134,18 @@ def _contains_local_path(value: Any) -> bool:
     return Path(value).is_absolute()
 
 
-def _hook_body_with_published_composite(
+def _hook_body_with_published_composites(
     hook_plan: dict,
     *,
-    composite_url: str,
+    composite_urls_by_ref: Mapping[str, str],
     raw_core_refs: Mapping[str, Any],
 ) -> bytes:
     for clip in hook_plan.get("clips", []):
         if isinstance(clip, dict) and "composite_ref" in clip:
-            clip["composite_ref"] = composite_url
+            raw_ref = clip["composite_ref"]
+            if raw_ref not in composite_urls_by_ref:
+                raise ValueError("A1 hook_ref contains an unpublished clip composite_ref")
+            clip["composite_ref"] = composite_urls_by_ref[raw_ref]
     if _contains_local_path(hook_plan):
         raise ValueError("A1 hook_ref still contains a local artifact path")
     body = json.dumps(hook_plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -150,6 +153,25 @@ def _hook_body_with_published_composite(
         if isinstance(raw_ref, str) and raw_ref and raw_ref.encode("utf-8") in body:
             raise ValueError("A1 hook_ref still contains a local core artifact ref")
     return body
+
+
+def _clip_composite_refs(hook_plan: Mapping[str, Any]) -> list[tuple[int, str]]:
+    refs: list[tuple[int, str]] = []
+    for position, clip in enumerate(hook_plan.get("clips", []) or [], start=1):
+        if not isinstance(clip, Mapping):
+            continue
+        ref = clip.get("composite_ref")
+        if not isinstance(ref, str) or not ref:
+            continue
+        idx = clip.get("idx", position)
+        if isinstance(idx, bool):
+            idx = position
+        try:
+            idx = int(idx)
+        except (TypeError, ValueError):
+            idx = position
+        refs.append((max(1, idx), ref))
+    return refs
 
 
 def _put_and_presign_artifact(
@@ -213,6 +235,22 @@ def publish_a1_artifacts(
         ttl_s=ttl,
         field="composite_ref",
     )
+    composite_urls_by_ref = {str(raw_core_refs["composite_ref"]): composite_url}
+    uploaded_composite_refs = set(composite_urls_by_ref)
+    for idx, ref in _clip_composite_refs(hook_plan):
+        if ref in uploaded_composite_refs:
+            continue
+        body = _read_core_artifact(ref, field=f"clips[{idx}].composite_ref")
+        key = f"{prefix}/{run_id}/clips/clip-{idx:03d}/composite.ts.md"
+        composite_urls_by_ref[ref] = _put_and_presign_artifact(
+            client,
+            bucket=bucket,
+            key=key,
+            body=body,
+            ttl_s=ttl,
+            field=f"clips[{idx}].composite_ref",
+        )
+        uploaded_composite_refs.add(ref)
     words_key = f"{prefix}/{run_id}/transcript.words.json"
     words_url = _put_and_presign_artifact(
         client,
@@ -222,9 +260,9 @@ def publish_a1_artifacts(
         ttl_s=ttl,
         field="words_ref",
     )
-    hook_body = _hook_body_with_published_composite(
+    hook_body = _hook_body_with_published_composites(
         hook_plan,
-        composite_url=composite_url,
+        composite_urls_by_ref=composite_urls_by_ref,
         raw_core_refs=raw_core_refs,
     )
     hook_key = f"{prefix}/{run_id}/hook-plan.json"
