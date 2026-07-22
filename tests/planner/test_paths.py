@@ -73,8 +73,8 @@ def test_absolute_env_output_root_is_honored(monkeypatch, tmp_path):
 
 
 async def test_transcript_to_plan_default_out_dir_uses_resources_runs(monkeypatch, tmp_path):
-    from reel_af.planner import pipeline as pipeline_mod
     from reel_af import storage as storage_mod
+    from reel_af.planner import pipeline as pipeline_mod
 
     monkeypatch.delenv(REEL_AF_OUTPUT_ROOT_ENV, raising=False)
     monkeypatch.delenv("REEL_BUCKET_NAME", raising=False)
@@ -98,7 +98,9 @@ async def test_transcript_to_plan_default_out_dir_uses_resources_runs(monkeypatc
         bounds,
         llm,
         out_dir,
+        clip_count,
     ):
+        assert clip_count == 1
         captured.append(Path(out_dir))
         return {
             "composite_ref": str(Path(out_dir) / "composite.ts.md"),

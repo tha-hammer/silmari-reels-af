@@ -1750,6 +1750,7 @@ async def transcript_to_plan(
     source_url: str,
     register: str = "educational",
     target_duration_bounds_s: dict[str, float] | None = None,
+    clip_count: int = 1,
     out_dir: str | None = None,
     *,
     llm=None,
@@ -1764,6 +1765,13 @@ async def transcript_to_plan(
 
     if not _is_browser_deliverable_url(source_url):
         return {"error": DSL_HOOKS_ERROR_INVALID_SOURCE_URL, "source_url": source_url}
+
+    from reel_af.planner.pipeline import _invalid_clip_count_result, _validate_clip_count
+
+    try:
+        clip_count = _validate_clip_count(clip_count)
+    except ValueError as exc:
+        return _invalid_clip_count_result(clip_count, str(exc))
 
     try:
         from reel_af.planner.ingest import transcribe as _transcribe
@@ -1783,6 +1791,7 @@ async def transcript_to_plan(
             bounds=target_duration_bounds_s,
             llm=llm,
             out_dir=work,
+            clip_count=clip_count,
         )
         if "error" not in result:
             writer = artifact_writer
