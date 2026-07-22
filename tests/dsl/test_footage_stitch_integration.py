@@ -154,6 +154,63 @@ async def test_unsupported_window_falls_back_to_pairwise_render(
     assert list(work_dir.glob("fold-*.mp4")), "pairwise fallback expected"
 
 
+@pytest.mark.asyncio
+async def test_fallback_acrossfade_next_to_black_keeps_full_audio(
+    tmp_path,
+    lavfi_mp4_factory,
+):
+    """AF-a91: the pairwise fallback's acrossfade next to an anullsrc black
+    segment must not truncate the audio track (was ~0.04s of a 1.8s reel)."""
+    src1 = lavfi_mp4_factory(name="src1", duration_s=2.0, frequency_hz=440)
+    src2 = lavfi_mp4_factory(name="src2", duration_s=2.0, frequency_hz=880)
+    reel = FootageReel(
+        source_url="fixture",
+        segments=[
+            SourceSegment(segment_id="seg-1", source_url="fixture", start_s=0.0, end_s=1.0, text="a"),
+            BlackSegment(duration_s=0.4),
+            SourceSegment(segment_id="seg-2", source_url="fixture", start_s=1.0, end_s=2.0, text="b"),
+        ],
+        transitions=[
+            # audio_fade=True + overlapping windows: forces the fallback AND
+            # the acrossfade-next-to-black shape that truncated audio.
+            Transition(before_index=0, after_index=1, effect="dissolve", duration_s=0.3, audio_fade=True),
+            Transition(before_index=1, after_index=2, effect="dissolve", duration_s=0.3, audio_fade=True),
+        ],
+        duration_s=1.8,
+    )
+    assets = {
+        "seg-1": DownloadedSegment(segment_id="seg-1", path=src1, source_start_s=0.0, source_end_s=2.0),
+        "seg-2": DownloadedSegment(segment_id="seg-2", path=src2, source_start_s=1.0, source_end_s=3.0),
+    }
+
+    out = await stitch_footage_reel(reel, assets, tmp_path / "out", "run-a91")
+
+    assert list((tmp_path / "out" / "run-a91-stitch").glob("fold-*.mp4"))
+    assert _probe_stream_duration(out, "a") == pytest.approx(1.8, abs=0.15)
+    assert _probe_stream_duration(out, "v") == pytest.approx(1.8, abs=0.15)
+
+
+def _probe_stream_duration(path, stream: str) -> float:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            stream,
+            "-show_entries",
+            "stream=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return float(proc.stdout.strip())
+
+
 def _probe_duration(path) -> float:
     proc = subprocess.run(
         [

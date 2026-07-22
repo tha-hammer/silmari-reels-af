@@ -73,6 +73,19 @@ def test_pairwise_bounds_every_pass_to_at_most_two_inputs():
         assert cmd.count("-i") == 2
 
 
+def test_pairwise_acrossfade_normalizes_input_audio_pts():
+    """AF-a91: normalized mp4 audio starts at pts −0.0213 (AAC priming edit
+    list); acrossfade mishandles the offset and truncates its output to ~0.04s.
+    Both audio legs must be re-timestamped before crossfading."""
+    plan = plan_pairwise_stitch(_three_segment_reel(), _three_segment_assets())
+    cmd = " ".join(
+        _fold_cmd(Path("/tmp/c.mp4"), Path("/tmp/x.mp4"), plan.fold_steps[1], Path("/tmp/o.mp4"), duration_clamp=None)
+    )
+    assert "[0:a]asetpts=PTS-STARTPTS[l0a]" in cmd
+    assert "[1:a]asetpts=PTS-STARTPTS[r0a]" in cmd
+    assert "[l0a][r0a]acrossfade=d=0.200" in cmd
+
+
 def test_pairwise_fold_filters_carry_transition():
     plan = plan_pairwise_stitch(_three_segment_reel(), _three_segment_assets())
     none_cmd = " ".join(

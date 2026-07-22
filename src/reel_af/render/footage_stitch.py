@@ -762,7 +762,15 @@ def _fold_filter(fold: _FoldStep) -> str:
         f"[lv][rv]xfade=transition={fold.effect}:duration={duration:.3f}:offset={offset_s:.3f}[v]",
     ]
     if fold.audio_fade:
-        parts.append(f"[0:a][1:a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]")
+        # AF-a91: normalized mp4 audio starts at pts -0.0213 (AAC priming edit
+        # list); acrossfade mishandles the offset and truncates its output to
+        # ~2 frames. Re-timestamp both legs first (the three-phase transition
+        # clips already do this via their atrim+asetpts windows).
+        parts += [
+            "[0:a]asetpts=PTS-STARTPTS[l0a]",
+            "[1:a]asetpts=PTS-STARTPTS[r0a]",
+            f"[l0a][r0a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]",
+        ]
     else:
         parts += [
             f"[0:a]atrim=duration={offset_s:.3f},asetpts=PTS-STARTPTS[cuta]",
