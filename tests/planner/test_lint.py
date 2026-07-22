@@ -79,6 +79,49 @@ def test_clean_cta_passes_r11():
     assert not any(d.rule == "R11" for d in diags)
 
 
+def test_joined_hook_over_window_is_error():
+    """AF-10e: a hook the planner JOINED past its own candidate span must stay
+    within the R1 window — over it, the join is an error (repairable)."""
+    bp = _blueprint(
+        beats=[
+            {
+                "role": "hook",
+                "span_quote": "alpha beta gamma",
+                "candidate_id": "c001",
+                "occurrence_index": 0,
+            },
+        ]
+    )
+    resolved = [{"duration_s": 4.12, "word_range": (0, 9)}]
+    candidates = [{"candidate_id": "c001", "occurrence_index": 0, "word_range": (0, 5)}]
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg(), resolved=resolved, candidates=candidates)
+
+    assert any(d.rule == "R1" and d.severity == "error" for d in diags)
+
+
+def test_unjoined_hook_over_window_stays_warning():
+    """AF-10e: a natural single-span hook over the window keeps today's warning
+    (the join, not the source material, is the planner's own choice)."""
+    bp = _blueprint(
+        beats=[
+            {
+                "role": "hook",
+                "span_quote": "alpha beta gamma",
+                "candidate_id": "c001",
+                "occurrence_index": 0,
+            },
+        ]
+    )
+    resolved = [{"duration_s": 4.12, "word_range": (0, 5)}]
+    candidates = [{"candidate_id": "c001", "occurrence_index": 0, "word_range": (0, 5)}]
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg(), resolved=resolved, candidates=candidates)
+
+    assert any(d.rule == "R1" and d.severity == "warning" for d in diags)
+    assert not any(d.rule == "R1" and d.severity == "error" for d in diags)
+
+
 def test_hook_window_over_threshold_warns():
     bp = _blueprint(
         beats=[

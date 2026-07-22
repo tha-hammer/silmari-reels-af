@@ -429,6 +429,36 @@ async def test_r8_never_echoing_is_terminal_retention_lint_failed(tmp_path):
     assert not (tmp_path / "composite.ts.md").exists()
 
 
+async def test_r1_joined_hook_error_routes_through_repair(tmp_path, monkeypatch):
+    """AF-10e: an R1 joined-hook error gets a targeted repair pass (hint names
+    the hook window) instead of terminal failure. The lint seam is faked to a
+    single R1 error so the wiring is isolated from heavy join fixtures."""
+    from reel_af.planner.lint import LintDiagnostic
+
+    lint_results = [
+        [LintDiagnostic(rule="R1", severity="error",
+                        message="Hook window is 4.12s, above 3.50s (span-join).")],
+        [],
+    ]
+    monkeypatch.setattr(
+        pipeline_mod, "lint_blueprint", lambda *a, **k: lint_results.pop(0)
+    )
+    llm = _HintSensitiveLLM(initial_quote="verbatim words")
+
+    result = await plan(
+        SRC,
+        words=_words(),
+        llm=llm,
+        out_dir=tmp_path,
+        cfg=_cfg(max_repair_passes=1),
+    )
+
+    assert "composite_ref" in result
+    assert llm.repair_hints[0] is None
+    assert "window" in llm.repair_hints[1].lower()
+    assert "join" in llm.repair_hints[1].lower()
+
+
 async def test_never_good_repair_failure_is_bounded_and_writes_no_composite(tmp_path):
     llm = _HintSensitiveLLM(never_good=True)
 

@@ -284,11 +284,15 @@ async def _plan_one_clip(
         )
         lint_errors = [diag for diag in lint_diags if diag.severity == "error"]
         if lint_errors:
+            r1_errors = [diag for diag in lint_errors if diag.rule == "R1"]
             r7_errors = [diag for diag in lint_errors if diag.rule == "R7"]
             r8_errors = [diag for diag in lint_errors if diag.rule == "R8"]
-            if (r7_errors or r8_errors) and general_repairs < cfg.max_repair_passes:
+            if (r1_errors or r7_errors or r8_errors) and general_repairs < cfg.max_repair_passes:
                 general_repairs += 1
                 hints = []
+                if r1_errors:
+                    # AF-10e: a joined hook over the R1 window — repair before failing.
+                    hints.append(_r1_repair_hint(r1_errors, max_chars=cfg.max_repair_hint_chars))
                 if r7_errors:
                     hints.append(_r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars))
                 if r8_errors:
@@ -946,6 +950,18 @@ def _r7_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str
     hint = (
         f"{messages}. Make a coherent under-cap cut: drop optional support, repeated examples, "
         "and lower-value branches first; keep hook, minimum context, proof, payoff, and R8 loop."
+    )
+    return hint[:max_chars]
+
+
+def _r1_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str:
+    """AF-10e: a span-joined hook blew the R1 window — steer the re-arrange
+    toward a hook that fits without the join."""
+    messages = "; ".join(diag.message for diag in diagnostics)
+    hint = (
+        f"{messages}. The hook window is capped: keep the hook beat within its own "
+        "candidate span, or only use a [join] when the joined hook still lands within "
+        "the R1 window."
     )
     return hint[:max_chars]
 

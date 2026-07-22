@@ -46,7 +46,7 @@ def lint_blueprint(
     findings: list[LintDiagnostic] = []
 
     findings.extend(_lint_r11(blueprint, cfg))
-    findings.extend(_lint_r1(beats, resolved, cfg))
+    findings.extend(_lint_r1(beats, resolved, cfg, candidates))
     findings.extend(_lint_r2(beats, resolved, cfg, register or _get(blueprint, "register", None)))
     findings.extend(_lint_r4(beats, resolved, words, cfg))
     findings.extend(_lint_r8(blueprint, beats, cfg))
@@ -90,7 +90,10 @@ def _lint_r11(blueprint: Any, cfg: PlannerConfig) -> list[LintDiagnostic]:
 
 
 def _lint_r1(
-    beats: Sequence[Any], resolved: Sequence[Any] | None, cfg: PlannerConfig
+    beats: Sequence[Any],
+    resolved: Sequence[Any] | None,
+    cfg: PlannerConfig,
+    candidates: Sequence[Any] | None = None,
 ) -> list[LintDiagnostic]:
     hook_duration = sum(
         duration
@@ -100,6 +103,21 @@ def _lint_r1(
         if duration is not None
     )
     if hook_duration > cfg.r1_hook_window_s:
+        # AF-10e: a hook the planner JOINED past its own candidate span is the
+        # planner's optional choice — over the window it is an error (repair:
+        # trim to the candidate span or don't join). A natural single-span hook
+        # over the window keeps the advisory warning.
+        if _hook_joined_past_candidate(beats, resolved, candidates):
+            return [
+                _diag(
+                    "R1",
+                    "error",
+                    f"Hook window is {hook_duration:.2f}s, above "
+                    f"{cfg.r1_hook_window_s:.2f}s, via span-join: keep the hook "
+                    f"within its own candidate span or only join when the result "
+                    f"stays within the window.",
+                )
+            ]
         return [
             _diag(
                 "R1",
@@ -108,6 +126,38 @@ def _lint_r1(
             )
         ]
     return []
+
+
+def _hook_joined_past_candidate(
+    beats: Sequence[Any],
+    resolved: Sequence[Any] | None,
+    candidates: Sequence[Any] | None,
+) -> bool:
+    """True when a hook beat's resolved word range extends beyond its own
+    candidate's word range — i.e. the span-join policy stretched the hook."""
+    if not candidates or resolved is None:
+        return False
+    ranges: dict[tuple[str, int], tuple[int, int]] = {}
+    for candidate in _items(candidates):
+        candidate_id = _get(candidate, "candidate_id", None)
+        word_range = _get(candidate, "word_range", None)
+        if not candidate_id or word_range is None:
+            continue
+        occurrence = int(_get(candidate, "occurrence_index", 0) or 0)
+        ranges[(str(candidate_id), occurrence)] = (int(word_range[0]), int(word_range[1]))
+    for index, beat in enumerate(beats):
+        if _beat_role(beat) is not BeatRole.Hook:
+            continue
+        item = _resolved_at(resolved, index)
+        beat_range = _get(item, "word_range", None)
+        candidate_id = _get(beat, "candidate_id", None)
+        if beat_range is None or not candidate_id:
+            continue
+        occurrence = int(_get(beat, "occurrence_index", 0) or 0)
+        candidate_range = ranges.get((str(candidate_id), occurrence))
+        if candidate_range is not None and int(beat_range[1]) > candidate_range[1]:
+            return True
+    return False
 
 
 def _lint_r2(
