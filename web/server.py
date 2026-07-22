@@ -54,6 +54,7 @@ from reel_jobs import (
     build_submission,
     normalize_reel_status,
 )
+from source_assets import asset_view, describe_upload
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
@@ -106,6 +107,10 @@ def _is_carousel_create(method: str, sub: str) -> bool:
 
 def _is_upload(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/uploads"
+
+
+def _is_source_asset_list(method: str, sub: str) -> bool:
+    return method == "GET" and sub == "v1/source-assets"
 
 
 def _is_research_run(method: str, sub: str) -> bool:
@@ -757,8 +762,30 @@ def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Resp
 def _handle_upload(deps: AppDeps) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
-    handle = deps.uploads.store(ctx, request.files.get("file"))
-    return jsonify(handle), HTTP_CREATED
+    file = request.files.get("file")
+    # AF-02f: checksum/size BEFORE the store consumes the stream (pure; seeks
+    # back). None → the store raises the canonical no-file 400 below.
+    meta = describe_upload(file)
+    handle = deps.uploads.store(ctx, file)
+    # Durable, org-scoped upload record (server-derived identity stamps). The
+    # record is REQUIRED — a repo failure here is a fail-closed 503; the stored
+    # object without a row is an acceptable orphan, never a silent success.
+    asset = deps.source_assets.create(
+        ctx,
+        asset_id=deps.uuid_factory(),
+        bucket_key=handle["path"],
+        now=deps.clock.now(),
+        **meta,
+    )
+    return jsonify({**handle, "asset_id": str(asset.asset_id)}), HTTP_CREATED
+
+
+def _handle_source_asset_list(deps: AppDeps) -> tuple[Response, int]:
+    # AF-02f: the caller's durable uploads. Org-scoping lives in the repo SQL
+    # (rows are filtered by the resolved ctx.org_id; soft-deleted excluded).
+    ctx = deps.identity.resolve(request)
+    assets = deps.source_assets.list_for_org(ctx)
+    return jsonify({"assets": [asset_view(a) for a in assets]}), 200
 
 
 def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
@@ -799,6 +826,8 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
+    if _is_source_asset_list(method, subpath):
+        return _handle_source_asset_list(deps)
     if _is_carousel_create(method, subpath):
         return _handle_carousel_create(deps)
     if _is_research_run(method, subpath):

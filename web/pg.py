@@ -60,6 +60,13 @@ FEATURE_SCHEMA: dict[str, set[str]] = {
         "source_research_run_id", "hq_recreate_count", "execution_id", "created_at",
     },
     "carousel_slide": {"carousel_id", "org_id", "idx", "image_ref", "prompt", "status"},
+    # AF-02f: durable upload records (root migration 114). Org-scoped +
+    # owner-stamped like reel_job; no created_by FK yet (see migration 113).
+    "source_asset": {
+        "id", "org_id", "created_by", "bucket_key", "original_filename",
+        "content_type", "size_bytes", "checksum", "status", "created_at",
+        "deleted_at",
+    },
     # INT-02 consumer-owned tables (root-applied migration; asserted here, fail-closed 503
     # until applied — consumes, never vendors). ``processed_messages`` PK = CloudEvents id
     # (the idempotency key); ``event_cursor`` PK = consumer (reel-af's durable cursor).
@@ -218,6 +225,67 @@ class PgMembershipReader(_SharedSchema):
         )
         rows = cur.fetchall()
         return rows[0][0] if len(rows) == 1 else None
+
+
+class PgSourceAssetRepo(_SharedSchema):
+    """Owns ``deepresearch.source_asset`` writes/reads, always scoped by ``org_id``
+    (AF-02f). Live SQL is integration-tested; fail-closed readiness is unit-tested.
+    """
+
+    def create(
+        self, ctx, *, asset_id, bucket_key, original_filename, content_type,
+        size_bytes, checksum, now,
+    ):  # pragma: no cover - integration
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.source_asset "
+                    "(id, org_id, created_by, bucket_key, original_filename, "
+                    " content_type, size_bytes, checksum, status, created_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,'stored',%s)",
+                    (
+                        asset_id, ctx.org_id, ctx.user_id, bucket_key,
+                        original_filename, content_type, size_bytes, checksum, now,
+                    ),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return SourceAssetRef(
+            asset_id=asset_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            bucket_key=bucket_key, original_filename=original_filename,
+            content_type=content_type, size_bytes=size_bytes, checksum=checksum,
+            status="stored", created_at=now,
+        )
+
+    def list_for_org(self, ctx):  # pragma: no cover - integration
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, bucket_key, original_filename, "
+                    "content_type, size_bytes, checksum, status, created_at "
+                    "from deepresearch.source_asset "
+                    "where org_id = %s and deleted_at is null "
+                    "order by created_at desc",
+                    (ctx.org_id,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            SourceAssetRef(
+                asset_id=row[0], org_id=row[1], created_by=row[2], bucket_key=row[3],
+                original_filename=row[4], content_type=row[5], size_bytes=row[6],
+                checksum=row[7], status=row[8], created_at=row[9],
+            )
+            for row in rows
+        ]
 
 
 class PgReelJobRepo(_SharedSchema):

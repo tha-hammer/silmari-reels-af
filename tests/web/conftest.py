@@ -23,6 +23,7 @@ if WEB not in sys.path:
 from deps import (  # noqa: E402
     AppDeps,
     AuthContext,
+    BadRequest,
     LocalRun,
     NotFound,
     RoleAccessGuard,
@@ -236,6 +237,7 @@ class FakeUploadStore:
         self._presign_error = presign_error
         self.calls = 0
         self.presign_calls: list = []
+        self.stored_bytes: list = []
 
     def ensure_ready(self) -> None:
         pass
@@ -244,6 +246,12 @@ class FakeUploadStore:
         self.calls += 1
         if self._error is not None:
             raise self._error
+        # Contract-faithful to LocalUploadStore/BucketUploadStore: no file → the
+        # canonical 400; the stored bytes are recorded so AF-02f can prove the
+        # checksum pass left the stream intact.
+        if file_storage is None or not getattr(file_storage, "filename", ""):
+            raise BadRequest("no file in multipart field 'file'", code="no_file")
+        self.stored_bytes.append(file_storage.stream.read())
         return self._handle
 
     def presign(self, ctx, handle: str) -> str:
@@ -251,6 +259,38 @@ class FakeUploadStore:
         if self._presign_error is not None:
             raise self._presign_error
         return self._presigned
+
+
+class FakeSourceAssetRepo:
+    """AF-02f: captures created source-asset records; serves a canned list."""
+
+    def __init__(self, assets: list | None = None, create_error: Exception | None = None):
+        self._assets = assets or []
+        self._create_error = create_error
+        self.created: list = []
+        self.list_calls: list = []
+
+    def create(self, ctx, *, asset_id, bucket_key, original_filename,
+               content_type, size_bytes, checksum, now):
+        if self._create_error is not None:
+            raise self._create_error
+        from source_assets import SourceAssetRef
+
+        self.created.append({
+            "ctx": ctx, "asset_id": asset_id, "bucket_key": bucket_key,
+            "original_filename": original_filename, "content_type": content_type,
+            "size_bytes": size_bytes, "checksum": checksum, "now": now,
+        })
+        return SourceAssetRef(
+            asset_id=asset_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            bucket_key=bucket_key, original_filename=original_filename,
+            content_type=content_type, size_bytes=size_bytes, checksum=checksum,
+            status="stored", created_at=now,
+        )
+
+    def list_for_org(self, ctx):
+        self.list_calls.append(ctx)
+        return list(self._assets)
 
 
 class FakeStorage:
@@ -585,6 +625,7 @@ def make_deps(
     events: FakeEventReader | None = None,
     consumer_state: _ConsumerState | None = None,
     uuid_factory=None,
+    source_assets: FakeSourceAssetRepo | None = None,
 ) -> AppDeps:
     # INT-02: the three consumer-store fakes share ONE state so the C5 effect is atomic.
     state = consumer_state or _ConsumerState()
@@ -605,6 +646,7 @@ def make_deps(
         clock=FixedClock(),
         uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
+        source_assets=source_assets or FakeSourceAssetRepo(),
     )
     # INT-04: the lineage read model is self-composed over the same org-scoped repos.
     from lineage import LineageView  # noqa: E402 - lazy: avoids import cycle at module load
