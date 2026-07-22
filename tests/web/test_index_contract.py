@@ -242,26 +242,70 @@ def test_visible_preset_targets_match_backend_allowlist():
         TARGET_TEXT_CAROUSEL,
         TARGET_TEXT_REEL,
         TARGET_TOPIC,
+        TARGET_TRANSCRIPT,
     )
 
     targets = {p["target"] for p in cfg["presets"]}
-    assert targets == {TARGET_COMPOSITE, TARGET_TOPIC}
+    # AF-a8o: the A1 preset is visible and targets leg 1 (transcript_to_plan).
+    assert targets == {TARGET_COMPOSITE, TARGET_TOPIC, TARGET_TRANSCRIPT}
     # Allowlisted but deliberately NOT visible presets: the text targets are
     # dispatched by the create-from-research fan-out route, and TARGET_DSL_HOOKS
-    # is a hidden API target for the A1 orchestrator (Slice A) — A1 calls it
-    # server-side, so it has no browser preset by design.
+    # is the A1 chain's leg-2 render target — dispatched by the a1 flow after
+    # leg 1 returns the artifact refs, never selected as a preset itself.
     assert set(ALLOWLISTED_TARGETS) == {
         TARGET_COMPOSITE,
         TARGET_TOPIC,
         TARGET_TEXT_CAROUSEL,
         TARGET_TEXT_REEL,
         TARGET_DSL_HOOKS,
+        TARGET_TRANSCRIPT,
     }
     # Every visible preset must be allowlisted (the parity that matters), and the
-    # hidden targets must stay out of the browser config.
+    # leg-2 render target must stay out of the preset list.
     assert targets <= set(ALLOWLISTED_TARGETS)
     assert TARGET_DSL_HOOKS not in targets
-    assert TARGET_DSL_HOOKS not in html
+    # It IS referenced once in config as the a1 chain's render target.
+    assert cfg["a1"]["renderTarget"] == TARGET_DSL_HOOKS
+
+
+# ─────────────── AF-a8o: A1 preset + two-leg browser chain contract ───────────────
+def test_a1_preset_contract():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    cfg = _config(html)
+
+    from reel_jobs import TARGET_TRANSCRIPT
+
+    (a1,) = [p for p in cfg["presets"] if p.get("kind") == "a1"]
+    assert a1["target"] == TARGET_TRANSCRIPT
+    assert a1["ratio"] == "9:16"
+    # count + tune stay composite-only: the a1 kind hides both panels.
+    assert "KIND_A1" in html
+    job_settings = html.split("function renderJobSettings", 1)[1].split("function", 1)[0]
+    assert "KIND_A1" in job_settings
+
+
+def test_a1_build_input_sends_only_source_keys():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    build_input = html.split("function buildInput", 1)[1].split("function goToLogin", 1)[0]
+    # a1 leg 1 sends exactly one source key: {source} in file mode, {source_url}
+    # in url mode — never preset/count/overrides.
+    assert "KIND_A1" in build_input
+    assert "{ source: handle }" in build_input
+    assert '{ source_url: $("url").value.trim() }' in build_input
+
+
+def test_a1_flow_chains_render_leg_with_idempotency_suffix():
+    html = INDEX_HTML.read_text(encoding="utf-8")
+
+    # Leg 2 dispatches the configured render target with the three refs from
+    # leg 1's result, under a derived idempotency key (mirrors research :create).
+    assert "CFG.a1.renderTarget" in html
+    assert "`${clientRequestId}:render`" in html
+    for ref in ("composite_ref", "words_ref", "hook_ref"):
+        assert ref in html
+    # Leg 1's poll must RETURN the result for chaining, not finish() the UI.
+    assert "async function awaitResult" in html
 
 
 def test_ui_status_aliases_are_known_by_backend_normalizer():
