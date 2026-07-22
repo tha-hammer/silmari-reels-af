@@ -163,7 +163,9 @@ def test_internal_dead_air_warns():
     assert any(d.rule == "R4" and d.severity == "warning" for d in diags)
 
 
-def test_final_not_echoing_hook_warns():
+def test_final_not_echoing_hook_is_error():
+    """AF-9zs: the R8 loop tie-back is MANDATORY — a missing echo is an error
+    (repairable in the pipeline), never a shippable warning."""
     bp = _blueprint(
         hook={"banner_line": "clean", "span_quote": "alpha beta"},
         loop={"final_span_quote": "zeta omega"},
@@ -171,7 +173,21 @@ def test_final_not_echoing_hook_warns():
 
     diags = lint_blueprint(bp, words=None, cfg=_cfg())
 
-    assert any(d.rule == "R8" and d.severity == "warning" for d in diags)
+    assert any(d.rule == "R8" and d.severity == "error" for d in diags)
+
+
+def test_final_not_echoing_hook_is_error_for_problem_agitate_solve():
+    """AF-9zs: enforcement is strategy-independent — the eval's failing case was
+    a ProblemAgitateSolve run ending without echoing the hook."""
+    bp = _blueprint(
+        template_="ProblemAgitateSolve",
+        hook={"banner_line": "clean", "span_quote": "alpha beta"},
+        loop={"final_span_quote": "zeta omega"},
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg())
+
+    assert any(d.rule == "R8" and d.severity == "error" for d in diags)
 
 
 def test_non_decreasing_back_half_warns():

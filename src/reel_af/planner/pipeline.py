@@ -285,9 +285,16 @@ async def _plan_one_clip(
         lint_errors = [diag for diag in lint_diags if diag.severity == "error"]
         if lint_errors:
             r7_errors = [diag for diag in lint_errors if diag.rule == "R7"]
-            if r7_errors and general_repairs < cfg.max_repair_passes:
+            r8_errors = [diag for diag in lint_errors if diag.rule == "R8"]
+            if (r7_errors or r8_errors) and general_repairs < cfg.max_repair_passes:
                 general_repairs += 1
-                repair_hint = _r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars)
+                hints = []
+                if r7_errors:
+                    hints.append(_r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars))
+                if r8_errors:
+                    # AF-9zs: the loop tie-back is mandatory — repair before failing.
+                    hints.append(_r8_repair_hint(r8_errors, max_chars=cfg.max_repair_hint_chars))
+                repair_hint = "; ".join(hints)[: cfg.max_repair_hint_chars]
                 continue
             return {
                 "error": PLANNER_RETENTION_LINT_FAILED,
@@ -939,6 +946,18 @@ def _r7_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str
     hint = (
         f"{messages}. Make a coherent under-cap cut: drop optional support, repeated examples, "
         "and lower-value branches first; keep hook, minimum context, proof, payoff, and R8 loop."
+    )
+    return hint[:max_chars]
+
+
+def _r8_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str:
+    """AF-9zs: the R8 loop tie-back is mandatory for EVERY strategy (including
+    ProblemAgitateSolve) — steer the re-arrange toward a hook-echoing close."""
+    messages = "; ".join(diag.message for diag in diagnostics)
+    hint = (
+        f"{messages}. The R8 loop tie-back is MANDATORY: make the final beat echo the key "
+        "tokens of strategy.hook.span_quote using a source span DISTINCT from the hook beat, "
+        "and set loop.final_span_quote/candidate_id/occurrence_index to that final beat."
     )
     return hint[:max_chars]
 

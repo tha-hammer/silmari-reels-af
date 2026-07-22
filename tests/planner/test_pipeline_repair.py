@@ -110,9 +110,17 @@ def _join_strategy() -> ReelStrategy:
     )
 
 
-def _blueprint(quote: str) -> ReelBlueprint:
+def _blueprint(
+    quote: str,
+    final_quote: str = "fix works",
+    template: Template = Template.HookContextValuePayoffCta,
+    loop_candidate: str = "c001",
+) -> ReelBlueprint:
+    # AF-9zs: R8 is a mandatory error, satisfied here by the loop closing on the
+    # hook candidate (loop_candidate == hook c001). Pass a foreign
+    # loop_candidate + non-echoing final_quote to model an R8 miss.
     return ReelBlueprint(
-        template_=Template.HookContextValuePayoffCta,
+        template_=template,
         duration_range_s=duration_range(min_s=8.0, max_s=12.0),
         duration_policy=duration_policy(),
         arc=arc_plan(required_candidate_ids=("c001",)),
@@ -134,7 +142,7 @@ def _blueprint(quote: str) -> ReelBlueprint:
             ),
             Beat(
                 role=BeatRole.Payoff,
-                span_quote="fix works",
+                span_quote=final_quote,
                 candidate_id="c001",
                 occurrence_index=0,
                 max_len_s=3.0,
@@ -143,8 +151,8 @@ def _blueprint(quote: str) -> ReelBlueprint:
         ],
         loop=LoopPlan(
             strategy="tie_final_to_hook",
-            final_span_quote="fix works",
-            candidate_id="c001",
+            final_span_quote=final_quote,
+            candidate_id=loop_candidate,
             occurrence_index=0,
         ),
         engagement_primary=EngagementKind.Send,
@@ -363,6 +371,62 @@ async def test_repair_hint_reprompts_arrange_and_compiles_on_second_pass(tmp_pat
     assert "composite_ref" in result
     assert llm.repair_hints == [None, EXPECTED_HINT]
     assert Path(result["composite_ref"]).exists()
+
+
+class _R8HintSensitiveLLM(_HintSensitiveLLM):
+    """AF-9zs: arranges a loop that misses the R8 echo until an R8 repair hint
+    arrives; ``never_good`` keeps missing it (terminal enforcement path)."""
+
+    async def arrange(self, candidates, strategy, *, candidate_contexts=None, repair_hint=None):
+        self.repair_hints.append(repair_hint)
+        if not self.never_good and repair_hint is not None and "R8" in repair_hint:
+            return _blueprint("verbatim words")            # hook-candidate loop → passes
+        return _blueprint(
+            "verbatim words",
+            final_quote="fix works",                       # no hook token echo...
+            loop_candidate="c002",                         # ...and a foreign loop → R8 miss
+            template=Template.ProblemAgitateSolve,         # the eval's failing case
+        )
+
+
+async def test_r8_miss_triggers_loop_echo_repair_then_compiles(tmp_path):
+    """AF-9zs: a missing loop tie-back is repairable — the second arrange pass
+    receives a hint naming the mandatory R8 echo and the reel plans."""
+    llm = _R8HintSensitiveLLM()
+
+    result = await plan(
+        SRC,
+        words=_words(),
+        llm=llm,
+        out_dir=tmp_path,
+        cfg=_cfg(max_repair_passes=1),
+    )
+
+    assert "composite_ref" in result
+    assert llm.repair_hints[0] is None
+    assert "R8" in llm.repair_hints[1]
+    assert "echo" in llm.repair_hints[1].lower()
+
+
+async def test_r8_never_echoing_is_terminal_retention_lint_failed(tmp_path):
+    """AF-9zs: with repairs exhausted a PAS reel that never echoes its hook can
+    no longer ship — terminal retention_lint_failed carrying the R8 error."""
+    llm = _R8HintSensitiveLLM(never_good=True)
+
+    result = await plan(
+        SRC,
+        words=_words(),
+        llm=llm,
+        out_dir=tmp_path,
+        cfg=_cfg(max_repair_passes=1),
+    )
+
+    assert result["error"] == "retention_lint_failed"
+    assert any(
+        diag["rule"] == "R8" and diag["severity"] == "error"
+        for diag in result["diagnostics"]
+    )
+    assert not (tmp_path / "composite.ts.md").exists()
 
 
 async def test_never_good_repair_failure_is_bounded_and_writes_no_composite(tmp_path):

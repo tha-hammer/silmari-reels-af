@@ -174,12 +174,22 @@ def _lint_r8(blueprint: Any, beats: Sequence[Any], cfg: PlannerConfig) -> list[L
         final_text = _get(beats[-1], "span_quote", None)
     if not hook_text or not final_text:
         return []
+    # AF-9zs: the loop tie-back is MANDATORY for every strategy (a PAS run
+    # shipped without echoing its hook). It is satisfied by EITHER the loop
+    # closing on the hook candidate's own material (loop.candidate_id ==
+    # hook.candidate_id — "echoing the hook candidate") OR a textual echo at
+    # the configured overlap. Neither → error, repaired in the pipeline.
+    hook_candidate = _get(hook, "candidate_id", None)
+    loop_candidate = _get(loop, "candidate_id", None)
+    if hook_candidate and loop_candidate and str(hook_candidate) == str(loop_candidate):
+        return []
     if _token_overlap(str(hook_text), str(final_text)) < cfg.r8_min_token_overlap:
         return [
             _diag(
                 "R8",
-                "warning",
-                "Final span does not echo the hook strongly enough.",
+                "error",
+                "Final span does not echo the hook: tie the loop to the hook "
+                "candidate or echo its key tokens.",
             )
         ]
     return []
