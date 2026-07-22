@@ -23,12 +23,14 @@ What it does
    via the PUBLIC control-plane, so rendering happens on Railway (not locally):
        reel-af.reel_transcript_to_plan -> publishes composite_ref/words_ref/hook_ref
        reel-af.reel_dsl_hooks_to_reels -> renders + returns download_url
-4. Prints the final A1 ``download_url``.
+4. Prints the final A1 ``download_url`` for each rendered hook-plan clip.
 
 Usage
 -----
     uv run python scripts/ingest_source.py https://youtu.be/wPcKNuUG3NM
     uv run python scripts/ingest_source.py /path/to/local.mp4 --register educational
+    uv run python scripts/ingest_source.py <url> --clip-count 3
+    uv run python scripts/ingest_source.py <url> --clip-count 3 --clip-idx 2
     uv run python scripts/ingest_source.py <url> --upload-only        # presign + print URL
     uv run python scripts/ingest_source.py --source-url <presigned> --dispatch-only
 
@@ -50,10 +52,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any, NoReturn
 
 import boto3
 import httpx
+
+from reel_af.planner.dispatch import build_dsl_hook_dispatches, load_hook_plan_for_dispatch
 
 # Railway coordinates for the silmari-deep-research / production deployment.
 RAILWAY_PROJECT = "5dcbd074-f4f2-4284-b355-3e332d4538a5"
@@ -80,7 +86,7 @@ def _log(msg: str) -> None:
     print(msg, flush=True)
 
 
-def _fail(msg: str) -> "NoReturn":  # type: ignore[valid-type]
+def _fail(msg: str) -> NoReturn:
     print(f"ERROR: {msg}", file=sys.stderr, flush=True)
     raise SystemExit(1)
 
@@ -248,12 +254,79 @@ def poll(client: httpx.Client, exec_id: str, label: str, timeout_s: int) -> dict
         time.sleep(15)
 
 
-def run_a1(source_url: str, register: str, clip_idx: int,
-           cp_url: str, api_key: str, timeout_s: int) -> str:
+def fetch_hook_plan_bytes(url: str) -> bytes:
+    resp = httpx.get(url, timeout=httpx.Timeout(120.0, read=120.0))
+    try:
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        _fail(f"fetch hook plan -> HTTP {resp.status_code}: {url}: {exc}")
+    return resp.content
+
+
+def dispatch_render_clips(
+    client: httpx.Client,
+    *,
+    source_url: str,
+    words_ref: str,
+    hook_ref: str,
+    hook_plan: Mapping[str, Any],
+    clip_idx: int | None,
+    timeout_s: int,
+) -> list[dict[str, Any]]:
+    dispatches = build_dsl_hook_dispatches(
+        source_url=source_url,
+        words_ref=words_ref,
+        hook_ref=hook_ref,
+        hook_plan=hook_plan,
+    )
+    if clip_idx is not None:
+        if isinstance(clip_idx, bool) or clip_idx < 1:
+            _fail("--clip-idx must be a positive integer")
+        dispatches = [item for item in dispatches if item["idx"] == clip_idx]
+        if not dispatches:
+            _fail(f"hook plan has no clip_idx={clip_idx}")
+
+    renders: list[dict[str, Any]] = []
+    for item in dispatches:
+        idx = item["idx"]
+        _log(f"• stage 2: {DSL_HOOKS_TO_REELS} clip_idx={idx}")
+        s2_id = dispatch(client, item["target"], item["cp_input"])
+        s2 = poll(client, s2_id, f"render:{idx}", timeout_s)
+        if s2.get("status") != "succeeded":
+            _fail(f"stage 2 clip_idx={idx} failed: {json.dumps(s2)[:600]}")
+        result = s2.get("result", {})
+        if result.get("error") or not result.get("download_url"):
+            _fail(f"stage 2 clip_idx={idx} delivery error: {json.dumps(result)[:400]}")
+        renders.append(
+            {
+                "idx": idx,
+                "execution_id": s2_id,
+                "idempotency_key": item["idempotency_key"],
+                "download_url": result["download_url"],
+                "result": result,
+            }
+        )
+    return renders
+
+
+def run_a1(
+    source_url: str,
+    register: str,
+    clip_idx: int | None,
+    cp_url: str,
+    api_key: str,
+    timeout_s: int,
+    *,
+    clip_count: int | None = None,
+) -> list[str]:
     with _client(cp_url, api_key) as client:
         _log(f"• stage 1: {TRANSCRIPT_TO_PLAN}")
-        s1_id = dispatch(client, TRANSCRIPT_TO_PLAN,
-                         {"source_url": source_url, "register": register})
+        stage1_input: dict[str, Any] = {"source_url": source_url, "register": register}
+        if clip_count is not None:
+            if isinstance(clip_count, bool) or clip_count < 1:
+                _fail("--clip-count must be a positive integer")
+            stage1_input["clip_count"] = clip_count
+        s1_id = dispatch(client, TRANSCRIPT_TO_PLAN, stage1_input)
         s1 = poll(client, s1_id, "plan", timeout_s)
         if s1.get("status") != "succeeded":
             _fail(f"stage 1 failed: {json.dumps(s1)[:600]}")
@@ -265,16 +338,20 @@ def run_a1(source_url: str, register: str, clip_idx: int,
             _fail(f"stage 1 missing artifact refs: {refs}")
         _log(f"  artifacts: {json.dumps(refs)[:300]}")
 
-        _log(f"• stage 2: {DSL_HOOKS_TO_REELS}")
-        s2_id = dispatch(client, DSL_HOOKS_TO_REELS,
-                         {"source_url": source_url, "clip_idx": clip_idx, **refs})
-        s2 = poll(client, s2_id, "render", timeout_s)
-        if s2.get("status") != "succeeded":
-            _fail(f"stage 2 failed: {json.dumps(s2)[:600]}")
-        r2 = s2.get("result", {})
-        if r2.get("error") or not r2.get("download_url"):
-            _fail(f"stage 2 delivery error: {json.dumps(r2)[:400]}")
-        return r2["download_url"]
+        hook_plan = load_hook_plan_for_dispatch(
+            str(refs["hook_ref"]),
+            fetch_bytes=fetch_hook_plan_bytes,
+        )
+        renders = dispatch_render_clips(
+            client,
+            source_url=source_url,
+            words_ref=str(refs["words_ref"]),
+            hook_ref=str(refs["hook_ref"]),
+            hook_plan=hook_plan,
+            clip_idx=clip_idx,
+            timeout_s=timeout_s,
+        )
+        return [item["download_url"] for item in renders]
 
 
 # ── entrypoint ───────────────────────────────────────────────────────────────
@@ -288,7 +365,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Skip acquisition/upload; dispatch this already-presigned URL.")
     p.add_argument("--register", default="educational",
                    help="A1 register passed to transcript_to_plan (default: educational).")
-    p.add_argument("--clip-idx", type=int, default=1)
+    p.add_argument("--clip-count", type=int,
+                   help="Number of A1 hook clips to request from transcript_to_plan.")
+    p.add_argument("--clip-idx", type=int,
+                   help="Render only one hook-plan clip. Omit to render every clip.")
     p.add_argument("--ttl", type=int, default=21600,
                    help="Presigned URL TTL in seconds (default 21600 = 6h).")
     p.add_argument("--cookies", help="Cookies file passed to yt-dlp.")
@@ -334,11 +414,22 @@ def main(argv: list[str] | None = None) -> None:
 
     api_key = resolve_api_key(args.api_key)
     _log(f"• control-plane: {args.control_plane}")
-    download_url = run_a1(source_url, args.register, args.clip_idx,
-                          args.control_plane, api_key, args.timeout)
+    download_urls = run_a1(
+        source_url,
+        args.register,
+        args.clip_idx,
+        args.control_plane,
+        api_key,
+        args.timeout,
+        clip_count=args.clip_count,
+    )
     _log("")
     _log("=" * 72)
-    _log(f"A1 DOWNLOAD_URL={download_url}")
+    if len(download_urls) == 1:
+        _log(f"A1 DOWNLOAD_URL={download_urls[0]}")
+    else:
+        for idx, download_url in enumerate(download_urls, start=1):
+            _log(f"A1 DOWNLOAD_URL[{idx}]={download_url}")
     _log("=" * 72)
 
 
