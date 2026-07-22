@@ -298,6 +298,32 @@ class PgSourceAssetRepo(_SharedSchema):
             for row in rows
         ]
 
+    def get(self, ctx, asset_id):  # pragma: no cover - integration
+        """AF-4pz.2: org-scoped read-by-id for asset-mode submits. Foreign,
+        absent, or soft-deleted assets are concealed as 404."""
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, bucket_key, original_filename, "
+                    "content_type, size_bytes, checksum, status, created_at "
+                    "from deepresearch.source_asset "
+                    "where id = %s and org_id = %s and deleted_at is null",
+                    (asset_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("source asset not found", code="source_asset_not_found")
+        return SourceAssetRef(
+            asset_id=row[0], org_id=row[1], created_by=row[2], bucket_key=row[3],
+            original_filename=row[4], content_type=row[5], size_bytes=row[6],
+            checksum=row[7], status=row[8], created_at=row[9],
+        )
+
 
 class PgReelJobRepo(_SharedSchema):
     """Owns ``deepresearch.reel_job`` writes/reads, always scoped by ``org_id``.

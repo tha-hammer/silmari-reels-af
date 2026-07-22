@@ -334,6 +334,14 @@ def _resolve_cp_input(deps: AppDeps, ctx, submission) -> dict:
     Presigning here, before the DB insert, fails closed (503) with no orphan row
     when the store is unconfigured, and keeps the ephemeral signed URL unpersisted."""
     cp_input = dict(submission.cp_input)
+    if submission.source_asset_id is not None:
+        # AF-4pz.2 asset mode: resolve the persisted upload org-scoped (404
+        # conceals foreign/absent/soft-deleted BEFORE presign/insert/CP), then
+        # presign the STORED bucket key exactly like the handle path below.
+        asset = deps.source_assets.get(ctx, submission.source_asset_id)
+        cp_key = PRESIGN_CP_KEY_BY_TARGET.get(submission.target, PRESIGN_CP_KEY_DEFAULT)
+        cp_input[cp_key] = deps.uploads.presign(ctx, asset.bucket_key)  # 503 if store unconfigured
+        return cp_input
     if submission.source_handle:
         if not _belongs_to_org(ctx, submission.source_handle):
             raise NotFound("upload handle not found", code="upload_not_found")  # no presign, no row, no CP

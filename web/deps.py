@@ -330,6 +330,8 @@ class SourceAssetRepoPort(Protocol):
 
     def list_for_org(self, ctx): ...
 
+    def get(self, ctx, asset_id): ...   # org-scoped; foreign/absent concealed as 404
+
 
 @dataclass
 class AppDeps:

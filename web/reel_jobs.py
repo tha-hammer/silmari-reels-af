@@ -160,7 +160,8 @@ COMPOSITE_URL_ALLOWED_INPUT_KEYS = (
     frozenset({"url", "source", "preset", "count", "overrides"}) | _METADATA_INPUT_KEYS
 )
 COMPOSITE_FILE_ALLOWED_INPUT_KEYS = (
-    frozenset({"source", "preset", "count", "overrides"}) | _METADATA_INPUT_KEYS
+    frozenset({"source", "source_asset_id", "preset", "count", "overrides"})
+    | _METADATA_INPUT_KEYS
 )
 TEXT_ALLOWED_INPUT_KEYS = frozenset({"text"}) | _METADATA_INPUT_KEYS
 
@@ -192,6 +193,10 @@ class ReelSubmission:
     params: dict
     cp_input: dict  # canonical, identity-free input dispatched to the control plane
     source_handle: str | None = None  # file-mode upload key; presigned to a URL at dispatch (T7)
+    # AF-4pz.2: reuse of a persisted upload — resolved org-scoped to its stored
+    # bucket key at dispatch (404 conceals foreign/absent), then presigned like
+    # the handle path. A reference, never trusted for ownership.
+    source_asset_id: uuid.UUID | None = None
 
 
 @dataclass(frozen=True)
@@ -255,6 +260,17 @@ def _validated_artifact_ref(raw_input: dict, key: str) -> str:
             code="invalid_artifact_ref",
         )
     return ref
+
+
+def _validated_source_asset_id(raw) -> uuid.UUID:
+    """AF-4pz.2: a persisted-asset reference must be a UUID (reference only —
+    ownership is checked org-scoped at resolve time, never trusted here)."""
+    try:
+        return uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise BadRequest(
+            "source_asset_id must be a UUID", code="invalid_source_asset_id"
+        ) from exc
 
 
 def _validated_upload_handle(raw_handle) -> str:
@@ -370,11 +386,13 @@ def _canonical_params(
     preset: str | None = None,
     count: int | None = None,
     overrides: dict | None = None,
+    source_asset_id: uuid.UUID | None = None,
 ) -> dict:
     """Exact persisted ``submission.params`` — built from normalized values only.
 
     ``overrides`` is recorded only when non-empty so an un-tuned submit is
-    byte-identical to before (plan Behavior 6)."""
+    byte-identical to before (plan Behavior 6). ``source_asset_id`` is recorded
+    only for asset-mode submits (AF-4pz.2 audit trail)."""
     params: dict = {"target": target}
     if source_mode is not None:
         params["source_mode"] = source_mode
@@ -384,6 +402,8 @@ def _canonical_params(
         params["count"] = count
     if overrides:
         params["overrides"] = overrides
+    if source_asset_id is not None:
+        params["source_asset_id"] = str(source_asset_id)
     return params
 
 
@@ -479,14 +499,43 @@ def build_submission(
                 cp_input=cp_input,
             )
 
-        # File mode.
+        # File mode — a fresh upload handle OR a persisted source_asset ref
+        # (AF-4pz.2: one upload feeds many reels; mutually exclusive).
         _reject_unsupported_fields(raw_input, COMPOSITE_FILE_ALLOWED_INPUT_KEYS)
         handle = raw_input.get("source")
+        raw_asset_id = raw_input.get("source_asset_id")
+        if handle is not None and raw_asset_id is not None:
+            raise BadRequest(
+                "provide either 'source' or 'source_asset_id', not both",
+                code="conflicting_sources",
+            )
+        count = _parse_composite_count(raw_input)
+        overrides = validate_overrides(raw_input.get("overrides"))
+
+        if raw_asset_id is not None:
+            # Asset mode: the stored bucket key is resolved org-scoped and
+            # presigned at dispatch (_resolve_cp_input) — never client-supplied.
+            source_asset_id = _validated_source_asset_id(raw_asset_id)
+            cp_input = {"preset": preset, "count": count}
+            if overrides:
+                cp_input["overrides"] = overrides
+            return ReelSubmission(
+                target=target,
+                title=preset[:TITLE_MAX],
+                source_url=None,
+                topic=None,
+                source_research_run_id=source_research_run_id,
+                params=_canonical_params(
+                    target, source_mode="asset", preset=preset, count=count,
+                    overrides=overrides, source_asset_id=source_asset_id,
+                ),
+                cp_input=cp_input,
+                source_asset_id=source_asset_id,
+            )
+
         if not isinstance(handle, str) or not handle.strip():
             raise BadRequest("file submit requires an upload handle", code="missing_source")
         handle = handle.strip()
-        count = _parse_composite_count(raw_input)
-        overrides = validate_overrides(raw_input.get("overrides"))
         cp_input = {"source": handle, "preset": preset, "count": count}
         if overrides:
             cp_input["overrides"] = overrides

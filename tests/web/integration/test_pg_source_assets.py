@@ -118,6 +118,31 @@ def test_list_is_org_scoped(orgs):
     assert all(a.org_id == org_a for a in listed)
 
 
+def test_get_round_trip_and_conceals_foreign_and_soft_deleted(orgs):
+    """AF-4pz.2: org-scoped read-by-id; foreign/soft-deleted concealed as 404."""
+    import psycopg
+    from deps import NotFound
+
+    org_a, org_b = orgs
+    user = uuid.uuid4()
+    repo = PgSourceAssetRepo()
+    asset_id = _create(repo, _ctx(org_a, user))
+
+    ref = repo.get(_ctx(org_a, user), asset_id)
+    assert ref.asset_id == asset_id and ref.bucket_key.startswith(str(org_a))
+
+    with pytest.raises(NotFound):
+        repo.get(_ctx(org_b, uuid.uuid4()), asset_id)          # foreign org concealed
+
+    with psycopg.connect(TEST_DATABASE_URL, autocommit=True) as conn:
+        conn.execute(
+            "update deepresearch.source_asset set deleted_at = now() where id = %s",
+            (asset_id,),
+        )
+    with pytest.raises(NotFound):
+        repo.get(_ctx(org_a, user), asset_id)                  # soft-deleted concealed
+
+
 def test_list_excludes_soft_deleted_and_orders_newest_first(orgs):
     import psycopg
 

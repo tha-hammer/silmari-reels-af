@@ -269,6 +269,8 @@ class FakeSourceAssetRepo:
         self._create_error = create_error
         self.created: list = []
         self.list_calls: list = []
+        self.get_calls: list = []
+        self.deleted: set = set()   # asset ids modeled as soft-deleted (AF-4pz.2)
 
     def create(self, ctx, *, asset_id, bucket_key, original_filename,
                content_type, size_bytes, checksum, now):
@@ -291,6 +293,19 @@ class FakeSourceAssetRepo:
     def list_for_org(self, ctx):
         self.list_calls.append(ctx)
         return list(self._assets)
+
+    def get(self, ctx, asset_id):
+        """Org-scoped read-by-id; foreign/absent/soft-deleted concealed as 404
+        (mirrors PgSourceAssetRepo.get)."""
+        self.get_calls.append((ctx, asset_id))
+        for asset in self._assets:
+            if (
+                str(asset.asset_id) == str(asset_id)
+                and asset.org_id == ctx.org_id
+                and str(asset.asset_id) not in self.deleted
+            ):
+                return asset
+        raise NotFound("source asset not found", code="source_asset_not_found")
 
 
 class FakeStorage:
