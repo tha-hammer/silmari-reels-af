@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
 
 from reel_af import app as app_mod
 from reel_af import storage as storage_mod
@@ -11,11 +15,13 @@ from reel_af.dsl.composite import read_composite
 from reel_af.dsl.models import (
     DSL_HOOKS_WORKFLOW,
     CompileContext,
+    Diagnostic,
     DslWord,
     SourceRef,
     WordsSidecar,
     validate_renderable,
 )
+from reel_af.planner import pipeline as pipeline_mod
 from reel_af.planner.config import PlannerConfig, load_planner_config
 from reel_af.planner.models import (
     Beat,
@@ -55,15 +61,27 @@ SOURCE_QUOTE = (
     "So the fix isn't a smarter model. It's a tighter loop. "
     "A loop you can actually see closing."
 )
+CLIP1_QUOTE = (
+    "They don't reason. They pattern-match at a scale that feels like reasoning. Right. "
+    "And the moment you trust the feeling, you ship the bug."
+)
+CLIP2_QUOTE = (
+    "So the fix isn't a smarter model. It's a tighter loop. "
+    "A loop you can actually see closing."
+)
 
 
 class _FakePlannerLLM:
     def __init__(
         self,
         *blueprints: ReelBlueprint,
+        candidates: list[CandidateSpan] | None = None,
+        strategies: list[ReelStrategy] | None = None,
         coherence_reports: list[ScriptCoherenceReport] | None = None,
     ):
         self._blueprints = list(blueprints)
+        self._candidates = list(candidates or [])
+        self._strategies = list(strategies or [])
         self._coherence_reports = list(coherence_reports or [])
         self.mine_calls = 0
         self.strategize_calls = 0
@@ -73,6 +91,8 @@ class _FakePlannerLLM:
 
     async def mine(self, transcript, register):
         self.mine_calls += 1
+        if self._candidates:
+            return list(self._candidates)
         return [
             CandidateSpan(
                 quote=SOURCE_QUOTE,
@@ -88,6 +108,9 @@ class _FakePlannerLLM:
 
     async def strategize(self, transcript, candidates, policy):
         self.strategize_calls += 1
+        if self._strategies:
+            idx = min(self.strategize_calls - 1, len(self._strategies) - 1)
+            return self._strategies[idx]
         return _strategy()
 
     async def arrange(self, candidates, strategy, *, candidate_contexts=None, repair_hint=None):
@@ -214,6 +237,61 @@ def _blueprint(*, broken: bool = False) -> ReelBlueprint:
     )
 
 
+def _clip_blueprint(
+    *,
+    candidate_id: str,
+    hook_quote: str,
+    payoff_quote: str,
+    banner_line: str,
+) -> ReelBlueprint:
+    return ReelBlueprint(
+        template_=Template.HookContextValuePayoffCta,
+        duration_range_s=duration_range(min_s=8.0, max_s=30.0),
+        duration_policy=duration_policy(advisory_min_s=8.0, advisory_max_s=30.0),
+        arc=arc_plan(required_candidate_ids=(candidate_id,)),
+        hook=Hook(
+            type=HookType.CuriosityGap,
+            banner_line=banner_line,
+            span_quote=hook_quote,
+            candidate_id=candidate_id,
+            occurrence_index=0,
+        ),
+        beats=[
+            Beat(
+                role=BeatRole.Hook,
+                span_quote=hook_quote,
+                candidate_id=candidate_id,
+                occurrence_index=0,
+                max_len_s=5.0,
+                rationale="the first local line names the clip premise",
+                interrupt_out=Interrupt(
+                    kind=InterruptKind.Trans,
+                    effect=XfadeEffect.Dissolve,
+                    dur_s=0.5,
+                ),
+            ),
+            Beat(
+                role=BeatRole.Payoff,
+                span_quote=payoff_quote,
+                candidate_id=candidate_id,
+                occurrence_index=0,
+                max_len_s=5.0,
+                rationale="the payoff resolves the local premise",
+            ),
+        ],
+        loop=LoopPlan(
+            strategy="tie_final_to_hook",
+            final_span_quote=payoff_quote,
+            candidate_id=candidate_id,
+            occurrence_index=0,
+        ),
+        engagement_primary=EngagementKind.Send,
+        cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        completion_rationale="the two-line clip has a local premise and payoff",
+        rationale="the short clip stays on one source-local thread",
+    )
+
+
 def _strategy() -> ReelStrategy:
     return ReelStrategy(
         template_=Template.HookContextValuePayoffCta,
@@ -230,6 +308,25 @@ def _strategy() -> ReelStrategy:
         engagement_primary=EngagementKind.Send,
         cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
         rationale="the template uses one AI-process arc with enough latitude and a soft CTA",
+    )
+
+
+def _strategy_for(candidate_id: str, hook_quote: str) -> ReelStrategy:
+    return ReelStrategy(
+        template_=Template.HookContextValuePayoffCta,
+        duration_range_s=duration_range(min_s=8.0, max_s=30.0),
+        duration_policy=duration_policy(advisory_min_s=8.0, advisory_max_s=30.0),
+        arc=arc_plan(required_candidate_ids=(candidate_id,)),
+        hook=Hook(
+            type=HookType.CuriosityGap,
+            banner_line=hook_quote,
+            span_quote=hook_quote,
+            candidate_id=candidate_id,
+            occurrence_index=0,
+        ),
+        engagement_primary=EngagementKind.Send,
+        cta=CtaPlan(hardness=CtaHardness.Soft, placements=["end"]),
+        rationale="one local clip seed is enough for this arranged clip",
     )
 
 
@@ -264,6 +361,37 @@ def _cfg(**overrides) -> PlannerConfig:
     data = load_planner_config().model_dump()
     data.update(overrides)
     return PlannerConfig.model_validate(data)
+
+
+def _candidate_span(
+    quote: str,
+    *,
+    approx_start_s: float,
+    approx_end_s: float,
+    value_score: float = 0.9,
+) -> CandidateSpan:
+    return CandidateSpan(
+        quote=quote,
+        approx_start_s=approx_start_s,
+        approx_end_s=approx_end_s,
+        value_score=value_score,
+        emotion="curiosity",
+        is_claim=True,
+        payoff_worthy=True,
+        rationale="source-local candidate for multi-clip planning",
+    )
+
+
+def _multi_clip_candidates(*, overlapping: bool = False) -> list[CandidateSpan]:
+    if overlapping:
+        return [
+            _candidate_span(CLIP1_QUOTE, approx_start_s=4.12, approx_end_s=25.0),
+            _candidate_span(CLIP1_QUOTE, approx_start_s=4.12, approx_end_s=25.0),
+        ]
+    return [
+        _candidate_span(CLIP1_QUOTE, approx_start_s=4.12, approx_end_s=25.0),
+        _candidate_span(CLIP2_QUOTE, approx_start_s=72.3, approx_end_s=81.16),
+    ]
 
 
 def _planner_candidate(
@@ -411,6 +539,198 @@ async def test_produced_triple_compiles_through_real_consumer(tmp_path, monkeypa
     assert out.get("error") != "dsl_compile_failed", out
     assert out["target_workflow"] == DSL_HOOKS_WORKFLOW
     assert fetched_segments
+
+
+async def test_plan_writes_multi_clip_hook_plan_and_composite_artifacts(tmp_path):
+    words = _seed_words()
+    llm = _FakePlannerLLM(
+        _clip_blueprint(
+            candidate_id="c001",
+            hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            payoff_quote="And the moment you trust the feeling, you ship the bug.",
+            banner_line="They don't reason.",
+        ),
+        _clip_blueprint(
+            candidate_id="c002",
+            hook_quote="So the fix isn't a smarter model. It's a tighter loop.",
+            payoff_quote="A loop you can actually see closing.",
+            banner_line="The fix is a tighter loop.",
+        ),
+        candidates=_multi_clip_candidates(),
+        strategies=[
+            _strategy_for(
+                "c001",
+                "They don't reason. They pattern-match at a scale that feels like reasoning.",
+            ),
+            _strategy_for("c002", "So the fix isn't a smarter model. It's a tighter loop."),
+        ],
+    )
+
+    res = await plan(
+        SRC,
+        words=words,
+        register="educational",
+        bounds={"min_s": 8, "max_s": 30},
+        llm=llm,
+        out_dir=tmp_path,
+        clip_count=2,
+        cfg=_cfg(max_repair_passes=0),
+    )
+
+    assert res["clip_count"] == 2
+    hook_plan = json.loads(Path(res["hook_ref"]).read_text(encoding="utf-8"))
+    clips = hook_plan["clips"]
+    assert [clip["idx"] for clip in clips] == [1, 2]
+    assert clips[0]["composite_ref"] != clips[1]["composite_ref"]
+    assert clips[0]["end_s"] <= clips[1]["start_s"]
+    assert Path(res["composite_ref"]).exists()
+    assert all(Path(clip["composite_ref"]).exists() for clip in clips)
+
+    for clip in clips:
+        composite_text = Path(clip["composite_ref"]).read_text(encoding="utf-8")
+        compiled = compile_composite(
+            read_composite(composite_text),
+            words,
+            SourceRef(source_url=SRC),
+            context=CompileContext(workflow=DSL_HOOKS_WORKFLOW, source_url=SRC),
+        )
+        assert compiled.status == "ok", compiled.diagnostics
+        validate_renderable(compiled.plan)
+
+
+async def test_multi_clip_compile_failure_writes_no_partial_core_artifacts(
+    tmp_path, monkeypatch
+):
+    words = _seed_words()
+    llm = _FakePlannerLLM(
+        _clip_blueprint(
+            candidate_id="c001",
+            hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            payoff_quote="And the moment you trust the feeling, you ship the bug.",
+            banner_line="They don't reason.",
+        ),
+        _clip_blueprint(
+            candidate_id="c002",
+            hook_quote="So the fix isn't a smarter model. It's a tighter loop.",
+            payoff_quote="A loop you can actually see closing.",
+            banner_line="The fix is a tighter loop.",
+        ),
+        candidates=_multi_clip_candidates(),
+        strategies=[
+            _strategy_for(
+                "c001",
+                "They don't reason. They pattern-match at a scale that feels like reasoning.",
+            ),
+            _strategy_for("c002", "So the fix isn't a smarter model. It's a tighter loop."),
+        ],
+    )
+    original_compile = pipeline_mod._compile_render_composite
+    compile_calls: list[str] = []
+
+    def _compile_or_fail_second(composite: str, words: WordsSidecar, source_url: str) -> Any:
+        compile_calls.append(composite)
+        if len(compile_calls) == 2:
+            return SimpleNamespace(
+                status="error",
+                plan=None,
+                diagnostics=[
+                    Diagnostic(
+                        code="JOIN_REFUSED",
+                        message="second clip compile failed",
+                        severity="error",
+                    )
+                ],
+            )
+        return original_compile(composite, words, source_url)
+
+    monkeypatch.setattr(pipeline_mod, "_compile_render_composite", _compile_or_fail_second)
+
+    res = await plan(
+        SRC,
+        words=words,
+        register="educational",
+        bounds={"min_s": 8, "max_s": 30},
+        llm=llm,
+        out_dir=tmp_path,
+        clip_count=2,
+        cfg=_cfg(max_repair_passes=0),
+    )
+
+    assert res["error"] == "planner_render_compile_failed"
+    assert len(compile_calls) == 2
+    assert not (tmp_path / "hook-plan.json").exists()
+    assert not (tmp_path / "composite.ts.md").exists()
+    assert not (tmp_path / "clips").exists()
+
+
+async def test_multi_clip_requires_requested_non_overlapping_clip_count(tmp_path):
+    llm = _FakePlannerLLM(
+        _clip_blueprint(
+            candidate_id="c001",
+            hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            payoff_quote="And the moment you trust the feeling, you ship the bug.",
+            banner_line="They don't reason.",
+        ),
+        _clip_blueprint(
+            candidate_id="c002",
+            hook_quote="They don't reason. They pattern-match at a scale that feels like reasoning.",
+            payoff_quote="And the moment you trust the feeling, you ship the bug.",
+            banner_line="They don't reason again.",
+        ),
+        candidates=_multi_clip_candidates(overlapping=True),
+        strategies=[
+            _strategy_for(
+                "c001",
+                "They don't reason. They pattern-match at a scale that feels like reasoning.",
+            ),
+            _strategy_for(
+                "c002",
+                "They don't reason. They pattern-match at a scale that feels like reasoning.",
+            ),
+        ],
+    )
+
+    res = await plan(
+        SRC,
+        words=_seed_words(),
+        register="educational",
+        bounds={"min_s": 8, "max_s": 30},
+        llm=llm,
+        out_dir=tmp_path,
+        clip_count=2,
+        cfg=_cfg(max_repair_passes=0),
+    )
+
+    assert res["error"] == "planner_multi_clip_insufficient_spans"
+    assert llm.arrange_calls == 0
+    assert not (tmp_path / "hook-plan.json").exists()
+    assert not (tmp_path / "composite.ts.md").exists()
+    assert not (tmp_path / "clips").exists()
+
+
+@pytest.mark.parametrize("bad_clip_count", [0, -1, True, False, "2", 1.5, None])
+async def test_plan_rejects_invalid_clip_count_before_mining_or_writing(
+    tmp_path, bad_clip_count
+):
+    llm = _FakePlannerLLM(_blueprint())
+
+    res = await plan(
+        SRC,
+        words=_seed_words(),
+        register="educational",
+        bounds={"min_s": 15, "max_s": 45},
+        llm=llm,
+        out_dir=tmp_path,
+        clip_count=bad_clip_count,
+    )
+
+    assert res["error"] == "invalid_clip_count"
+    assert llm.mine_calls == 0
+    assert llm.strategize_calls == 0
+    assert llm.arrange_calls == 0
+    assert not (tmp_path / "hook-plan.json").exists()
+    assert not (tmp_path / "composite.ts.md").exists()
+    assert not (tmp_path / "clips").exists()
 
 
 async def test_published_triple_resolves_through_real_consumer(tmp_path, monkeypatch):
