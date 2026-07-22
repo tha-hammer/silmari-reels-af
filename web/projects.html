@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>reel-af · projects</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet" />
+
+<!-- ═══ BOOT CONFIG · backend contract (AF-4pz.6 named-config discipline:
+     every path, label and limit the JS uses lives here, not in code) ═══ -->
+<script type="application/json" id="config">
+{
+  "api": {
+    "projectsPath": "/api/v1/projects",
+    "projectPath": "/api/v1/projects/{id}",
+    "projectAssetsPath": "/api/v1/projects/{id}/assets",
+    "projectAssetPath": "/api/v1/projects/{id}/assets/{assetId}",
+    "projectAssetDownloadPath": "/api/v1/projects/{id}/assets/{assetId}/download",
+    "sourceAssetsPath": "/api/v1/source-assets"
+  },
+  "loginPath": "/login",
+  "homePath": "/",
+  "ui": {
+    "confirmDeleteProject": "Strike this project? Its attached assets go with it.",
+    "confirmRemoveAsset": "Remove this asset from the project?",
+    "emptyProjects": "No projects yet — open one with NEW PROJECT.",
+    "emptyAssets": "Nothing attached. Add a video, image, link, or document.",
+    "uploadFailed": "upload failed",
+    "assetTypes": ["video", "image", "link", "document"]
+  }
+}
+</script>
+
+<style>
+  :root {
+    --film:      #0c0b0a;
+    --film-2:    #131110;
+    --film-3:    #1b1815;
+    --print:     #ece3d4;
+    --print-dim: #96897a;
+    --print-fog: #5c5348;
+    --grease:    #ff3b1e;
+    --grease-2:  #ff6a4d;
+    --amber:     #f2a41c;
+    --sprocket:  rgba(236,227,212,0.13);
+    --line:      rgba(236,227,212,0.09);
+    --line-2:    rgba(236,227,212,0.16);
+    --panel:     rgba(20,18,16,0.72);
+    --disp: "Bricolage Grotesque", sans-serif;
+    --body: "Instrument Sans", sans-serif;
+    --mono: "JetBrains Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { -webkit-font-smoothing: antialiased; }
+  body { background: var(--film); color: var(--print); font-family: var(--body); min-height: 100vh; }
+  a { color: var(--amber); text-decoration: none; }
+
+  header { display: flex; justify-content: space-between; align-items: center;
+           padding: 14px 22px; border-bottom: 1px solid var(--line-2); }
+  .brand { display: flex; gap: 10px; align-items: baseline; }
+  .mark { font-family: var(--disp); font-weight: 800; font-size: 20px; letter-spacing: .02em; }
+  .mark b { color: var(--grease); }
+  .sub { font-family: var(--mono); font-size: 11px; color: var(--print-dim); letter-spacing: .22em; }
+  .back { font-family: var(--mono); font-size: 11px; letter-spacing: .12em; color: var(--print-dim); }
+  .back:hover { color: var(--print); }
+
+  main { display: grid; grid-template-columns: 320px 1fr; gap: 18px;
+         max-width: 1180px; margin: 26px auto; padding: 0 22px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; }
+  .panel h2 { font-family: var(--mono); font-size: 11px; letter-spacing: .22em;
+              color: var(--print-dim); padding: 12px 14px; border-bottom: 1px solid var(--line); }
+
+  .rail-actions { padding: 12px 14px; display: flex; gap: 8px; }
+  input[type="text"], input[type="url"] {
+    background: var(--film-2); border: 1px solid var(--line-2); color: var(--print);
+    font-family: var(--mono); font-size: 12px; padding: 8px 10px; border-radius: 4px; flex: 1;
+  }
+  button { background: var(--film-3); color: var(--print); border: 1px solid var(--line-2);
+           font-family: var(--mono); font-size: 11px; letter-spacing: .1em; padding: 8px 12px;
+           border-radius: 4px; cursor: pointer; }
+  button:hover { border-color: var(--grease); }
+  button.danger:hover { border-color: var(--grease); color: var(--grease-2); }
+  button[disabled] { opacity: .45; cursor: default; }
+
+  #projectsList { list-style: none; }
+  #projectsList li { padding: 10px 14px; border-bottom: 1px solid var(--line);
+                     display: flex; justify-content: space-between; align-items: center; gap: 8px; cursor: pointer; }
+  #projectsList li.active { background: var(--film-3); border-left: 2px solid var(--grease); }
+  #projectsList .name { font-size: 14px; }
+  #projectsList .tools { display: flex; gap: 6px; opacity: .0; }
+  #projectsList li:hover .tools, #projectsList li.active .tools { opacity: 1; }
+
+  #assetsPanel .head { display: flex; justify-content: space-between; align-items: center;
+                       padding: 12px 14px; border-bottom: 1px solid var(--line); }
+  #projectTitle { font-family: var(--disp); font-weight: 700; font-size: 18px; }
+
+  #addAssetForm { padding: 12px 14px; border-bottom: 1px solid var(--line);
+                  display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  #addAssetForm label { font-family: var(--mono); font-size: 11px; color: var(--print-dim); }
+  select { background: var(--film-2); color: var(--print); border: 1px solid var(--line-2);
+           font-family: var(--mono); font-size: 12px; padding: 8px; border-radius: 4px; }
+  #uploadProgress { height: 3px; background: var(--film-3); border-radius: 2px; overflow: hidden;
+                    flex-basis: 100%; display: none; }
+  #uploadProgress .bar { height: 100%; width: 0%; background: var(--grease); transition: width .15s; }
+
+  #assetsList { list-style: none; }
+  #assetsList li { display: flex; gap: 12px; align-items: center; padding: 10px 14px;
+                   border-bottom: 1px solid var(--line); }
+  #assetsList .thumb { width: 56px; height: 56px; object-fit: cover; border-radius: 4px;
+                       border: 1px solid var(--line-2); background: var(--film-2); }
+  #assetsList .kind { font-family: var(--mono); font-size: 10px; letter-spacing: .18em;
+                      color: var(--amber); width: 74px; }
+  #assetsList .label { flex: 1; font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
+  .empty { padding: 18px 14px; color: var(--print-fog); font-size: 13px; }
+  #status { font-family: var(--mono); font-size: 11px; color: var(--print-dim);
+            padding: 10px 22px; }
+  #status.err { color: var(--grease-2); }
+</style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div class="mark">REEL<b>·</b>AF</div>
+      <span class="sub">PROJECTS</span>
+    </div>
+    <a class="back" id="backHome" href="/">◂ CUTTING ROOM</a>
+  </header>
+
+  <main>
+    <section class="panel" id="projectsRail" aria-label="Projects">
+      <h2>▸ PROJECTS</h2>
+      <div class="rail-actions">
+        <input type="text" id="newProjectName" placeholder="project name" spellcheck="false" />
+        <button id="createProject">NEW PROJECT</button>
+      </div>
+      <ul id="projectsList"></ul>
+      <div class="empty" id="projectsEmpty" hidden></div>
+    </section>
+
+    <section class="panel" id="assetsPanel" aria-label="Project assets">
+      <div class="head">
+        <span id="projectTitle">—</span>
+        <div>
+          <button id="renameProject" hidden>RENAME</button>
+          <button id="deleteProject" class="danger" hidden>STRIKE</button>
+        </div>
+      </div>
+      <form id="addAssetForm" hidden>
+        <label for="assetType">ADD</label>
+        <select id="assetType"></select>
+        <input type="file" id="assetFile" hidden />
+        <select id="sourceAssetPicker" hidden></select>
+        <input type="url" id="assetUrl" placeholder="https://…" hidden />
+        <input type="text" id="assetTitle" placeholder="title (optional)" />
+        <button id="addAsset" type="submit">ATTACH</button>
+        <div id="uploadProgress"><div class="bar" id="uploadBar"></div></div>
+      </form>
+      <ul id="assetsList"></ul>
+      <div class="empty" id="assetsEmpty" hidden></div>
+    </section>
+  </main>
+  <div id="status" role="status"></div>
+
+<script>
+(() => {
+  "use strict";
+  const CFG = JSON.parse(document.getElementById("config").textContent);
+  const API = CFG.api;
+  const $ = (id) => document.getElementById(id);
+  const state = { projects: [], current: null };
+
+  const fill = (path, vars) =>
+    path.replace(/\{(\w+)\}/g, (_, key) => encodeURIComponent(vars[key]));
+
+  const status = (msg, isErr) => {
+    $("status").textContent = msg || "";
+    $("status").className = isErr ? "err" : "";
+  };
+
+  async function call(url, options) {
+    const resp = await fetch(url, { credentials: "same-origin", ...options });
+    if (resp.status === 401) { window.location.href = CFG.loginPath; throw new Error("401"); }
+    if (!resp.ok && resp.status !== 204) {
+      let detail = resp.statusText;
+      try { const body = await resp.json(); detail = body.detail || body.error || body.code || detail; } catch {}
+      throw new Error(detail);
+    }
+    return resp.status === 204 ? null : resp.json();
+  }
+  const jsonBody = (payload) => ({
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload),
+  });
+
+  // ── projects rail ──────────────────────────────────────────────────
+  async function loadProjects(selectId) {
+    const body = await call(API.projectsPath);
+    state.projects = body.projects;
+    const list = $("projectsList");
+    list.textContent = "";
+    $("projectsEmpty").hidden = state.projects.length > 0;
+    $("projectsEmpty").textContent = CFG.ui.emptyProjects;
+    for (const project of state.projects) {
+      const li = document.createElement("li");
+      li.dataset.id = project.project_id;
+      if (project.project_id === selectId) li.classList.add("active");
+      const name = document.createElement("span");
+      name.className = "name"; name.textContent = project.name;
+      li.appendChild(name);
+      li.addEventListener("click", () => openProject(project.project_id));
+      list.appendChild(li);
+    }
+    if (selectId) {
+      const found = state.projects.find((p) => p.project_id === selectId);
+      if (found) return openProject(selectId, { skipReload: true });
+    }
+  }
+
+  async function openProject(projectId, opts = {}) {
+    state.current = state.projects.find((p) => p.project_id === projectId) || null;
+    for (const li of $("projectsList").children)
+      li.classList.toggle("active", li.dataset.id === projectId);
+    $("projectTitle").textContent = state.current ? state.current.name : "—";
+    const has = Boolean(state.current);
+    $("renameProject").hidden = !has;
+    $("deleteProject").hidden = !has;
+    $("addAssetForm").hidden = !has;
+    if (has && !opts.skipAssets) await loadAssets();
+  }
+
+  $("createProject").addEventListener("click", async () => {
+    const name = $("newProjectName").value.trim();
+    if (!name) return;
+    try {
+      const project = await call(API.projectsPath, { method: "POST", ...jsonBody({ name }) });
+      $("newProjectName").value = "";
+      await loadProjects(project.project_id);
+      status(`created ${project.name}`);
+    } catch (err) { status(err.message, true); }
+  });
+
+  $("renameProject").addEventListener("click", async () => {
+    if (!state.current) return;
+    const name = window.prompt("New name", state.current.name);
+    if (!name || !name.trim()) return;
+    try {
+      await call(fill(API.projectPath, { id: state.current.project_id }),
+                 { method: "PATCH", ...jsonBody({ name: name.trim() }) });
+      await loadProjects(state.current.project_id);
+    } catch (err) { status(err.message, true); }
+  });
+
+  $("deleteProject").addEventListener("click", async () => {
+    if (!state.current || !window.confirm(CFG.ui.confirmDeleteProject)) return;
+    try {
+      await call(fill(API.projectPath, { id: state.current.project_id }), { method: "DELETE" });
+      state.current = null;
+      await loadProjects();
+      await openProject(null);
+    } catch (err) { status(err.message, true); }
+  });
+
+  // ── assets panel ───────────────────────────────────────────────────
+  const downloadUrl = (asset) =>
+    fill(API.projectAssetDownloadPath,
+         { id: state.current.project_id, assetId: asset.asset_id });
+
+  async function loadAssets() {
+    const body = await call(fill(API.projectAssetsPath, { id: state.current.project_id }));
+    const list = $("assetsList");
+    list.textContent = "";
+    $("assetsEmpty").hidden = body.assets.length > 0;
+    $("assetsEmpty").textContent = CFG.ui.emptyAssets;
+    for (const asset of body.assets) list.appendChild(renderAsset(asset));
+  }
+
+  function renderAsset(asset) {
+    const li = document.createElement("li");
+    const kind = document.createElement("span");
+    kind.className = "kind"; kind.textContent = asset.asset_type.toUpperCase();
+    li.appendChild(kind);
+    if (asset.asset_type === "image") {
+      const img = document.createElement("img");
+      img.className = "thumb"; img.loading = "lazy"; img.alt = asset.title || "image";
+      img.src = downloadUrl(asset);
+      li.appendChild(img);
+    }
+    const label = document.createElement("a");
+    label.className = "label";
+    label.textContent = asset.title || asset.url || asset.original_filename || asset.asset_id;
+    label.href = asset.asset_type === "link" ? asset.url : downloadUrl(asset);
+    label.target = "_blank"; label.rel = "noopener";
+    li.appendChild(label);
+    const remove = document.createElement("button");
+    remove.className = "danger"; remove.textContent = "REMOVE";
+    remove.addEventListener("click", async () => {
+      if (!window.confirm(CFG.ui.confirmRemoveAsset)) return;
+      try {
+        await call(fill(API.projectAssetPath,
+                        { id: state.current.project_id, assetId: asset.asset_id }),
+                   { method: "DELETE" });
+        await loadAssets();
+      } catch (err) { status(err.message, true); }
+    });
+    li.appendChild(remove);
+    return li;
+  }
+
+  function syncAssetInputs() {
+    const type = $("assetType").value;
+    $("assetUrl").hidden = type !== "link";
+    $("assetFile").hidden = !(type === "image" || type === "document" || (type === "video" && $("sourceAssetPicker").value === ""));
+    $("sourceAssetPicker").hidden = type !== "video";
+  }
+
+  async function loadSourceAssetPicker() {
+    const picker = $("sourceAssetPicker");
+    picker.textContent = "";
+    const fresh = document.createElement("option");
+    fresh.value = ""; fresh.textContent = "· upload new video ·";
+    picker.appendChild(fresh);
+    try {
+      const body = await call(API.sourceAssetsPath);
+      for (const asset of body.assets) {
+        const option = document.createElement("option");
+        option.value = asset.asset_id;
+        option.textContent = asset.original_filename;
+        picker.appendChild(option);
+      }
+    } catch { /* picker degrades to upload-only */ }
+  }
+
+  function uploadWithProgress(url, formData) {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      xhr.open("POST", url);
+      xhr.withCredentials = true;
+      $("uploadProgress").style.display = "block";
+      xhr.upload.addEventListener("progress", (event) => {
+        if (event.lengthComputable)
+          $("uploadBar").style.width = `${Math.round((event.loaded / event.total) * 100)}%`;
+      });
+      xhr.addEventListener("load", () => {
+        $("uploadProgress").style.display = "none";
+        $("uploadBar").style.width = "0%";
+        if (xhr.status === 401) { window.location.href = CFG.loginPath; return; }
+        if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+        else {
+          let detail = CFG.ui.uploadFailed;
+          try { const body = JSON.parse(xhr.responseText); detail = body.detail || body.error || detail; } catch {}
+          reject(new Error(detail));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error(CFG.ui.uploadFailed)));
+      xhr.send(formData);
+    });
+  }
+
+  $("addAssetForm").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!state.current) return;
+    const type = $("assetType").value;
+    const title = $("assetTitle").value.trim();
+    const target = fill(API.projectAssetsPath, { id: state.current.project_id });
+    try {
+      if (type === "link") {
+        await call(target, { method: "POST",
+                             ...jsonBody({ asset_type: "link", url: $("assetUrl").value.trim(),
+                                           ...(title && { title }) }) });
+      } else if (type === "video" && $("sourceAssetPicker").value) {
+        await call(target, { method: "POST",
+                             ...jsonBody({ asset_type: "video",
+                                           source_asset_id: $("sourceAssetPicker").value,
+                                           ...(title && { title }) }) });
+      } else {
+        const file = $("assetFile").files[0];
+        if (!file) { status(CFG.ui.uploadFailed, true); return; }
+        const form = new FormData();
+        form.append("asset_type", type);
+        form.append("file", file);
+        if (title) form.append("title", title);
+        await uploadWithProgress(target, form);
+      }
+      $("assetTitle").value = ""; $("assetUrl").value = ""; $("assetFile").value = "";
+      await loadAssets();
+      status("attached");
+    } catch (err) { status(err.message, true); }
+  });
+
+  // ── boot ───────────────────────────────────────────────────────────
+  for (const type of CFG.ui.assetTypes) {
+    const option = document.createElement("option");
+    option.value = type; option.textContent = type.toUpperCase();
+    $("assetType").appendChild(option);
+  }
+  $("assetType").addEventListener("change", () => { syncAssetInputs(); });
+  $("sourceAssetPicker").addEventListener("change", syncAssetInputs);
+  syncAssetInputs();
+  loadSourceAssetPicker();
+  loadProjects().catch((err) => status(err.message, true));
+})();
+</script>
+</body>
+</html>

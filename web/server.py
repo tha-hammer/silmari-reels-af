@@ -127,6 +127,7 @@ def _is_source_asset_list(method: str, sub: str) -> bool:
 _PROJECT_RE = re.compile(r"^v1/projects/([^/]+)$")
 _PROJECT_ASSETS_RE = re.compile(r"^v1/projects/([^/]+)/assets$")
 _PROJECT_ASSET_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)$")
+_PROJECT_ASSET_DOWNLOAD_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)/download$")
 
 
 def _is_projects_collection(method: str, sub: str) -> bool:
@@ -151,6 +152,13 @@ def _project_asset_target(method: str, sub: str) -> tuple[str, str] | None:
     if method != "DELETE":
         return None
     m = _PROJECT_ASSET_RE.match(sub)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _project_asset_download_target(method: str, sub: str) -> tuple[str, str] | None:
+    if method != "GET":
+        return None
+    m = _PROJECT_ASSET_DOWNLOAD_RE.match(sub)
     return (m.group(1), m.group(2)) if m else None
 
 
@@ -921,6 +929,26 @@ def _handle_project_asset_delete(
     return Response(status=204), 204
 
 
+def _handle_project_asset_download(
+    deps: AppDeps, project_id: str, asset_id: str
+) -> tuple[Response, int]:
+    """AF-4pz.6: 302 to a fetchable URL for one attached asset (T10 discipline:
+    the browser only ever gets server-provided URLs). Project resolves first —
+    foreign/absent anything is a 404 before any presign."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    asset = deps.project_assets.get(ctx, project.project_id, asset_id)
+    if asset.url:
+        return redirect(asset.url), 302
+    bucket_key = asset.bucket_key
+    if bucket_key is None and asset.source_asset_id is not None:
+        # video reuse: the bytes live under the SOURCE asset's key.
+        bucket_key = deps.source_assets.get(ctx, asset.source_asset_id).bucket_key
+    if not bucket_key:
+        raise NotFound("project asset has no downloadable content")
+    return redirect(deps.uploads.presign(ctx, bucket_key)), 302
+
+
 def _handle_source_asset_list(deps: AppDeps) -> tuple[Response, int]:
     # AF-02f: the caller's durable uploads. Org-scoping lives in the repo SQL
     # (rows are filtered by the resolved ctx.org_id; soft-deleted excluded).
@@ -974,6 +1002,9 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     project_assets_id = _project_assets_target(method, subpath)
     if project_assets_id is not None:
         return _handle_project_assets(deps, project_assets_id)
+    download_ids = _project_asset_download_target(method, subpath)
+    if download_ids is not None:
+        return _handle_project_asset_download(deps, *download_ids)
     project_asset_ids = _project_asset_target(method, subpath)
     if project_asset_ids is not None:
         return _handle_project_asset_delete(deps, *project_asset_ids)
@@ -1147,6 +1178,18 @@ def create_app(
         except HttpError:
             return redirect("/login")
         return send_from_directory(HERE, "index.html")
+
+    @app.get("/projects")
+    @auth(session_required=False)
+    def projects_page():
+        # AF-4pz.6: same auth-or-login gate as the index page.
+        try:
+            deps.identity.resolve(request)
+        except SchemaUnavailable:
+            return jsonify({"error": "user-data schema unavailable"}), 503
+        except HttpError:
+            return redirect("/login")
+        return send_from_directory(HERE, "projects.html")
 
     @app.get("/carousel_ui_config.json")
     @auth(session_required=False)

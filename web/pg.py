@@ -483,6 +483,24 @@ class PgProjectAssetRepo(_SharedSchema):
             conn.close()
         return [self._ref(row) for row in rows]
 
+    def get(self, ctx, project_id, asset_id):  # pragma: no cover - integration
+        """AF-4pz.6: org+project-scoped read-by-id for the download route."""
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"select {self._COLUMNS} from deepresearch.project_asset "
+                    "where id = %s and project_id = %s and org_id = %s "
+                    "and deleted_at is null",
+                    (asset_id, project_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("project asset not found", code="project_asset_not_found")
+        return self._ref(row)
+
     def soft_delete(self, ctx, project_id, asset_id, *, now=None):  # pragma: no cover - integration
         conn = _connect(_database_url())
         try:

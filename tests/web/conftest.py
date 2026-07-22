@@ -404,6 +404,12 @@ class FakeProjectAssetRepo:
             and a.asset_id not in self.soft_deleted
         ]
 
+    def get(self, ctx, project_id, asset_id):
+        for asset in self.list_for_project(ctx, project_id):
+            if str(asset.asset_id) == str(asset_id):
+                return asset
+        raise NotFound("project asset not found", code="project_asset_not_found")
+
     def soft_delete(self, ctx, project_id, asset_id, *, now=None):
         for asset in self._assets:
             if (

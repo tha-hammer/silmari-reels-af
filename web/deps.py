@@ -359,6 +359,8 @@ class ProjectAssetRepoPort(Protocol):
 
     def list_for_project(self, ctx, project_id): ...
 
+    def get(self, ctx, project_id, asset_id): ...   # 404 conceals foreign/absent
+
     def soft_delete(self, ctx, project_id, asset_id, *, now=None): ...
 
 
