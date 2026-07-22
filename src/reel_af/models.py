@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 # ════════════════════════════════════════════════════════════════════
 # Article → Reel — Phase 1: extract
@@ -134,6 +135,17 @@ class ScriptDraft(BaseModel):
             "kill retention, so we keep this high."
         ),
     )
+    enforce_loop_back: SkipJsonSchema[bool] = Field(
+        default=True,
+        description=(
+            "AF-vjm: opt-out for the loop-back gate, used only by the topic "
+            "path's last-resort safety net when no narration candidate "
+            "passes. Hidden from the LLM schema (SkipJsonSchema) so the "
+            "article compose model can never set it; article drafts always "
+            "default to True (strict). Declared before `narration` so the "
+            "validator can read it from info.data."
+        ),
+    )
     narration: str = Field(
         ...,
         description=(
@@ -153,6 +165,10 @@ class ScriptDraft(BaseModel):
         final 12 words. Catches the obvious miss-cases where the model
         writes a hook then closes on an unrelated thought.
         """
+        if info.data.get("enforce_loop_back", True) is False:
+            # AF-vjm: topic-path safety net — gate explicitly relaxed after
+            # every narration candidate missed the loop-back.
+            return v
         hook = info.data.get("hook") or ""
         if not hook or not v:
             return v

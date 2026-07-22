@@ -523,6 +523,69 @@ async def article_to_reel(
 # ════════════════════════════════════════════════════════════════════
 
 
+def _conversational_to_script(conv_script: dict) -> dict:
+    """Map a ConversationalScript dump onto the ScriptDraft field shapes the
+    shared downstream expects (tease → hook, reveal sentences →
+    mechanism_lines, payoff → payoff_line)."""
+    reveal_sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[.!?])\s+", conv_script["reveal"].strip())
+        if s.strip()
+    ]
+    if len(reveal_sentences) < 2:
+        # ScriptDraft requires min_length=2 on mechanism_lines.
+        reveal_sentences = (
+            reveal_sentences + [conv_script.get("common_belief") or "."]
+        )[:2]
+    return {
+        "hook": conv_script["tease"],
+        "hook_variant": "curiosity_gap",
+        "mechanism_lines": reveal_sentences[:4],
+        "payoff_line": conv_script["payoff"],
+        "target_wpm": 180,
+        "narration": conv_script["narration"],
+    }
+
+
+def _topic_essence(essence: dict) -> dict:
+    return {
+        "core_claim": essence["core_claim"],
+        "mechanism": essence["mechanism"],
+        "evidence": essence["evidence"],
+        "content_mode": "general",  # topic-derived → conversational register
+        "domain": essence["domain"],
+    }
+
+
+def select_topic_script(
+    scripts: list[dict], essences: list[dict], winner_idx: int,
+) -> tuple[dict, dict, int, bool]:
+    """AF-vjm: pick the reel script without ever hard-failing the loop-back gate.
+
+    Try narration candidates in judge order (winner first, then the rest);
+    the first whose mapped dict constructs a valid ``ScriptDraft`` wins. If
+    none pass, fall back to the winner with ``enforce_loop_back=False`` so a
+    topic reel degrades to a weaker close instead of crashing in plan_beats.
+
+    Returns ``(script, essence, selected_idx, loop_back_relaxed)``.
+    """
+    from pydantic import ValidationError
+
+    from reel_af.models import ScriptDraft
+
+    order = [winner_idx] + [i for i in range(len(scripts)) if i != winner_idx]
+    for idx in order:
+        script = _conversational_to_script(scripts[idx])
+        try:
+            ScriptDraft(**script)
+        except ValidationError:
+            continue
+        return script, _topic_essence(essences[idx]), idx, False
+    script = _conversational_to_script(scripts[winner_idx])
+    script["enforce_loop_back"] = False
+    return script, _topic_essence(essences[winner_idx]), winner_idx, True
+
+
 @reel.reasoner()
 async def topic_to_reel(
     topic: str, out_dir: str | None = None,
@@ -599,39 +662,26 @@ async def topic_to_reel(
     )
     timings["judge"] = round(time.time() - t, 1)
     winner_idx = max(0, min(verdict["winner_idx"], len(scripts) - 1))
-    winner_script = scripts[winner_idx]
-    winner_essence = chosen_essences[winner_idx]
 
     # ── Map ConversationalScript → ScriptDraft for the downstream ─────
     # Beats/visuals/accents all operate on ScriptDraft; the topic
     # pipeline writes ConversationalScripts so we adapt the field
     # shapes (tease → hook, reveal-sentences → mechanism_lines, …).
-    reveal_sentences = [
-        s.strip()
-        for s in re.split(r"(?<=[.!?])\s+", winner_script["reveal"].strip())
-        if s.strip()
-    ]
-    if len(reveal_sentences) < 2:
-        # ScriptDraft requires min_length=2 on mechanism_lines.
-        reveal_sentences = (
-            reveal_sentences + [winner_script.get("common_belief") or "."]
-        )[:2]
-
-    essence = {
-        "core_claim": winner_essence["core_claim"],
-        "mechanism": winner_essence["mechanism"],
-        "evidence": winner_essence["evidence"],
-        "content_mode": "general",  # topic-derived → conversational register
-        "domain": winner_essence["domain"],
-    }
-    script = {
-        "hook": winner_script["tease"],
-        "hook_variant": "curiosity_gap",
-        "mechanism_lines": reveal_sentences[:4],
-        "payoff_line": winner_script["payoff"],
-        "target_wpm": 180,
-        "narration": winner_script["narration"],
-    }
+    # AF-vjm: candidate fallback — the judge winner is not guaranteed to
+    # pass the ScriptDraft loop-back gate, so try candidates in judge
+    # order and relax the gate as a last resort instead of hard-failing.
+    script, essence, selected_idx, loop_back_relaxed = select_topic_script(
+        scripts, chosen_essences, winner_idx,
+    )
+    winner_script = scripts[selected_idx]
+    winner_essence = chosen_essences[selected_idx]
+    if selected_idx != winner_idx or loop_back_relaxed:
+        app.note(
+            f"reel-af topic: run {run_id} loop-back fallback — judge winner "
+            f"idx={winner_idx}, selected idx={selected_idx}, "
+            f"gate_relaxed={loop_back_relaxed}",
+            tags=["reel", "topic", "loop-back-fallback"],
+        )
 
     final = await _render_downstream(
         node=node,
@@ -668,6 +718,8 @@ async def topic_to_reel(
         "chosen_essence": winner_essence,
         "winner_composite": verdict.get("composite_score"),
         "winner_why": verdict.get("why"),
+        "script_selected_idx": selected_idx,
+        "loop_back_relaxed": loop_back_relaxed,
         "all_candidates": all_candidates,
         "all_narrations": [s["narration"] for s in scripts],
         "run_id": run_id,
