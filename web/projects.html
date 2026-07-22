@@ -18,16 +18,29 @@
     "projectAssetsPath": "/api/v1/projects/{id}/assets",
     "projectAssetPath": "/api/v1/projects/{id}/assets/{assetId}",
     "projectAssetDownloadPath": "/api/v1/projects/{id}/assets/{assetId}/download",
-    "sourceAssetsPath": "/api/v1/source-assets"
+    "sourceAssetsPath": "/api/v1/source-assets",
+    "executePath": "/api/v1/execute/async/{target}",
+    "pollPath": "/api/v1/executions/{id}"
   },
   "loginPath": "/login",
   "homePath": "/",
+  "reels": {
+    "compositeTarget": "reel-af.reel_composite_to_reel",
+    "presets": ["middle-third-dynamic", "horizontal-youtube-lowerthird"],
+    "defaultCount": 1,
+    "maxCount": 8,
+    "pollIntervalMs": 2500,
+    "maxPollMs": 1800000
+  },
   "ui": {
     "confirmDeleteProject": "Strike this project? Its attached assets go with it.",
     "confirmRemoveAsset": "Remove this asset from the project?",
     "emptyProjects": "No projects yet — open one with NEW PROJECT.",
     "emptyAssets": "Nothing attached. Add a video, image, link, or document.",
+    "emptyReels": "No reels rolled yet — hit CUT REELS on a video asset.",
     "uploadFailed": "upload failed",
+    "rollFailed": "roll failed",
+    "pollTimedOut": "timed out waiting for the render",
     "assetTypes": ["video", "image", "link", "document"]
   }
 }
@@ -159,6 +172,9 @@
       </form>
       <ul id="assetsList"></ul>
       <div class="empty" id="assetsEmpty" hidden></div>
+      <h2>▸ REELS</h2>
+      <ul id="reelsList"></ul>
+      <div class="empty" id="reelsEmpty" hidden></div>
     </section>
   </main>
   <div id="status" role="status"></div>
@@ -226,6 +242,9 @@
     $("renameProject").hidden = !has;
     $("deleteProject").hidden = !has;
     $("addAssetForm").hidden = !has;
+    $("reelsList").textContent = "";
+    $("reelsEmpty").hidden = !has;
+    $("reelsEmpty").textContent = CFG.ui.emptyReels;
     if (has && !opts.skipAssets) await loadAssets();
   }
 
@@ -304,7 +323,100 @@
       } catch (err) { status(err.message, true); }
     });
     li.appendChild(remove);
+    if (asset.asset_type === "video") li.appendChild(cutReelsControl(asset));
     return li;
+  }
+
+  // ── AF-4pz.7: cut reels from a project video (reuse, no re-upload) ─
+  function cutReelsControl(asset) {
+    const wrap = document.createElement("span");
+    wrap.style.display = "inline-flex"; wrap.style.gap = "6px";
+    const preset = document.createElement("select");
+    for (const name of CFG.reels.presets) {
+      const option = document.createElement("option");
+      option.value = name; option.textContent = name;
+      preset.appendChild(option);
+    }
+    const count = document.createElement("input");
+    count.type = "number"; count.min = "1"; count.max = String(CFG.reels.maxCount);
+    count.value = String(CFG.reels.defaultCount);
+    count.style.width = "52px";
+    const roll = document.createElement("button");
+    roll.textContent = "CUT REELS";
+    roll.addEventListener("click", (event) => {
+      event.preventDefault();
+      rollReels(asset, preset.value, Number(count.value) || CFG.reels.defaultCount);
+    });
+    wrap.append(preset, count, roll);
+    return wrap;
+  }
+
+  async function rollReels(asset, preset, count) {
+    // Each roll is its own reel_job: fresh Idempotency-Key, source reused by
+    // id — no re-upload, and the backend's transcription cache makes the
+    // 2nd+ roll skip whisper.
+    $("reelsEmpty").hidden = true;
+    const row = reelRow(asset, preset);
+    $("reelsList").prepend(row.li);
+    try {
+      const submitted = await call(
+        fill(API.executePath, { target: CFG.reels.compositeTarget }),
+        { method: "POST",
+          headers: { "Content-Type": "application/json",
+                     "Idempotency-Key": window.crypto.randomUUID() },
+          body: JSON.stringify({ input: {
+            source_asset_id: asset.asset_id, preset: preset, count: count,
+          } }) });
+      row.setStatus(`QUEUED · ${submitted.execution_id}`);
+      await pollReel(submitted.execution_id, row);
+    } catch (err) {
+      row.setStatus(`FAILED · ${err.message || CFG.ui.rollFailed}`, true);
+    }
+  }
+
+  function reelRow(asset, preset) {
+    const li = document.createElement("li");
+    const kind = document.createElement("span");
+    kind.className = "kind"; kind.textContent = "REEL";
+    const label = document.createElement("span");
+    label.className = "label";
+    label.textContent = `${asset.title || asset.asset_id} · ${preset}`;
+    const stat = document.createElement("span");
+    stat.className = "kind"; stat.style.width = "auto"; stat.textContent = "ROLLING…";
+    li.append(kind, label, stat);
+    return {
+      li,
+      setStatus(text, isErr) {
+        stat.textContent = text;
+        stat.style.color = isErr ? "var(--grease-2)" : "";
+      },
+      finish(result) {
+        // T10 discipline: link ONLY the delivered download_url.
+        const href = result && result.download_url;
+        if (!href) { this.setStatus("DONE · no download delivered", true); return; }
+        stat.textContent = "";
+        const link = document.createElement("a");
+        link.href = href; link.target = "_blank"; link.rel = "noopener";
+        link.textContent = "DOWNLOAD ▾";
+        li.appendChild(link);
+      },
+    };
+  }
+
+  async function pollReel(executionId, row) {
+    const started = Date.now();
+    while (Date.now() - started < CFG.reels.maxPollMs) {
+      await new Promise((tick) => setTimeout(tick, CFG.reels.pollIntervalMs));
+      const body = await call(fill(API.pollPath, { id: executionId }));
+      const phase = body.status || "running";
+      if (phase === "succeeded") { row.setStatus("DONE"); row.finish(body.result); return; }
+      if (phase === "failed") {
+        row.setStatus(`FAILED · ${(body.result && body.result.error) || ""}`, true);
+        return;
+      }
+      row.setStatus(phase.toUpperCase());
+    }
+    row.setStatus(CFG.ui.pollTimedOut, true);
   }
 
   function syncAssetInputs() {

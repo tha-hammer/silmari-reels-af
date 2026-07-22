@@ -26,12 +26,17 @@ REQUIRED_API_PATHS = {
     "projectAssetPath": "/api/v1/projects/{id}/assets/{assetId}",
     "projectAssetDownloadPath": "/api/v1/projects/{id}/assets/{assetId}/download",
     "sourceAssetsPath": "/api/v1/source-assets",
+    # AF-4pz.7: cut reels from a project video (reuse-source submit + poll).
+    "executePath": "/api/v1/execute/async/{target}",
+    "pollPath": "/api/v1/executions/{id}",
 }
 REQUIRED_ELEMENT_IDS = (
     "projectsList", "projectsEmpty", "newProjectName", "createProject",
     "assetsPanel", "projectTitle", "renameProject", "deleteProject",
     "addAssetForm", "assetType", "assetFile", "sourceAssetPicker", "assetUrl",
     "assetsList", "assetsEmpty", "uploadProgress", "uploadBar", "status",
+    # AF-4pz.7 — the reels rail.
+    "reelsList", "reelsEmpty",
 )
 
 
@@ -85,3 +90,23 @@ def test_no_api_literals_outside_config_block():
 def test_index_links_to_projects_page():
     index_html = (PROJECTS_HTML.parent / "index.html").read_text()
     assert 'href="/projects"' in index_html
+
+
+def test_cut_reels_config_names_target_presets_and_poll_cadence():
+    """AF-4pz.7: the roll flow is fully named-config driven — composite target,
+    preset choices, and the poll cadence all live in the #config block."""
+    cfg = _config(PROJECTS_HTML.read_text())
+    reels = cfg["reels"]
+    assert reels["compositeTarget"] == "reel-af.reel_composite_to_reel"
+    assert "middle-third-dynamic" in reels["presets"]
+    assert reels["pollIntervalMs"] > 0
+    assert reels["maxPollMs"] > reels["pollIntervalMs"]
+
+
+def test_download_links_only_from_download_url():
+    """T10 discipline in the page JS: the reel link comes from download_url
+    only — never result.url / local paths."""
+    html = PROJECTS_HTML.read_text()
+    script = re.search(r"<script>(.*?)</script>", html, re.DOTALL).group(1)
+    assert "download_url" in script
+    assert "result.url" not in script
