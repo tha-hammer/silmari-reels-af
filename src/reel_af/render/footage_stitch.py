@@ -48,6 +48,11 @@ class FootageStitchError(RuntimeError):
     """Base error for real-footage stitching failures."""
 
 
+class ThreePhaseUnsupportedError(FootageStitchError):
+    """Raised (internally) when a reel's transition windows cannot be isolated
+    inside their own segments — the stitcher then falls back to the pairwise fold."""
+
+
 class MissingSegmentAssetError(FootageStitchError):
     """Raised when a source segment has no downloaded media asset."""
 
@@ -116,6 +121,47 @@ class _PairwisePlan:
     norm_steps: tuple[_NormStep, ...]
     fold_steps: tuple[_FoldStep, ...]
     total_duration_s: float
+
+
+@dataclass(frozen=True)
+class _TransitionClipStep:
+    """Render one transition in isolation from the two normalized neighbors'
+    windows: xfade → a D-long clip, fade-to-color → fade-out(D) ⧺ fade-in(D) = 2D."""
+
+    position: int  # 1-based transition index == right segment idx
+    left_idx: int
+    right_idx: int
+    effect: str
+    transition_duration_s: float
+    left_tail_offset_s: float  # seek into the normalized left segment
+    audio_fade: bool
+    result_duration_s: float
+
+
+@dataclass(frozen=True)
+class _ConcatEntry:
+    """One ordered part of the final concat-copy assembly."""
+
+    kind: str  # "body" | "transition"
+    index: int  # segment idx for bodies, transition position for transitions
+    inpoint_s: float  # stream-copy cut into the normalized segment (body only)
+    duration_s: float
+
+
+@dataclass(frozen=True)
+class _ThreePhasePlan:
+    """normalize once → isolated transition clips → concat-demuxer -c copy.
+    O(N) encode work and ≤2 encode generations per frame regardless of N."""
+
+    norm_steps: tuple[_NormStep, ...]
+    keyframe_times: tuple[tuple[float, ...], ...]  # per segment, for copy cuts
+    transition_steps: tuple[_TransitionClipStep, ...]
+    concat_entries: tuple[_ConcatEntry, ...]
+    total_duration_s: float
+
+
+# Bodies shorter than one frame cannot survive a stream-copy cut; skip them.
+_MIN_CONCAT_PART_S = 1.0 / FPS
 
 
 SegmentFetchFn = Callable[[SegmentFetchRequest], DownloadedSegment | Path | str]
@@ -373,29 +419,24 @@ async def stitch_footage_reel(
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    plan = plan_pairwise_stitch(reel, segment_assets)
+    plan_3p: _ThreePhasePlan | None
+    try:
+        plan_3p = plan_three_phase_stitch(reel, segment_assets)
+    except ThreePhaseUnsupportedError:
+        plan_3p = None
     safe_run_id = _safe_run_id(run_id)
     work_dir = out_dir / f"{safe_run_id}-stitch"
     work_dir.mkdir(parents=True, exist_ok=True)
     final_path = out_dir / f"{safe_run_id}.mp4"
 
     try:
-        norm_paths: list[Path] = []
-        for step in plan.norm_steps:
-            norm_path = work_dir / f"norm-{step.idx:03d}.mp4"
-            await _run_ffmpeg(_normalize_cmd(step, norm_path), timeout_s=timeout_s)
-            norm_paths.append(norm_path)
-
-        current = norm_paths[0]
-        last = len(plan.fold_steps)
-        for position, fold in enumerate(plan.fold_steps, start=1):
-            clamp = plan.total_duration_s if position == last else None
-            fold_path = work_dir / f"fold-{position:03d}.mp4"
-            cmd = _fold_cmd(current, norm_paths[fold.next_idx], fold, fold_path, duration_clamp=clamp)
-            await _run_ffmpeg(cmd, timeout_s=timeout_s)
-            current = fold_path
-
-        shutil.move(str(current), str(final_path))
+        if plan_3p is not None:
+            result = await _run_three_phase(plan_3p, work_dir, timeout_s=timeout_s)
+        else:
+            result = await _run_pairwise_fold(
+                plan_pairwise_stitch(reel, segment_assets), work_dir, timeout_s=timeout_s
+            )
+        shutil.move(str(result), str(final_path))
     except BaseException as exc:
         stderr = getattr(exc, "stderr", "")
         if stderr:
@@ -404,6 +445,76 @@ async def stitch_footage_reel(
         raise
 
     return final_path
+
+
+async def _run_three_phase(plan: _ThreePhasePlan, work_dir: Path, *, timeout_s: float) -> Path:
+    """Execute the three-phase plan; every pass opens ≤2 inputs, bodies and the
+    final assembly are stream copies (zero re-encode)."""
+
+    norm_paths: list[Path] = []
+    for step, keyframe_times in zip(plan.norm_steps, plan.keyframe_times):
+        norm_path = work_dir / f"norm-{step.idx:03d}.mp4"
+        await _run_ffmpeg(
+            _normalize_cmd(step, norm_path, keyframe_times=keyframe_times),
+            timeout_s=timeout_s,
+        )
+        norm_paths.append(norm_path)
+
+    trans_paths: dict[int, Path] = {}
+    for step in plan.transition_steps:
+        trans_path = work_dir / f"trans-{step.position:03d}.mp4"
+        cmd = _transition_clip_cmd(
+            norm_paths[step.left_idx], norm_paths[step.right_idx], step, trans_path
+        )
+        await _run_ffmpeg(cmd, timeout_s=timeout_s)
+        trans_paths[step.position] = trans_path
+
+    parts: list[Path] = []
+    for entry in plan.concat_entries:
+        if entry.kind == "transition":
+            parts.append(trans_paths[entry.index])
+            continue
+        norm_step = plan.norm_steps[entry.index]
+        whole_segment = (
+            entry.inpoint_s == 0.0
+            and abs(entry.duration_s - norm_step.duration_s) < 1e-6
+        )
+        if whole_segment:
+            parts.append(norm_paths[entry.index])
+            continue
+        body_path = work_dir / f"body-{entry.index:03d}.mp4"
+        await _run_ffmpeg(
+            _body_extract_cmd(norm_paths[entry.index], entry, body_path),
+            timeout_s=timeout_s,
+        )
+        parts.append(body_path)
+
+    list_path = work_dir / "concat.txt"
+    list_path.write_text(_concat_list_text(parts))
+    concat_path = work_dir / "concat.mp4"
+    await _run_ffmpeg(_concat_cmd(list_path, concat_path), timeout_s=timeout_s)
+    return concat_path
+
+
+async def _run_pairwise_fold(plan: _PairwisePlan, work_dir: Path, *, timeout_s: float) -> Path:
+    """Legacy pairwise fold: retained as the fallback for reels whose transition
+    windows do not fit inside their own segments (O(N²) but always expressible)."""
+
+    norm_paths: list[Path] = []
+    for step in plan.norm_steps:
+        norm_path = work_dir / f"norm-{step.idx:03d}.mp4"
+        await _run_ffmpeg(_normalize_cmd(step, norm_path), timeout_s=timeout_s)
+        norm_paths.append(norm_path)
+
+    current = norm_paths[0]
+    last = len(plan.fold_steps)
+    for position, fold in enumerate(plan.fold_steps, start=1):
+        clamp = plan.total_duration_s if position == last else None
+        fold_path = work_dir / f"fold-{position:03d}.mp4"
+        cmd = _fold_cmd(current, norm_paths[fold.next_idx], fold, fold_path, duration_clamp=clamp)
+        await _run_ffmpeg(cmd, timeout_s=timeout_s)
+        current = fold_path
+    return current
 
 
 def plan_pairwise_stitch(reel: FootageReel, segment_assets: SegmentAssetMap) -> _PairwisePlan:
@@ -500,7 +611,85 @@ def plan_pairwise_stitch(reel: FootageReel, segment_assets: SegmentAssetMap) -> 
     return _PairwisePlan(tuple(norm_steps), tuple(fold_steps), current_duration_s)
 
 
-def _normalize_cmd(step: _NormStep, out_path: Path) -> list[str]:
+def plan_three_phase_stitch(reel: FootageReel, segment_assets: SegmentAssetMap) -> _ThreePhasePlan:
+    """Pure planner for the three-phase stitch. Delegates validation and duration
+    math to :func:`plan_pairwise_stitch`, then derives per-segment head/tail
+    transition windows, isolated transition clips, and the concat-copy assembly.
+
+    Raises :class:`ThreePhaseUnsupportedError` when a segment cannot host its
+    windows (``head + tail > duration``) — e.g. an xfade wider than its own left
+    segment, which the pairwise fold validates only against the *accumulated*
+    reel. Callers fall back to the pairwise fold in that case.
+    """
+
+    pairwise = plan_pairwise_stitch(reel, segment_assets)
+    norm_steps = pairwise.norm_steps
+    seg_durs = [step.duration_s for step in norm_steps]
+    head_w = [0.0] * len(norm_steps)
+    tail_w = [0.0] * len(norm_steps)
+
+    transition_steps: list[_TransitionClipStep] = []
+    for fold in pairwise.fold_steps:
+        duration = fold.transition_duration_s
+        if fold.effect == "none" or duration == 0:
+            continue
+        right = fold.next_idx
+        left = right - 1
+        head_w[right] = duration
+        tail_w[left] = duration
+        result_duration_s = (
+            2 * duration if fold.effect in FADE_TO_COLOR_EFFECTS else duration
+        )
+        transition_steps.append(
+            _TransitionClipStep(
+                position=right,
+                left_idx=left,
+                right_idx=right,
+                effect=fold.effect,
+                transition_duration_s=duration,
+                left_tail_offset_s=seg_durs[left] - duration,
+                audio_fade=fold.audio_fade,
+                result_duration_s=result_duration_s,
+            )
+        )
+
+    for idx, seg_dur in enumerate(seg_durs):
+        if head_w[idx] + tail_w[idx] > seg_dur + 1e-9:
+            raise ThreePhaseUnsupportedError(
+                f"segment {idx}: transition windows "
+                f"(head={head_w[idx]:.3f}s + tail={tail_w[idx]:.3f}s) exceed "
+                f"segment duration {seg_dur:.3f}s"
+            )
+
+    trans_by_position = {step.position: step for step in transition_steps}
+    concat_entries: list[_ConcatEntry] = []
+    for idx, seg_dur in enumerate(seg_durs):
+        step = trans_by_position.get(idx)
+        if step is not None:
+            concat_entries.append(
+                _ConcatEntry("transition", idx, 0.0, step.result_duration_s)
+            )
+        body_duration_s = seg_dur - head_w[idx] - tail_w[idx]
+        if body_duration_s >= _MIN_CONCAT_PART_S:
+            concat_entries.append(
+                _ConcatEntry("body", idx, head_w[idx], body_duration_s)
+            )
+
+    keyframe_times = tuple(
+        (head_w[idx],) if head_w[idx] > 0 else () for idx in range(len(norm_steps))
+    )
+    return _ThreePhasePlan(
+        norm_steps=norm_steps,
+        keyframe_times=keyframe_times,
+        transition_steps=tuple(transition_steps),
+        concat_entries=tuple(concat_entries),
+        total_duration_s=pairwise.total_duration_s,
+    )
+
+
+def _normalize_cmd(
+    step: _NormStep, out_path: Path, *, keyframe_times: tuple[float, ...] = ()
+) -> list[str]:
     """One-input (or synthetic) pass that renders a segment to a canvas-uniform mp4."""
     if step.kind == "black":
         filtergraph = (
@@ -527,6 +716,11 @@ def _normalize_cmd(step: _NormStep, out_path: Path) -> list[str]:
         "-map",
         "[a]" if step.kind == "black" else "[a0]",
         *_video_encode_opts(),
+    ]
+    if keyframe_times:
+        # Keyframes exactly where the three-phase body stream-copy cuts begin.
+        cmd += ["-force_key_frames", ",".join(f"{t:.3f}" for t in keyframe_times)]
+    cmd += [
         "-t",
         f"{step.duration_s:.3f}",
         "-movflags",
@@ -568,7 +762,15 @@ def _fold_filter(fold: _FoldStep) -> str:
         f"[lv][rv]xfade=transition={fold.effect}:duration={duration:.3f}:offset={offset_s:.3f}[v]",
     ]
     if fold.audio_fade:
-        parts.append(f"[0:a][1:a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]")
+        # AF-a91: normalized mp4 audio starts at pts -0.0213 (AAC priming edit
+        # list); acrossfade mishandles the offset and truncates its output to
+        # ~2 frames. Re-timestamp both legs first (the three-phase transition
+        # clips already do this via their atrim+asetpts windows).
+        parts += [
+            "[0:a]asetpts=PTS-STARTPTS[l0a]",
+            "[1:a]asetpts=PTS-STARTPTS[r0a]",
+            f"[l0a][r0a]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]",
+        ]
     else:
         parts += [
             f"[0:a]atrim=duration={offset_s:.3f},asetpts=PTS-STARTPTS[cuta]",
@@ -604,6 +806,145 @@ def _fold_cmd(
     return cmd
 
 
+def _transition_clip_filter(step: _TransitionClipStep) -> str:
+    """Filtergraph for one isolated transition window (input 0 = left tail
+    window, already seeked; input 1 = right head window)."""
+
+    duration = step.transition_duration_s
+    # trim+setpts drops the CFR metadata xfade requires; fps restores it.
+    left_v = f"[0:v]trim=end={duration:.3f},setpts=PTS-STARTPTS,fps={FPS}"
+    right_v = f"[1:v]trim=end={duration:.3f},setpts=PTS-STARTPTS,fps={FPS}"
+    left_a = f"[0:a]atrim=end={duration:.3f},asetpts=PTS-STARTPTS"
+    right_a = f"[1:a]atrim=end={duration:.3f},asetpts=PTS-STARTPTS"
+
+    if step.effect in FADE_TO_COLOR_EFFECTS:
+        color = "white" if step.effect == "fadewhite" else "black"
+        parts = [
+            f"{left_v},fade=t=out:st=0.000:d={duration:.3f}:color={color}[lv]",
+            f"{right_v},fade=t=in:st=0:d={duration:.3f}:color={color}[rv]",
+            "[lv][rv]concat=n=2:v=1:a=0[v]",
+        ]
+        if step.audio_fade:
+            parts += [
+                f"{left_a},afade=t=out:st=0:d={duration:.3f}[la]",
+                f"{right_a},afade=t=in:st=0:d={duration:.3f}[ra]",
+                "[la][ra]concat=n=2:v=0:a=1[a]",
+            ]
+        else:
+            parts += [
+                f"{left_a}[la]",
+                f"{right_a}[ra]",
+                "[la][ra]concat=n=2:v=0:a=1[a]",
+            ]
+        return ";".join(parts)
+
+    # xfade over fully-overlapped windows: offset 0, output duration = D
+    parts = [
+        f"{left_v},settb=AVTB[lv]",
+        f"{right_v},settb=AVTB[rv]",
+        f"[lv][rv]xfade=transition={step.effect}:duration={duration:.3f}:offset=0.000[v]",
+    ]
+    if step.audio_fade:
+        parts += [
+            f"{left_a}[la]",
+            f"{right_a}[ra]",
+            f"[la][ra]acrossfade=d={duration:.3f}:c1=tri:c2=tri[a]",
+        ]
+    else:
+        # Pairwise hard cut: overall audio = left[0..L-D] + right[0..R].
+        # The left body already carries audio to the cut, so the window's
+        # audio is the right head alone.
+        parts.append(f"{right_a}[a]")
+    return ";".join(parts)
+
+
+def _transition_clip_cmd(
+    left_path: Path, right_path: Path, step: _TransitionClipStep, out_path: Path
+) -> list[str]:
+    """2-input pass that renders one transition window in isolation. Input seeks
+    bound decode work to the windows themselves."""
+
+    duration = step.transition_duration_s
+    return (
+        _base_ffmpeg(threads=2)
+        + [
+            "-ss",
+            f"{step.left_tail_offset_s:.3f}",
+            "-i",
+            str(left_path),
+            "-t",
+            f"{duration:.3f}",
+            "-i",
+            str(right_path),
+            "-filter_complex",
+            _transition_clip_filter(step),
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            *_video_encode_opts(),
+            "-t",
+            f"{step.result_duration_s:.3f}",
+            "-movflags",
+            "+faststart",
+            str(out_path),
+        ]
+    )
+
+
+def _body_extract_cmd(norm_path: Path, entry: _ConcatEntry, out_path: Path) -> list[str]:
+    """Stream-copy a body span out of a normalized segment (keyframe-aligned
+    start via -force_key_frames; end cuts are safe anywhere with bframes=0)."""
+
+    cmd = ["ffmpeg", "-y", "-loglevel", "error"]
+    if entry.inpoint_s > 0:
+        cmd += ["-ss", f"{entry.inpoint_s:.3f}"]
+    cmd += [
+        "-i",
+        str(norm_path),
+        "-t",
+        f"{entry.duration_s:.3f}",
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+    return cmd
+
+
+def _concat_list_text(paths: Sequence[Path]) -> str:
+    """concat-demuxer list body; single quotes escaped the ffmpeg way."""
+
+    lines = []
+    for path in paths:
+        escaped = str(path).replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    return "\n".join(lines) + "\n"
+
+
+def _concat_cmd(list_path: Path, out_path: Path) -> list[str]:
+    """Zero-re-encode assembly of normalized bodies + transition clips."""
+
+    return [
+        "ffmpeg",
+        "-y",
+        "-loglevel",
+        "error",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(list_path),
+        "-c",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(out_path),
+    ]
+
+
 def _source_audio_fragment(input_idx: int, idx: int, trim_start_s: float, trim_end_s: float) -> str:
     """Per-source-segment audio filter fragment (trim + resample to canvas audio)."""
     return (
@@ -632,7 +973,9 @@ def _base_ffmpeg(threads: int) -> list[str]:
 
 
 def _video_encode_opts() -> list[str]:
-    """Shared encoder options: trimmed x264 buffers + canvas audio."""
+    """Shared encoder options: trimmed x264 buffers + canvas audio. Closed GOP
+    (-g/-keyint_min/-sc_threshold) keeps keyframe cadence deterministic so the
+    three-phase assembly can stream-copy cut exactly."""
     return [
         "-c:v",
         "libx264",
@@ -640,6 +983,12 @@ def _video_encode_opts() -> list[str]:
         "veryfast",
         "-x264-params",
         "rc-lookahead=5:bframes=0:ref=1",
+        "-g",
+        "60",
+        "-keyint_min",
+        "60",
+        "-sc_threshold",
+        "0",
         "-pix_fmt",
         "yuv420p",
         "-r",
@@ -915,8 +1264,10 @@ __all__ = [
     "SegmentAssetValidationError",
     "SegmentFetchFn",
     "SegmentFetchRequest",
+    "ThreePhaseUnsupportedError",
     "build_footage_filtergraph",
     "download_segments",
+    "plan_three_phase_stitch",
     "stitch_footage_reel",
     "validate_segment_assets",
 ]

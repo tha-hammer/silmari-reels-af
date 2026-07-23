@@ -311,8 +311,55 @@ def test_topic_target_still_works_unchanged():
 
 
 def test_dsl_hooks_allowed_keys_exclude_non_target_shapes():
-    for key in ("topic", "url", "text", "preset", "count", "source", "clip_plan"):
+    # "source" left this list with AF-a8o: it is now the DROP-FILE upload handle
+    # for the A1 UI preset (presigned server-side into source_url).
+    for key in ("topic", "url", "text", "preset", "count", "clip_plan"):
         assert key not in DSL_HOOKS_ALLOWED_INPUT_KEYS
+    assert "source" in DSL_HOOKS_ALLOWED_INPUT_KEYS
+
+
+# ── AF-a8o: DROP-FILE mode — ``source`` upload handle instead of source_url ──
+
+
+def test_dsl_hooks_file_mode_sets_source_handle_and_defers_url():
+    handle = "11111111-1111-1111-1111-111111111111/clip.mp4"
+    body = {k: v for k, v in VALID_A1_INPUT.items() if k != "source_url"}
+
+    sub = build_submission(TARGET_DSL_HOOKS, {"input": {**body, "source": handle}})
+
+    assert sub.source_handle == handle
+    assert sub.source_url is None
+    # cp_input carries the refs but NO source key — _resolve_cp_input presigns
+    # the handle into ``source_url`` at dispatch time.
+    assert sub.cp_input == {
+        "composite_ref": COMPOSITE_REF,
+        "words_ref": WORDS_REF,
+        "hook_ref": HOOK_REF,
+        "clip_idx": 1,
+    }
+    assert sub.params["source_mode"] == DSL_HOOKS_SOURCE_MODE
+
+
+def test_dsl_hooks_both_source_url_and_source_rejected():
+    with pytest.raises(BadRequest) as exc:
+        build_submission(
+            TARGET_DSL_HOOKS, {"input": {**VALID_A1_INPUT, "source": "org/clip.mp4"}}
+        )
+    assert exc.value.code == "invalid_source"
+
+
+@pytest.mark.parametrize("bad", ["", "   ", 7, True, {"k": "v"}])
+def test_dsl_hooks_invalid_handle_rejected(bad):
+    body = {k: v for k, v in VALID_A1_INPUT.items() if k != "source_url"}
+    with pytest.raises(BadRequest):
+        build_submission(TARGET_DSL_HOOKS, {"input": {**body, "source": bad}})
+
+
+def test_dsl_hooks_url_mode_unchanged_by_file_mode_branch():
+    """Existing URL-mode behavior is byte-identical after AF-a8o."""
+    sub = build_submission(TARGET_DSL_HOOKS, {"input": VALID_A1_INPUT})
+    assert sub.source_handle is None
+    assert sub.cp_input["source_url"] == A1_SOURCE_URL
 
 
 def test_dsl_hooks_path_never_exposes_raw_optout():

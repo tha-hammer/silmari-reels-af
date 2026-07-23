@@ -181,27 +181,48 @@ class _FakeA1S3:
         )
 
 
-def _write_fake_artifacts(out_dir: Path, *, missing: str | None = None) -> dict:
+def _write_fake_artifacts(
+    out_dir: Path,
+    *,
+    missing: str | None = None,
+    clip_count: int = 1,
+) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     composite = out_dir / "composite.ts.md"
+    composite2 = out_dir / "clips" / "clip-002" / "composite.ts.md"
     words = out_dir / "transcript.words.json"
     hook = out_dir / "hook-plan.json"
     if missing != "composite_ref":
         composite.write_text("00:00:04.120  They don't reason.\n", encoding="utf-8")
+        if clip_count > 1:
+            composite2.parent.mkdir(parents=True)
+            composite2.write_text(
+                "00:01:12.300  So the fix is a tighter loop.\n",
+                encoding="utf-8",
+            )
     if missing != "words_ref":
         words.write_text('{"schema_version":"1","words":[]}', encoding="utf-8")
     if missing != "hook_ref":
+        clips = [
+            {
+                "idx": 1,
+                "composite_ref": str(composite),
+                "idempotency_key": "immutable-key-1" if clip_count > 1 else "immutable-key",
+            }
+        ]
+        if clip_count > 1:
+            clips.append(
+                {
+                    "idx": 2,
+                    "composite_ref": str(composite2),
+                    "idempotency_key": "immutable-key-2",
+                }
+            )
         hook.write_text(
             json.dumps(
                 {
                     "schema_version": "1",
-                    "clips": [
-                        {
-                            "idx": 1,
-                            "composite_ref": str(composite),
-                            "idempotency_key": "immutable-key",
-                        }
-                    ],
+                    "clips": clips,
                 }
             ),
             encoding="utf-8",
@@ -213,7 +234,7 @@ def _write_fake_artifacts(out_dir: Path, *, missing: str | None = None) -> dict:
         "words_ref": str(words),
         "hook_ref": str(hook),
         "strategy_ref": str(sidecar),
-        "clip_count": 1,
+        "clip_count": clip_count,
     }
 
 
@@ -245,7 +266,8 @@ async def test_transcript_to_plan_default_writer_publishes_when_bucket_configure
     s3 = _FakeA1S3()
     monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
 
-    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir):
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir, clip_count):
+        assert clip_count == 1
         return _write_fake_artifacts(Path(out_dir))
 
     monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
@@ -273,6 +295,98 @@ async def test_transcript_to_plan_default_writer_publishes_when_bucket_configure
     assert str(tmp_path) not in json.dumps(uploaded_hook)
 
 
+async def test_transcript_to_plan_publishes_multi_clip_hook_plan(tmp_path, monkeypatch):
+    from reel_af.planner import pipeline as pipeline_mod
+
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    monkeypatch.setattr(app_mod.uuid, "uuid4", lambda: SimpleNamespace(hex=f"{RUN_ID}ffff"))
+    s3 = _FakeA1S3()
+    monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
+
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir, clip_count):
+        assert clip_count == 2
+        return _write_fake_artifacts(Path(out_dir), clip_count=2)
+
+    monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
+
+    out = await transcript_to_plan(
+        SRC,
+        clip_count=2,
+        transcribe=lambda source: object(),
+        out_dir=str(tmp_path / "producer"),
+    )
+
+    assert out["clip_count"] == 2
+    assert _hosted(out["composite_ref"])
+    assert _hosted(out["words_ref"])
+    assert _hosted(out["hook_ref"])
+    assert [put["Key"] for put in s3.puts] == [
+        f"plans/{RUN_ID}/composite.ts.md",
+        f"plans/{RUN_ID}/clips/clip-002/composite.ts.md",
+        f"plans/{RUN_ID}/transcript.words.json",
+        f"plans/{RUN_ID}/hook-plan.json",
+    ]
+    uploaded_hook = json.loads(s3.bodies_by_key[f"plans/{RUN_ID}/hook-plan.json"].decode())
+    clips = uploaded_hook["clips"]
+    assert [clip["idx"] for clip in clips] == [1, 2]
+    assert [clip["idempotency_key"] for clip in clips] == [
+        "immutable-key-1",
+        "immutable-key-2",
+    ]
+    assert clips[0]["composite_ref"] == out["composite_ref"]
+    assert clips[0]["composite_ref"] != clips[1]["composite_ref"]
+    assert str(tmp_path) not in json.dumps(out)
+    assert str(tmp_path) not in json.dumps(uploaded_hook)
+
+
+@pytest.mark.parametrize("bad_clip_count", [0, -1, True, False, "2", 1.5, None])
+async def test_transcript_to_plan_rejects_invalid_clip_count_before_planning(
+    tmp_path, bad_clip_count
+):
+    calls = {"transcribe": 0, "writer": 0}
+
+    def fake_transcribe(source):
+        calls["transcribe"] += 1
+        raise AssertionError("transcribe must not run for invalid clip_count")
+
+    def fake_writer(result):
+        calls["writer"] += 1
+        raise AssertionError("writer must not run for invalid clip_count")
+
+    out = await transcript_to_plan(
+        SRC,
+        clip_count=bad_clip_count,
+        transcribe=fake_transcribe,
+        artifact_writer=fake_writer,
+        out_dir=str(tmp_path / "producer"),
+    )
+
+    assert out["error"] == "invalid_clip_count"
+    assert calls == {"transcribe": 0, "writer": 0}
+    assert not (tmp_path / "producer").exists()
+
+
+async def test_transcript_to_plan_omitted_clip_count_defaults_to_one(tmp_path, monkeypatch):
+    from reel_af.planner import pipeline as pipeline_mod
+
+    observed = {}
+
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir, clip_count):
+        observed["clip_count"] = clip_count
+        return _write_fake_artifacts(Path(out_dir))
+
+    monkeypatch.setattr(pipeline_mod, "plan", fake_plan)
+
+    out = await transcript_to_plan(
+        SRC,
+        transcribe=lambda source: object(),
+        out_dir=str(tmp_path / "producer"),
+    )
+
+    assert out["clip_count"] == 1
+    assert observed["clip_count"] == 1
+
+
 @pytest.mark.parametrize(
     ("missing", "fail_put_key", "fail_presign_key", "url_by_key"),
     [
@@ -296,7 +410,8 @@ async def test_transcript_to_plan_publication_failures_map_to_artifact_unavailab
     )
     monkeypatch.setattr(storage_mod, "_client", lambda client_factory=None: s3)
 
-    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir):
+    async def fake_plan(source_url, *, words, register, bounds, llm, out_dir, clip_count):
+        assert clip_count == 1
         return _write_fake_artifacts(Path(out_dir), missing=missing)
 
     monkeypatch.setattr(pipeline_mod, "plan", fake_plan)

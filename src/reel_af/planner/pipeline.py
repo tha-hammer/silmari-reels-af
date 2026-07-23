@@ -13,8 +13,8 @@ from typing import Any
 from reel_af.dsl.compile import compile_composite
 from reel_af.dsl.composite import read_composite
 from reel_af.dsl.models import (
-    CompileContext,
     DSL_HOOKS_WORKFLOW,
+    CompileContext,
     Diagnostic,
     SourceRef,
     WordsSidecar,
@@ -39,6 +39,7 @@ from reel_af.planner.script_coherence import (
     strategy_candidate_ids,
 )
 from reel_af.planner.serialize import (
+    HookClipInput,
     PlannedCutIn,
     build_hook_plan,
     resolve_timecodes,
@@ -51,6 +52,8 @@ PLANNER_UNMATCHED_SEGMENT = "planner_unmatched_segment"
 PLANNER_RETENTION_LINT_FAILED = "retention_lint_failed"
 PLANNER_SCRIPT_COHERENCE_FAILED = "planner_script_coherence_failed"
 PLANNER_RENDER_COMPILE_FAILED = "planner_render_compile_failed"
+PLANNER_MULTI_CLIP_INSUFFICIENT_SPANS = "planner_multi_clip_insufficient_spans"
+INVALID_CLIP_COUNT = "invalid_clip_count"
 MAX_SCRIPT_COHERENCE_REPAIR_PASSES = 2
 
 
@@ -65,6 +68,19 @@ class TranscriptWindow:
     text: str
 
 
+@dataclass(frozen=True)
+class _PlannedClip:
+    idx: int
+    composite: str
+    composite_ref: str
+    resolved: list[Any]
+    cut_ins: list[PlannedCutIn]
+    accepted_candidates: list[Any]
+    strategy: Any
+    blueprint: Any
+    script_coherence: Any
+
+
 async def plan(
     source_url: str,
     words: WordsSidecar,
@@ -74,6 +90,7 @@ async def plan(
     llm: PlannerLLM | None = None,
     out_dir: str | Path,
     cfg: PlannerConfig | None = None,
+    clip_count: int = 1,
 ) -> dict[str, Any]:
     """Produce `{composite.ts.md, transcript.words.json, hook-plan.json}` refs.
 
@@ -81,6 +98,11 @@ async def plan(
     `reel_dsl_hooks_to_reels`, which is why this function writes artifacts and
     returns refs rather than stitching media.
     """
+
+    try:
+        clip_count = _validate_clip_count(clip_count)
+    except ValueError as exc:
+        return _invalid_clip_count_result(clip_count, str(exc))
 
     cfg = cfg or load_planner_config()
     llm = llm or BamlPlannerLLM(cfg=cfg)
@@ -108,6 +130,79 @@ async def plan(
             "diagnostics": [_verbatim_diag_dict(rejection) for rejection in candidate_rejections],
         }
 
+    candidate_groups = _clip_candidate_groups(candidates, clip_count)
+    if len(candidate_groups) != clip_count:
+        return _multi_clip_insufficient_result(
+            requested=clip_count,
+            available=len(candidate_groups),
+            reason="not enough non-overlapping candidate spans",
+        )
+
+    staged_clips: list[_PlannedClip] = []
+    for idx, clip_candidates in enumerate(candidate_groups, start=1):
+        clip_result = await _plan_one_clip(
+            idx=idx,
+            source_url=source_url,
+            words=words,
+            register=register,
+            duration_policy=duration_policy,
+            transcript=transcript,
+            candidates=clip_candidates,
+            llm=llm,
+            cfg=cfg,
+            out_dir=out_dir,
+            composite_ref=_composite_ref_for_clip(out_dir, idx),
+        )
+        if isinstance(clip_result, Mapping):
+            return dict(clip_result)
+        staged_clips.append(clip_result)
+
+    if not _planned_clips_non_overlapping(staged_clips):
+        return _multi_clip_insufficient_result(
+            requested=clip_count,
+            available=len(staged_clips),
+            reason="arranged clip spans overlap",
+        )
+
+    hook_plan = build_hook_plan(
+        source_url=source_url,
+        hook=staged_clips[0].blueprint.hook,
+        clips=[
+            HookClipInput(
+                idx=clip.idx,
+                hook=clip.blueprint.hook,
+                span=clip.resolved,
+                cut_ins=clip.cut_ins,
+                composite_ref=clip.composite_ref,
+            )
+            for clip in staged_clips
+        ],
+        model=cfg.model,
+        duration_bounds_s=_policy_duration_bounds(duration_policy),
+    )
+    return _write_planned_triple(
+        out_dir,
+        staged_clips,
+        words,
+        hook_plan,
+        mined_candidates=mined_candidates,
+    )
+
+
+async def _plan_one_clip(
+    *,
+    idx: int,
+    source_url: str,
+    words: WordsSidecar,
+    register: Register,
+    duration_policy: DurationPolicy,
+    transcript: str,
+    candidates: list[Any],
+    llm: PlannerLLM,
+    cfg: PlannerConfig,
+    out_dir: str | Path,
+    composite_ref: str,
+) -> _PlannedClip | dict[str, Any]:
     strategy = await llm.strategize(transcript, candidates, duration_policy)
     arrange_candidates = contextual_candidate_pool(
         candidates,
@@ -189,10 +284,21 @@ async def plan(
         )
         lint_errors = [diag for diag in lint_diags if diag.severity == "error"]
         if lint_errors:
+            r1_errors = [diag for diag in lint_errors if diag.rule == "R1"]
             r7_errors = [diag for diag in lint_errors if diag.rule == "R7"]
-            if r7_errors and general_repairs < cfg.max_repair_passes:
+            r8_errors = [diag for diag in lint_errors if diag.rule == "R8"]
+            if (r1_errors or r7_errors or r8_errors) and general_repairs < cfg.max_repair_passes:
                 general_repairs += 1
-                repair_hint = _r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars)
+                hints = []
+                if r1_errors:
+                    # AF-10e: a joined hook over the R1 window — repair before failing.
+                    hints.append(_r1_repair_hint(r1_errors, max_chars=cfg.max_repair_hint_chars))
+                if r7_errors:
+                    hints.append(_r7_repair_hint(r7_errors, max_chars=cfg.max_repair_hint_chars))
+                if r8_errors:
+                    # AF-9zs: the loop tie-back is mandatory — repair before failing.
+                    hints.append(_r8_repair_hint(r8_errors, max_chars=cfg.max_repair_hint_chars))
+                repair_hint = "; ".join(hints)[: cfg.max_repair_hint_chars]
                 continue
             return {
                 "error": PLANNER_RETENTION_LINT_FAILED,
@@ -215,22 +321,12 @@ async def plan(
                     _diagnostic_dict(diag) for diag in _get(compiled, "diagnostics", []) or []
                 ],
             }
-        composite_ref = str(Path(out_dir) / "composite.ts.md")
-        hook_plan = build_hook_plan(
-            source_url=source_url,
-            hook=blueprint.hook,
-            span=resolved,
-            cut_ins=_cut_ins(blueprint, resolved),
+        return _PlannedClip(
+            idx=idx,
+            composite=composite,
             composite_ref=composite_ref,
-            model=cfg.model,
-            duration_bounds_s=_policy_duration_bounds(duration_policy),
-        )
-        return _write_triple(
-            out_dir,
-            composite,
-            words,
-            hook_plan,
-            mined_candidates=mined_candidates,
+            resolved=resolved,
+            cut_ins=_cut_ins(blueprint, resolved),
             accepted_candidates=arrange_candidates,
             strategy=strategy,
             blueprint=blueprint,
@@ -254,6 +350,247 @@ async def plan(
             )
             for item in last_unresolved
         ],
+    }
+
+
+def _validate_clip_count(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("clip_count must be an integer")
+    if value < 1:
+        raise ValueError("clip_count must be >= 1")
+    return value
+
+
+def _invalid_clip_count_result(value: Any, message: str) -> dict[str, Any]:
+    return {
+        "error": INVALID_CLIP_COUNT,
+        "diagnostics": [
+            {
+                "code": "INVALID_CLIP_COUNT",
+                "message": message,
+                "severity": "error",
+                "context": {"clip_count": _jsonable(value)},
+            }
+        ],
+    }
+
+
+def _multi_clip_insufficient_result(
+    *,
+    requested: int,
+    available: int,
+    reason: str,
+) -> dict[str, Any]:
+    return {
+        "error": PLANNER_MULTI_CLIP_INSUFFICIENT_SPANS,
+        "diagnostics": [
+            {
+                "code": "MULTI_CLIP_INSUFFICIENT_SPANS",
+                "message": reason,
+                "severity": "error",
+                "context": {"requested": requested, "available": available},
+            }
+        ],
+    }
+
+
+def _clip_candidate_groups(
+    candidates: Sequence[Any],
+    clip_count: int,
+) -> list[list[Any]]:
+    if clip_count == 1:
+        return [list(candidates)]
+
+    selected: list[Any] = []
+    selected_bounds: list[tuple[float, float]] = []
+    for candidate in sorted(candidates, key=_candidate_source_order):
+        bounds = _candidate_source_bounds(candidate)
+        if bounds is None:
+            continue
+        if any(_bounds_overlap(bounds, existing) for existing in selected_bounds):
+            continue
+        selected.append(candidate)
+        selected_bounds.append(bounds)
+        if len(selected) == clip_count:
+            break
+    return [[candidate] for candidate in selected]
+
+
+def _candidate_source_order(candidate: Any) -> tuple[float, float, float, str]:
+    bounds = _candidate_source_bounds(candidate)
+    if bounds is None:
+        return (math.inf, math.inf, -_score(candidate), _candidate_identity(candidate))
+    return (bounds[0], bounds[1], -_score(candidate), _candidate_identity(candidate))
+
+
+def _candidate_source_bounds(candidate: Any) -> tuple[float, float] | None:
+    start = _get(candidate, "start_s", _get(candidate, "approx_start_s", None))
+    end = _get(candidate, "end_s", _get(candidate, "approx_end_s", None))
+    try:
+        start_f = float(start)
+        end_f = float(end)
+    except (TypeError, ValueError):
+        return None
+    if end_f <= start_f:
+        return None
+    return start_f, end_f
+
+
+def _planned_clips_non_overlapping(clips: Sequence[_PlannedClip]) -> bool:
+    bounds: list[tuple[float, float]] = []
+    for clip in clips:
+        clip_bounds = _resolved_source_bounds(clip.resolved)
+        if clip_bounds is None:
+            return False
+        bounds.append(clip_bounds)
+    ordered = sorted(bounds)
+    return all(not _bounds_overlap(previous, current) for previous, current in zip(ordered, ordered[1:], strict=False))
+
+
+def _resolved_source_bounds(resolved: Sequence[Any]) -> tuple[float, float] | None:
+    starts: list[float] = []
+    ends: list[float] = []
+    for item in resolved:
+        if not _get(item, "resolved", False):
+            return None
+        start = _get(item, "start_s", None)
+        end = _get(item, "end_s", None)
+        if start is None or end is None:
+            return None
+        starts.append(float(start))
+        ends.append(float(end))
+    if not starts or not ends:
+        return None
+    start = min(starts)
+    end = max(ends)
+    if end <= start:
+        return None
+    return start, end
+
+
+def _bounds_overlap(left: tuple[float, float], right: tuple[float, float]) -> bool:
+    return left[1] > right[0] and right[1] > left[0]
+
+
+def _composite_ref_for_clip(out_dir: str | Path, idx: int) -> str:
+    root = Path(out_dir)
+    if idx == 1:
+        return str(root / "composite.ts.md")
+    return str(root / "clips" / f"clip-{idx:03d}" / "composite.ts.md")
+
+
+def _write_planned_triple(
+    out_dir: str | Path,
+    clips: Sequence[_PlannedClip],
+    words: WordsSidecar,
+    hook_plan: Mapping[str, Any],
+    *,
+    mined_candidates: Any | None = None,
+) -> dict[str, Any]:
+    if not clips:
+        raise ValueError("at least one planned clip is required")
+    if len(clips) == 1:
+        result = _write_triple(
+            out_dir,
+            clips[0].composite,
+            words,
+            hook_plan,
+            mined_candidates=mined_candidates,
+            accepted_candidates=clips[0].accepted_candidates,
+            strategy=clips[0].strategy,
+            blueprint=clips[0].blueprint,
+            script_coherence=clips[0].script_coherence,
+        )
+        result["clip_count"] = 1
+        return result
+    return _write_multi_clip_triple(
+        out_dir,
+        clips,
+        words,
+        hook_plan,
+        mined_candidates=mined_candidates,
+    )
+
+
+def _write_multi_clip_triple(
+    out_dir: str | Path,
+    clips: Sequence[_PlannedClip],
+    words: WordsSidecar,
+    hook_plan: Mapping[str, Any],
+    *,
+    mined_candidates: Any | None = None,
+) -> dict[str, Any]:
+    root = Path(out_dir)
+    root.mkdir(parents=True, exist_ok=True)
+
+    composite_path = root / "composite.ts.md"
+    words_path = root / "transcript.words.json"
+    hook_path = root / "hook-plan.json"
+    mined_candidates_path = root / "mined-candidates.json"
+    accepted_candidates_path = root / "accepted-candidates.json"
+    strategy_path = root / "strategy.json"
+    blueprint_path = root / "blueprint.json"
+    script_coherence_path = root / "script-coherence.json"
+
+    for clip in clips:
+        clip_path = Path(clip.composite_ref)
+        clip_path.parent.mkdir(parents=True, exist_ok=True)
+        clip_path.write_text(clip.composite, encoding="utf-8")
+        if clip.idx == 1 and clip_path != composite_path:
+            composite_path.write_text(clip.composite, encoding="utf-8")
+
+    if not composite_path.exists():
+        first = clips[0]
+        composite_path.write_text(first.composite, encoding="utf-8")
+
+    _write_json(words_path, words)
+    _write_json(hook_path, hook_plan)
+    _write_json(mined_candidates_path, mined_candidates or [])
+    _write_json(
+        accepted_candidates_path,
+        {
+            "schema_version": "1",
+            "clips": [
+                {"idx": clip.idx, "accepted_candidates": clip.accepted_candidates}
+                for clip in clips
+            ],
+        },
+    )
+    _write_json(
+        strategy_path,
+        {
+            "schema_version": "1",
+            "clips": [{"idx": clip.idx, "strategy": clip.strategy} for clip in clips],
+        },
+    )
+    _write_json(
+        blueprint_path,
+        {
+            "schema_version": "1",
+            "clips": [{"idx": clip.idx, "blueprint": clip.blueprint} for clip in clips],
+        },
+    )
+    _write_json(
+        script_coherence_path,
+        {
+            "schema_version": "1",
+            "clips": [
+                {"idx": clip.idx, "script_coherence": clip.script_coherence}
+                for clip in clips
+            ],
+        },
+    )
+
+    return {
+        "composite_ref": str(composite_path),
+        "words_ref": str(words_path),
+        "hook_ref": str(hook_path),
+        "mined_candidates_ref": str(mined_candidates_path),
+        "accepted_candidates_ref": str(accepted_candidates_path),
+        "strategy_ref": str(strategy_path),
+        "blueprint_ref": str(blueprint_path),
+        "script_coherence_ref": str(script_coherence_path),
+        "clip_count": len(clips),
     }
 
 
@@ -613,6 +950,30 @@ def _r7_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str
     hint = (
         f"{messages}. Make a coherent under-cap cut: drop optional support, repeated examples, "
         "and lower-value branches first; keep hook, minimum context, proof, payoff, and R8 loop."
+    )
+    return hint[:max_chars]
+
+
+def _r1_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str:
+    """AF-10e: a span-joined hook blew the R1 window — steer the re-arrange
+    toward a hook that fits without the join."""
+    messages = "; ".join(diag.message for diag in diagnostics)
+    hint = (
+        f"{messages}. The hook window is capped: keep the hook beat within its own "
+        "candidate span, or only use a [join] when the joined hook still lands within "
+        "the R1 window."
+    )
+    return hint[:max_chars]
+
+
+def _r8_repair_hint(diagnostics: list[LintDiagnostic], *, max_chars: int) -> str:
+    """AF-9zs: the R8 loop tie-back is mandatory for EVERY strategy (including
+    ProblemAgitateSolve) — steer the re-arrange toward a hook-echoing close."""
+    messages = "; ".join(diag.message for diag in diagnostics)
+    hint = (
+        f"{messages}. The R8 loop tie-back is MANDATORY: make the final beat echo the key "
+        "tokens of strategy.hook.span_quote using a source span DISTINCT from the hook beat, "
+        "and set loop.final_span_quote/candidate_id/occurrence_index to that final beat."
     )
     return hint[:max_chars]
 

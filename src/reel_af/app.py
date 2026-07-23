@@ -86,6 +86,11 @@ from reel_af.render.finish import FinishContext, finish_reel  # noqa: E402
 from reel_af.render.finish_config import ReelFinishConfig  # noqa: E402
 from reel_af.render.footage_stitch import download_segments, stitch_footage_reel  # noqa: E402
 from reel_af.render.images import generate_first_frame  # noqa: E402
+from reel_af.render.overlay_stitch import (  # noqa: E402
+    apply_overlays,
+    openrouter_overlay_image_provider,
+)
+from reel_af.render.overlays import active_cut_ins_for_segment  # noqa: E402
 from reel_af.render.presets import load_preset  # noqa: E402
 
 app = Agent(
@@ -523,6 +528,69 @@ async def article_to_reel(
 # ════════════════════════════════════════════════════════════════════
 
 
+def _conversational_to_script(conv_script: dict) -> dict:
+    """Map a ConversationalScript dump onto the ScriptDraft field shapes the
+    shared downstream expects (tease → hook, reveal sentences →
+    mechanism_lines, payoff → payoff_line)."""
+    reveal_sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[.!?])\s+", conv_script["reveal"].strip())
+        if s.strip()
+    ]
+    if len(reveal_sentences) < 2:
+        # ScriptDraft requires min_length=2 on mechanism_lines.
+        reveal_sentences = (
+            reveal_sentences + [conv_script.get("common_belief") or "."]
+        )[:2]
+    return {
+        "hook": conv_script["tease"],
+        "hook_variant": "curiosity_gap",
+        "mechanism_lines": reveal_sentences[:4],
+        "payoff_line": conv_script["payoff"],
+        "target_wpm": 180,
+        "narration": conv_script["narration"],
+    }
+
+
+def _topic_essence(essence: dict) -> dict:
+    return {
+        "core_claim": essence["core_claim"],
+        "mechanism": essence["mechanism"],
+        "evidence": essence["evidence"],
+        "content_mode": "general",  # topic-derived → conversational register
+        "domain": essence["domain"],
+    }
+
+
+def select_topic_script(
+    scripts: list[dict], essences: list[dict], winner_idx: int,
+) -> tuple[dict, dict, int, bool]:
+    """AF-vjm: pick the reel script without ever hard-failing the loop-back gate.
+
+    Try narration candidates in judge order (winner first, then the rest);
+    the first whose mapped dict constructs a valid ``ScriptDraft`` wins. If
+    none pass, fall back to the winner with ``enforce_loop_back=False`` so a
+    topic reel degrades to a weaker close instead of crashing in plan_beats.
+
+    Returns ``(script, essence, selected_idx, loop_back_relaxed)``.
+    """
+    from pydantic import ValidationError
+
+    from reel_af.models import ScriptDraft
+
+    order = [winner_idx] + [i for i in range(len(scripts)) if i != winner_idx]
+    for idx in order:
+        script = _conversational_to_script(scripts[idx])
+        try:
+            ScriptDraft(**script)
+        except ValidationError:
+            continue
+        return script, _topic_essence(essences[idx]), idx, False
+    script = _conversational_to_script(scripts[winner_idx])
+    script["enforce_loop_back"] = False
+    return script, _topic_essence(essences[winner_idx]), winner_idx, True
+
+
 @reel.reasoner()
 async def topic_to_reel(
     topic: str, out_dir: str | None = None,
@@ -599,39 +667,26 @@ async def topic_to_reel(
     )
     timings["judge"] = round(time.time() - t, 1)
     winner_idx = max(0, min(verdict["winner_idx"], len(scripts) - 1))
-    winner_script = scripts[winner_idx]
-    winner_essence = chosen_essences[winner_idx]
 
     # ── Map ConversationalScript → ScriptDraft for the downstream ─────
     # Beats/visuals/accents all operate on ScriptDraft; the topic
     # pipeline writes ConversationalScripts so we adapt the field
     # shapes (tease → hook, reveal-sentences → mechanism_lines, …).
-    reveal_sentences = [
-        s.strip()
-        for s in re.split(r"(?<=[.!?])\s+", winner_script["reveal"].strip())
-        if s.strip()
-    ]
-    if len(reveal_sentences) < 2:
-        # ScriptDraft requires min_length=2 on mechanism_lines.
-        reveal_sentences = (
-            reveal_sentences + [winner_script.get("common_belief") or "."]
-        )[:2]
-
-    essence = {
-        "core_claim": winner_essence["core_claim"],
-        "mechanism": winner_essence["mechanism"],
-        "evidence": winner_essence["evidence"],
-        "content_mode": "general",  # topic-derived → conversational register
-        "domain": winner_essence["domain"],
-    }
-    script = {
-        "hook": winner_script["tease"],
-        "hook_variant": "curiosity_gap",
-        "mechanism_lines": reveal_sentences[:4],
-        "payoff_line": winner_script["payoff"],
-        "target_wpm": 180,
-        "narration": winner_script["narration"],
-    }
+    # AF-vjm: candidate fallback — the judge winner is not guaranteed to
+    # pass the ScriptDraft loop-back gate, so try candidates in judge
+    # order and relax the gate as a last resort instead of hard-failing.
+    script, essence, selected_idx, loop_back_relaxed = select_topic_script(
+        scripts, chosen_essences, winner_idx,
+    )
+    winner_script = scripts[selected_idx]
+    winner_essence = chosen_essences[selected_idx]
+    if selected_idx != winner_idx or loop_back_relaxed:
+        app.note(
+            f"reel-af topic: run {run_id} loop-back fallback — judge winner "
+            f"idx={winner_idx}, selected idx={selected_idx}, "
+            f"gate_relaxed={loop_back_relaxed}",
+            tags=["reel", "topic", "loop-back-fallback"],
+        )
 
     final = await _render_downstream(
         node=node,
@@ -668,6 +723,8 @@ async def topic_to_reel(
         "chosen_essence": winner_essence,
         "winner_composite": verdict.get("composite_score"),
         "winner_why": verdict.get("why"),
+        "script_selected_idx": selected_idx,
+        "loop_back_relaxed": loop_back_relaxed,
         "all_candidates": all_candidates,
         "all_narrations": [s["narration"] for s in scripts],
         "run_id": run_id,
@@ -698,6 +755,9 @@ class CompositeDeps:
     has_audio: Any
     transcribe: Any
     probe_duration: Any
+    # AF-4pz.1: opt-in word-timings cache (content-checksum keyed). None ⇒
+    # passthrough; production wires BucketTranscriptionCache (fail-soft).
+    transcription_cache: Any = None
 
 
 def _ffprobe_duration(src: Path) -> float:
@@ -714,12 +774,14 @@ def _ffprobe_duration(src: Path) -> float:
 def _default_composite_deps() -> CompositeDeps:
     from reel_af.render.captions import caption_words, has_audio_stream
     from reel_af.render.hooks import download_crisp_source
+    from reel_af.render.transcription_cache import BucketTranscriptionCache
 
     return CompositeDeps(
         download=download_crisp_source,
         has_audio=has_audio_stream,
         transcribe=caption_words,
         probe_duration=_ffprobe_duration,
+        transcription_cache=BucketTranscriptionCache(),  # AF-4pz.1: fail-soft
     )
 
 
@@ -769,7 +831,18 @@ def _run_composite_reels(
     source_has_audio = deps.has_audio(src)
     if not source_has_audio:
         return {"error": SOURCE_NO_AUDIO_TRACK_MESSAGE, "code": SOURCE_NO_AUDIO_TRACK_CODE}
-    words = deps.transcribe(src, workdir=out_path)
+    # AF-4pz.1: whisper is the most expensive step — reuse cached word timings
+    # keyed by source content checksum; the 2nd+ reel from the same source
+    # skips the whisper subprocess entirely. getattr: stub deps without the
+    # seam mean "no cache" (pure passthrough).
+    from reel_af.render.transcription_cache import cached_words
+
+    words = cached_words(
+        src,
+        transcribe=deps.transcribe,
+        cache=getattr(deps, "transcription_cache", None),
+        workdir=out_path,
+    )
     dur = float(deps.probe_duration(src))
     n = int(dur // reel_s)
     if n < 1:
@@ -1490,6 +1563,7 @@ DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE = "dsl_artifact_unavailable"
 DSL_HOOKS_ERROR_INVALID_SOURCE_URL = "invalid_source_url"
 DSL_HOOKS_ERROR_COMPILE_FAILED = "dsl_compile_failed"
 DSL_HOOKS_ERROR_CUTIN_INVALID = "dsl_cutin_invalid"
+DSL_HOOKS_ERROR_CUTIN_IMAGE_UNAVAILABLE = "dsl_cutin_image_unavailable"
 DSL_HOOKS_ERROR_RENDER_FAILED = "dsl_render_failed"
 
 
@@ -1617,9 +1691,10 @@ async def dsl_hooks_to_reels(
 
     Worker contract (research steps 1-11): read composite/words → parse markers →
     resolve/align → compile with CompileContext → reject compile errors → validate
-    renderability → map cut-ins (B9a: validated, NOT rendered — B9b deferred) →
-    download segments → stitch 1080x1920 → finish (banner/captions/image cut-ins,
-    no raw opt-out) → deliver.
+    renderability → map cut-ins (B9a: validated, fail-closed) → download segments →
+    draw cut-ins per segment via overlay_stitch (B1: the single overlay
+    subsystem; finish's image_cutins are gated off) → stitch 1080x1920 → finish
+    (banner/captions, no raw opt-out) → deliver.
 
     Delivery is REQUIRED: unlike the other reasoners, a missing browser URL is
     terminal ``delivery_unavailable``. A node-local ``video_path`` is never
@@ -1689,7 +1764,7 @@ async def dsl_hooks_to_reels(
                 "diagnostics": _diag_dicts(result.diagnostics)}
 
     # B9a — map/validate A1 cut-ins. An unanchored cut-in fails closed rather than
-    # being silently dropped. Slice A does NOT render them (B9b deferred).
+    # being silently dropped.
     cut_ins, cut_in_diags = map_cut_ins(clip.get("cut_ins", []), reel=result.plan)
     if cut_in_diags:
         return {
@@ -1697,11 +1772,36 @@ async def dsl_hooks_to_reels(
             "diagnostics": _diag_dicts(cut_in_diags),
         }
 
-    # Steps 8-10 — fetch real footage, stitch vertical, finish by default.
+    # B1 fail-closed guard — a visual cut-in needs a generated image; with no
+    # image provider it cannot draw, and silent dropping is forbidden. Terminal
+    # BEFORE any render side effect.
+    if image_provider is None and any(c.type == "visual" for c in cut_ins):
+        return {
+            "error": DSL_HOOKS_ERROR_CUTIN_IMAGE_UNAVAILABLE,
+            "detail": "visual cut-ins require an image provider; none available",
+        }
+
+    # Steps 8-10 — fetch real footage, draw cut-ins per segment (B1), stitch
+    # vertical, finish by default.
     try:
         assets = await asyncio.to_thread(
             download_segments, result.plan, work / "segments", fetch_segment
         )
+        if cut_ins:
+            # B1 — cut-ins DRAW through the single overlay subsystem
+            # (render/overlay_stitch → overlays.py). Overlaid segments come
+            # back pre_normalized=True so the stitcher normalizes the
+            # 1080x1920 canvas exactly once (no double scale/crop). Finish's
+            # LLM-picked image cut-ins are gated off in _finish_config_for so
+            # nothing composites twice.
+            assets = await apply_overlays(
+                result.plan,
+                assets,
+                _overlay_plan_for(cut_ins, result.plan),
+                work,
+                run_id,
+                image_provider=openrouter_overlay_image_provider(image_provider),
+            )
         base = await stitch_footage_reel(
             result.plan, assets, work / "base", run_id=run_id
         )
@@ -1739,6 +1839,16 @@ async def dsl_hooks_to_reels(
         "target_workflow": DSL_HOOKS_WORKFLOW,
         "clip_idx": clip_idx,
         "segment_count": len(result.plan.segments),
+        # B24 — the CP emitter (BuildReelCompletedOutboxRecord) reads
+        # beat_count/source_execution_id/duration_s straight from this
+        # ResultPayload and zero-degrades anything missing. beat_count
+        # aliases the segment count until the v2 contract carries
+        # segment_count first-class (AF-z92). source_execution_id
+        # correlates the upstream A1 planner run via the clip's
+        # idempotency key (a1:<run>:clip:<idx>); first-class CP lineage
+        # is the v2 follow-up.
+        "beat_count": len(result.plan.segments),
+        "source_execution_id": str(clip.get("idempotency_key") or hook_ref),
         "cut_in_count": len(cut_ins),
         "duration_s": result.plan.duration_s,
         "source": "dsl_hooks",
@@ -1750,6 +1860,7 @@ async def transcript_to_plan(
     source_url: str,
     register: str = "educational",
     target_duration_bounds_s: dict[str, float] | None = None,
+    clip_count: int = 1,
     out_dir: str | None = None,
     *,
     llm=None,
@@ -1764,6 +1875,13 @@ async def transcript_to_plan(
 
     if not _is_browser_deliverable_url(source_url):
         return {"error": DSL_HOOKS_ERROR_INVALID_SOURCE_URL, "source_url": source_url}
+
+    from reel_af.planner.pipeline import _invalid_clip_count_result, _validate_clip_count
+
+    try:
+        clip_count = _validate_clip_count(clip_count)
+    except ValueError as exc:
+        return _invalid_clip_count_result(clip_count, str(exc))
 
     try:
         from reel_af.planner.ingest import transcribe as _transcribe
@@ -1783,6 +1901,7 @@ async def transcript_to_plan(
             bounds=target_duration_bounds_s,
             llm=llm,
             out_dir=work,
+            clip_count=clip_count,
         )
         if "error" not in result:
             writer = artifact_writer
@@ -1796,6 +1915,44 @@ async def transcript_to_plan(
         return result
     except Exception as exc:  # noqa: BLE001 — reasoners return errors, never raise
         return {"error": DSL_HOOKS_ERROR_ARTIFACT_UNAVAILABLE, "detail": str(exc)}
+
+
+def _reel_completed_payload(result: dict) -> dict:
+    """B24: the frozen ``com.silmari.reel.completed/v1`` DTO for a successful
+    DSL-hooks result (six required fields, additionalProperties:false).
+
+    Mirrors research_to_reel's ``reel_dto``. ``beat_count`` aliases the
+    segment count until the v2 contract (first-class segment_count, AF-z92)
+    supersedes it.
+    """
+    return {
+        "run_id": result["run_id"],
+        "status": "succeeded",
+        "reel_ref": result["download_url"],
+        "source_execution_id": result["source_execution_id"],
+        "duration_s": result["duration_s"],
+        "beat_count": result["beat_count"],
+    }
+
+
+def _overlay_plan_for(cut_ins: list, reel) -> dict:
+    """B1: group validated cut-ins by the source segments they intersect.
+
+    Pure edit-decision data for ``apply_overlays``: ``{segment_id: [cut_ins]}``.
+    Black segments carry no source footage and are excluded; a cut-in spanning
+    a boundary appears in each overlapping segment (the overlay library clamps
+    it per segment by design). Windows are absolute source time on both sides.
+    """
+    plan: dict = {}
+    for segment in reel.segments:
+        if getattr(segment, "kind", None) != "source":
+            continue
+        active = active_cut_ins_for_segment(
+            cut_ins, segment.start_s, segment.end_s - segment.start_s
+        )
+        if active:
+            plan[segment.segment_id] = active
+    return plan
 
 
 def _cut_ins_are_wellformed(raw_cut_ins: list) -> bool:
@@ -1819,17 +1976,17 @@ def _media_provider():
 def _finish_config_for(image_provider: Any) -> ReelFinishConfig:
     """Finish config for the DSL-hooks workflow.
 
-    Guard: image cut-ins REQUIRE an image provider — ``generate_image_cutins``
-    calls ``provider.generate_image`` unconditionally. With no provider,
-    ``image_count=0`` degrades cut-ins out rather than crashing the whole reel.
-    The hook banner and safe-zone captions still burn, so the reel stays valid.
-    There is no raw/fast opt-out on this workflow either way.
+    B1 single-subsystem rule: DSL cut-ins draw per segment through
+    ``render/overlay_stitch`` (overlays.py) BEFORE stitch, so finish's
+    LLM-picked ``image_cutins`` are gated off (``image_count=0``) regardless
+    of provider — exactly one subsystem composites overlays, never both
+    (double-composite hazard). The hook banner and safe-zone captions still
+    burn, so the reel stays valid. There is no raw/fast opt-out on this
+    workflow either way.
     """
 
-    cfg = ReelFinishConfig()
-    if image_provider is None:
-        return cfg.model_copy(update={"image_count": 0})
-    return cfg
+    _ = image_provider  # provider now only feeds the overlay_stitch pass
+    return ReelFinishConfig().model_copy(update={"image_count": 0})
 
 
 def _health() -> dict:

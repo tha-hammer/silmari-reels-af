@@ -319,6 +319,51 @@ class ResearchRunReaderPort(Protocol):
     def read(self, ctx, execution_id: str) -> dict: ...   # owner interface, keyed by execution_id
 
 
+@runtime_checkable
+class SourceAssetRepoPort(Protocol):
+    """Durable upload records (AF-02f): org-scoped writes/reads of
+    ``deepresearch.source_asset``. Identity stamps are server-derived from the
+    resolved ctx, never client-supplied."""
+
+    def create(self, ctx, *, asset_id, bucket_key, original_filename,
+               content_type, size_bytes, checksum, now): ...
+
+    def list_for_org(self, ctx): ...
+
+    def get(self, ctx, asset_id): ...   # org-scoped; foreign/absent concealed as 404
+
+
+@runtime_checkable
+class ProjectRepoPort(Protocol):
+    """Org-scoped, owner-stamped project CRUD (AF-4pz.4). Foreign/absent/
+    soft-deleted projects concealed as 404."""
+
+    def create(self, ctx, *, project_id, name, description, now): ...
+
+    def list_for_org(self, ctx): ...
+
+    def get(self, ctx, project_id): ...
+
+    def update(self, ctx, project_id, *, name=None, description=None, now=None): ...
+
+    def soft_delete(self, ctx, project_id, *, now=None): ...
+
+
+@runtime_checkable
+class ProjectAssetRepoPort(Protocol):
+    """Project-scoped asset attachments (AF-4pz.5) — exactly one of
+    {source_asset_id, bucket_key, url} per row (migration 115 constraint)."""
+
+    def add(self, ctx, *, asset_id, project_id, asset_type, source_asset_id,
+            bucket_key, url, title, now): ...
+
+    def list_for_project(self, ctx, project_id): ...
+
+    def get(self, ctx, project_id, asset_id): ...   # 404 conceals foreign/absent
+
+    def soft_delete(self, ctx, project_id, asset_id, *, now=None): ...
+
+
 @dataclass
 class AppDeps:
     identity: IdentityProvider
@@ -341,6 +386,12 @@ class AppDeps:
     # INT-04: optional, read-only lineage view — self-composed over the org-scoped repos above.
     # Wired post-construction (it references this container); ``None`` until wired.
     lineage: "object | None" = None
+    # AF-02f: durable upload records. Defaulted for construction-site compatibility;
+    # ``default_deps``/test ``make_deps`` always wire a real/fake repo.
+    source_assets: "SourceAssetRepoPort | None" = None
+    # AF-4pz.4/.5: Projects + attached assets. Same wiring convention.
+    projects: "ProjectRepoPort | None" = None
+    project_assets: "ProjectAssetRepoPort | None" = None
 
 
 def default_deps() -> AppDeps:
@@ -355,7 +406,15 @@ def default_deps() -> AppDeps:
     # Lazy imports avoid an import cycle (pg/auth/control_plane import this module).
     from carousels import CarouselSlideRefResolver
     from control_plane import HttpControlPlane
-    from pg import PgCarouselRepo, PgEventConsumerStore, PgReelJobRepo, build_identity
+    from pg import (
+        PgCarouselRepo,
+        PgEventConsumerStore,
+        PgProjectAssetRepo,
+        PgProjectRepo,
+        PgReelJobRepo,
+        PgSourceAssetRepo,
+        build_identity,
+    )
     from research_reader import OwnerInterfaceResearchRunReader
     from storage import ObjectStorage
     from uploads import BucketUploadStore, LocalUploadStore
@@ -392,6 +451,9 @@ def default_deps() -> AppDeps:
         clock=SystemClock(),
         uuid_factory=lambda: uuid.uuid4(),
         logger=logger,
+        source_assets=PgSourceAssetRepo(),          # AF-02f: shared deepresearch DB; 503 until applied
+        projects=PgProjectRepo(),                   # AF-4pz.4: 503 until migration 115 applied
+        project_assets=PgProjectAssetRepo(),        # AF-4pz.5: 503 until migration 115 applied
     )
     # INT-04: the read-only lineage view is self-composed over the org-scoped repos above
     # (no new external client, no I/O at construction).

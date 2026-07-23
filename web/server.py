@@ -18,6 +18,7 @@ disable SuperTokens). The module-level ``app`` uses ``default_deps()`` and does
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import inspect
 import json
 import os
@@ -40,10 +41,22 @@ from deps import (
     default_deps,
 )
 from flask import Flask, Response, jsonify, redirect, request, send_from_directory
+from projects import (
+    project_asset_view,
+    project_view,
+    validate_asset_title,
+    validate_asset_type,
+    validate_link_url,
+    validate_project_description,
+    validate_project_name,
+    validate_source_asset_ref,
+)
 from reel_jobs import (
     A1_DELIVERY_UNAVAILABLE,
     DELIVERY_REQUIRED_TARGETS,
     FORBIDDEN_IDENTITY_FIELDS,
+    PRESIGN_CP_KEY_BY_TARGET,
+    PRESIGN_CP_KEY_DEFAULT,
     TERMINAL_STATUSES,
     TEXT_TARGET_BY_OUTPUT,
     ReelJobStatus,
@@ -52,6 +65,7 @@ from reel_jobs import (
     build_submission,
     normalize_reel_status,
 )
+from source_assets import asset_view, describe_upload
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 IDEMPOTENCY_RETRY_AFTER_S = 3
@@ -104,6 +118,57 @@ def _is_carousel_create(method: str, sub: str) -> bool:
 
 def _is_upload(method: str, sub: str) -> bool:
     return method == "POST" and sub == "v1/uploads"
+
+
+def _is_source_asset_list(method: str, sub: str) -> bool:
+    return method == "GET" and sub == "v1/source-assets"
+
+
+# AF-4pz.4/.5 — Projects CRUD + attached assets. Pure predicates like siblings.
+_PROJECT_RE = re.compile(r"^v1/projects/([^/]+)$")
+_PROJECT_ASSETS_RE = re.compile(r"^v1/projects/([^/]+)/assets$")
+_PROJECT_ASSET_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)$")
+_PROJECT_ASSET_DOWNLOAD_RE = re.compile(r"^v1/projects/([^/]+)/assets/([^/]+)/download$")
+_PROJECT_REELS_RE = re.compile(r"^v1/projects/([^/]+)/reels$")
+
+
+def _is_projects_collection(method: str, sub: str) -> bool:
+    return method in ("GET", "POST") and sub == "v1/projects"
+
+
+def _project_target(method: str, sub: str) -> str | None:
+    if method not in ("GET", "PATCH", "DELETE"):
+        return None
+    m = _PROJECT_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _project_assets_target(method: str, sub: str) -> str | None:
+    if method not in ("GET", "POST"):
+        return None
+    m = _PROJECT_ASSETS_RE.match(sub)
+    return m.group(1) if m else None
+
+
+def _project_asset_target(method: str, sub: str) -> tuple[str, str] | None:
+    if method != "DELETE":
+        return None
+    m = _PROJECT_ASSET_RE.match(sub)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _project_asset_download_target(method: str, sub: str) -> tuple[str, str] | None:
+    if method != "GET":
+        return None
+    m = _PROJECT_ASSET_DOWNLOAD_RE.match(sub)
+    return (m.group(1), m.group(2)) if m else None
+
+
+def _project_reels_target(method: str, sub: str) -> str | None:
+    if method != "GET":
+        return None
+    m = _PROJECT_REELS_RE.match(sub)
+    return m.group(1) if m else None
 
 
 def _is_research_run(method: str, sub: str) -> bool:
@@ -327,11 +392,22 @@ def _resolve_cp_input(deps: AppDeps, ctx, submission) -> dict:
     Presigning here, before the DB insert, fails closed (503) with no orphan row
     when the store is unconfigured, and keeps the ephemeral signed URL unpersisted."""
     cp_input = dict(submission.cp_input)
+    if submission.source_asset_id is not None:
+        # AF-4pz.2 asset mode: resolve the persisted upload org-scoped (404
+        # conceals foreign/absent/soft-deleted BEFORE presign/insert/CP), then
+        # presign the STORED bucket key exactly like the handle path below.
+        asset = deps.source_assets.get(ctx, submission.source_asset_id)
+        cp_key = PRESIGN_CP_KEY_BY_TARGET.get(submission.target, PRESIGN_CP_KEY_DEFAULT)
+        cp_input[cp_key] = deps.uploads.presign(ctx, asset.bucket_key)  # 503 if store unconfigured
+        return cp_input
     if submission.source_handle:
         if not _belongs_to_org(ctx, submission.source_handle):
             raise NotFound("upload handle not found", code="upload_not_found")  # no presign, no row, no CP
         cp_input.pop("source", None)
-        cp_input["url"] = deps.uploads.presign(ctx, submission.source_handle)  # 503 if store unconfigured
+        # Target-aware param name (AF-a8o): composite consumes ``url``; the A1
+        # reasoners (transcript_to_plan / dsl_hooks_to_reels) consume ``source_url``.
+        cp_key = PRESIGN_CP_KEY_BY_TARGET.get(submission.target, PRESIGN_CP_KEY_DEFAULT)
+        cp_input[cp_key] = deps.uploads.presign(ctx, submission.source_handle)  # 503 if store unconfigured
     return cp_input
 
 
@@ -373,14 +449,35 @@ def _log_orphaned_dispatch(deps: AppDeps, ctx, *, job_id, execution_id, crid, ta
     )
 
 
+def _project_ref_id(deps: AppDeps, ctx, body: dict | None) -> uuid.UUID | None:
+    """AF-8bk: optional top-level ``project_id`` — a reference, never trusted
+    for ownership. UUID-validated (400), then resolved org-scoped through the
+    projects repo so a foreign/absent project is concealed as 404 BEFORE any
+    row or CP dispatch (mirrors ``_source_research_run_id``)."""
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("project_id")
+    if raw in (None, ""):
+        return None
+    try:
+        project_id = uuid.UUID(str(raw))
+    except (TypeError, ValueError) as exc:
+        raise BadRequest("project_id must be a UUID", code="invalid_project_id") from exc
+    return deps.projects.get(ctx, project_id).project_id   # 404 conceals
+
+
 def _handle_submit(deps: AppDeps, target: str) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)            # 401 / 403 / 503, before any CP call
     deps.access_guard.authorize_create(ctx)         # 403 fail-closed
     body = request.get_json(silent=True)
     source_research_run_id = _source_research_run_id(deps, ctx, body)
+    project_id = _project_ref_id(deps, ctx, body)   # 400 malformed / 404 foreign / None
     submission = build_submission(
         target, body, source_research_run_id=source_research_run_id
     )                                               # 400 (incl. forbidden identity fields)
+    if project_id is not None:
+        # Single-point stamp (frozen dataclass): reels roll under their project.
+        submission = dataclasses.replace(submission, project_id=project_id)
     cp_input = _resolve_cp_input(deps, ctx, submission)  # file-mode: ctx-owned handle → url (404/503)
 
     job_id = deps.uuid_factory()
@@ -752,8 +849,165 @@ def _handle_slide(deps: AppDeps, carousel_id: str, slide_idx: int) -> tuple[Resp
 def _handle_upload(deps: AppDeps) -> tuple[Response, int]:
     ctx = deps.identity.resolve(request)
     deps.access_guard.authorize_create(ctx)
-    handle = deps.uploads.store(ctx, request.files.get("file"))
-    return jsonify(handle), HTTP_CREATED
+    file = request.files.get("file")
+    # AF-02f: checksum/size BEFORE the store consumes the stream (pure; seeks
+    # back). None → the store raises the canonical no-file 400 below.
+    meta = describe_upload(file)
+    handle = deps.uploads.store(ctx, file)
+    # Durable, org-scoped upload record (server-derived identity stamps). The
+    # record is REQUIRED — a repo failure here is a fail-closed 503; the stored
+    # object without a row is an acceptable orphan, never a silent success.
+    asset = deps.source_assets.create(
+        ctx,
+        asset_id=deps.uuid_factory(),
+        bucket_key=handle["path"],
+        now=deps.clock.now(),
+        **meta,
+    )
+    return jsonify({**handle, "asset_id": str(asset.asset_id)}), HTTP_CREATED
+
+
+def _handle_projects_collection(deps: AppDeps) -> tuple[Response, int]:
+    """AF-4pz.4: POST create / GET list — org-scoped, owner-stamped."""
+    ctx = deps.identity.resolve(request)
+    if request.method == "GET":
+        return jsonify(
+            {"projects": [project_view(p) for p in deps.projects.list_for_org(ctx)]}
+        ), 200
+    deps.access_guard.authorize_create(ctx)
+    body = request.get_json(silent=True) or {}
+    project = deps.projects.create(
+        ctx,
+        project_id=deps.uuid_factory(),
+        name=validate_project_name(body.get("name")),
+        description=validate_project_description(body.get("description")),
+        now=deps.clock.now(),
+    )
+    return jsonify(project_view(project)), HTTP_CREATED
+
+
+def _handle_project(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-4pz.4: GET one / PATCH rename / DELETE soft — foreign concealed 404."""
+    ctx = deps.identity.resolve(request)
+    if request.method == "GET":
+        return jsonify(project_view(deps.projects.get(ctx, project_id))), 200
+    deps.access_guard.authorize_create(ctx)
+    if request.method == "DELETE":
+        deps.projects.soft_delete(ctx, project_id, now=deps.clock.now())
+        return Response(status=204), 204
+    body = request.get_json(silent=True) or {}
+    name = validate_project_name(body["name"]) if "name" in body else None
+    description = (
+        validate_project_description(body["description"]) if "description" in body else None
+    )
+    updated = deps.projects.update(
+        ctx, project_id, name=name, description=description, now=deps.clock.now()
+    )
+    return jsonify(project_view(updated)), 200
+
+
+def _handle_project_assets(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-4pz.5: POST add / GET list assets. The project resolves first (404
+    conceals foreign/absent) BEFORE any upload or row write."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    if request.method == "GET":
+        assets = deps.project_assets.list_for_project(ctx, project.project_id)
+        return jsonify({"assets": [project_asset_view(a) for a in assets]}), 200
+
+    deps.access_guard.authorize_create(ctx)
+    is_multipart = request.content_type and request.content_type.startswith("multipart/")
+    body = request.form if is_multipart else (request.get_json(silent=True) or {})
+    asset_type = validate_asset_type(body.get("asset_type"))
+    title = validate_asset_title(body.get("title"))
+
+    source_asset_id = bucket_key = url = None
+    if asset_type == "link":
+        url = validate_link_url(body.get("url"))
+    elif asset_type == "video" and not is_multipart:
+        # Reuse of a persisted upload — org-scoped resolve, 404 conceals foreign.
+        ref = validate_source_asset_ref(body.get("source_asset_id"))
+        source_asset_id = deps.source_assets.get(ctx, ref).asset_id
+    else:
+        # image/document (and fresh video) uploads ride the existing store —
+        # same validation, org-prefixed key, canonical 400/413/503 guards.
+        handle = deps.uploads.store(ctx, request.files.get("file"))
+        bucket_key = handle["path"]
+
+    asset = deps.project_assets.add(
+        ctx,
+        asset_id=deps.uuid_factory(),
+        project_id=project.project_id,
+        asset_type=asset_type,
+        source_asset_id=source_asset_id,
+        bucket_key=bucket_key,
+        url=url,
+        title=title,
+        now=deps.clock.now(),
+    )
+    return jsonify(project_asset_view(asset)), HTTP_CREATED
+
+
+def _handle_project_asset_delete(
+    deps: AppDeps, project_id: str, asset_id: str
+) -> tuple[Response, int]:
+    """AF-4pz.5: soft-remove one attached asset (project resolves first)."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    deps.access_guard.authorize_create(ctx)
+    deps.project_assets.soft_delete(ctx, project.project_id, asset_id, now=deps.clock.now())
+    return Response(status=204), 204
+
+
+def _handle_project_reels(deps: AppDeps, project_id: str) -> tuple[Response, int]:
+    """AF-8bk: the project's durable reels (org-scoped; project resolves first).
+    ``download_url`` carries result_ref only when it is browser-deliverable
+    (T10 discipline — never a node-local path)."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    reels = deps.reel_jobs.list_for_project(ctx, project.project_id)
+    return jsonify({"reels": [
+        {
+            "job_id": str(ref.job_id),
+            "status": ref.status,
+            "execution_id": ref.execution_id,
+            "download_url": ref.result_ref if _is_browser_deliverable_url_str(ref.result_ref) else None,
+            "created_at": ref.created_at.isoformat() if getattr(ref, "created_at", None) else None,
+        }
+        for ref in reels
+    ]}), 200
+
+
+def _is_browser_deliverable_url_str(ref) -> bool:
+    return isinstance(ref, str) and (ref.startswith("https://") or ref.startswith("http://"))
+
+
+def _handle_project_asset_download(
+    deps: AppDeps, project_id: str, asset_id: str
+) -> tuple[Response, int]:
+    """AF-4pz.6: 302 to a fetchable URL for one attached asset (T10 discipline:
+    the browser only ever gets server-provided URLs). Project resolves first —
+    foreign/absent anything is a 404 before any presign."""
+    ctx = deps.identity.resolve(request)
+    project = deps.projects.get(ctx, project_id)
+    asset = deps.project_assets.get(ctx, project.project_id, asset_id)
+    if asset.url:
+        return redirect(asset.url), 302
+    bucket_key = asset.bucket_key
+    if bucket_key is None and asset.source_asset_id is not None:
+        # video reuse: the bytes live under the SOURCE asset's key.
+        bucket_key = deps.source_assets.get(ctx, asset.source_asset_id).bucket_key
+    if not bucket_key:
+        raise NotFound("project asset has no downloadable content")
+    return redirect(deps.uploads.presign(ctx, bucket_key)), 302
+
+
+def _handle_source_asset_list(deps: AppDeps) -> tuple[Response, int]:
+    # AF-02f: the caller's durable uploads. Org-scoping lives in the repo SQL
+    # (rows are filtered by the resolved ctx.org_id; soft-deleted excluded).
+    ctx = deps.identity.resolve(request)
+    assets = deps.source_assets.list_for_org(ctx)
+    return jsonify({"assets": [asset_view(a) for a in assets]}), 200
 
 
 def _handle_poll(deps: AppDeps, execution_id: str) -> tuple[Response, int]:
@@ -794,6 +1048,25 @@ def _api_router(deps: AppDeps, subpath: str, *, recreate_fn=None) -> tuple[Respo
     method = request.method
     if _is_upload(method, subpath):
         return _handle_upload(deps)
+    if _is_source_asset_list(method, subpath):
+        return _handle_source_asset_list(deps)
+    if _is_projects_collection(method, subpath):
+        return _handle_projects_collection(deps)
+    project_assets_id = _project_assets_target(method, subpath)
+    if project_assets_id is not None:
+        return _handle_project_assets(deps, project_assets_id)
+    download_ids = _project_asset_download_target(method, subpath)
+    if download_ids is not None:
+        return _handle_project_asset_download(deps, *download_ids)
+    project_reels_id = _project_reels_target(method, subpath)
+    if project_reels_id is not None:
+        return _handle_project_reels(deps, project_reels_id)
+    project_asset_ids = _project_asset_target(method, subpath)
+    if project_asset_ids is not None:
+        return _handle_project_asset_delete(deps, *project_asset_ids)
+    project_id = _project_target(method, subpath)
+    if project_id is not None:
+        return _handle_project(deps, project_id)
     if _is_carousel_create(method, subpath):
         return _handle_carousel_create(deps)
     if _is_research_run(method, subpath):
@@ -961,6 +1234,18 @@ def create_app(
         except HttpError:
             return redirect("/login")
         return send_from_directory(HERE, "index.html")
+
+    @app.get("/projects")
+    @auth(session_required=False)
+    def projects_page():
+        # AF-4pz.6: same auth-or-login gate as the index page.
+        try:
+            deps.identity.resolve(request)
+        except SchemaUnavailable:
+            return jsonify({"error": "user-data schema unavailable"}), 503
+        except HttpError:
+            return redirect("/login")
+        return send_from_directory(HERE, "projects.html")
 
     @app.get("/carousel_ui_config.json")
     @auth(session_required=False)

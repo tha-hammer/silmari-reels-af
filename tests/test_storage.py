@@ -117,6 +117,45 @@ def _seed_a1_result(tmp_path):
     return result, {"composite": composite, "words": words, "hook": hook}
 
 
+def _seed_multi_clip_a1_result(tmp_path):
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    composite1 = tmp_path / "composite.ts.md"
+    clip2_dir = tmp_path / "clips" / "clip-002"
+    composite2 = clip2_dir / "composite.ts.md"
+    words = tmp_path / "transcript.words.json"
+    hook = tmp_path / "hook-plan.json"
+    clip2_dir.mkdir(parents=True)
+    composite1.write_text("00:00:04.120  They don't reason.\n", encoding="utf-8")
+    composite2.write_text("00:01:12.300  So the fix is a tighter loop.\n", encoding="utf-8")
+    words.write_text('{"schema_version":"1","words":[]}', encoding="utf-8")
+    hook.write_text(
+        json.dumps(
+            {
+                "schema_version": "1",
+                "clips": [
+                    {
+                        "idx": 1,
+                        "composite_ref": str(composite1),
+                        "idempotency_key": "immutable-key-1",
+                    },
+                    {
+                        "idx": 2,
+                        "composite_ref": str(composite2),
+                        "idempotency_key": "immutable-key-2",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "composite_ref": str(composite1),
+        "words_ref": str(words),
+        "hook_ref": str(hook),
+        "clip_count": 2,
+    }, {"composite1": composite1, "composite2": composite2, "words": words, "hook": hook}
+
+
 def _assert_hosted(ref: str) -> None:
     parsed = urlparse(ref)
     assert parsed.scheme in {"http", "https"}
@@ -230,6 +269,48 @@ def test_publish_a1_artifacts_uploads_core_with_fixed_keys_and_rewrites_hook(
     assert out["hook_ref"] == (
         f"https://s3.example/{BUCKET}/plans/abc123/hook-plan.json?X-Amz-Expires=86400"
     )
+
+
+def test_publish_a1_artifacts_uploads_and_rewrites_multi_clip_composites(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("REEL_BUCKET_NAME", BUCKET)
+    result, paths = _seed_multi_clip_a1_result(tmp_path)
+    s3 = FakeA1S3()
+
+    out = storage.publish_a1_artifacts(result, run_id="abc123", client_factory=lambda: s3)
+
+    assert [put["Key"] for put in s3.puts] == [
+        "plans/abc123/composite.ts.md",
+        "plans/abc123/clips/clip-002/composite.ts.md",
+        "plans/abc123/transcript.words.json",
+        "plans/abc123/hook-plan.json",
+    ]
+    assert s3.bodies_by_key["plans/abc123/composite.ts.md"] == paths["composite1"].read_bytes()
+    assert (
+        s3.bodies_by_key["plans/abc123/clips/clip-002/composite.ts.md"]
+        == paths["composite2"].read_bytes()
+    )
+    assert out["clip_count"] == 2
+    assert out["composite_ref"] == (
+        f"https://s3.example/{BUCKET}/plans/abc123/composite.ts.md?X-Amz-Expires=86400"
+    )
+    assert _assert_hosted(out["words_ref"]) is None
+    assert _assert_hosted(out["hook_ref"]) is None
+
+    uploaded_hook = json.loads(s3.bodies_by_key["plans/abc123/hook-plan.json"].decode())
+    clips = uploaded_hook["clips"]
+    assert [clip["idempotency_key"] for clip in clips] == [
+        "immutable-key-1",
+        "immutable-key-2",
+    ]
+    assert [clip["composite_ref"] for clip in clips] == [
+        out["composite_ref"],
+        f"https://s3.example/{BUCKET}/plans/abc123/clips/clip-002/composite.ts.md?X-Amz-Expires=86400",
+    ]
+    assert clips[0]["composite_ref"] != clips[1]["composite_ref"]
+    assert str(tmp_path) not in json.dumps(out)
+    assert str(tmp_path) not in json.dumps(uploaded_hook)
 
 
 def test_publish_a1_artifacts_no_bucket_preserves_local_refs_without_client(

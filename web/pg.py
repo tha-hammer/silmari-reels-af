@@ -54,12 +54,33 @@ FEATURE_SCHEMA: dict[str, set[str]] = {
         "id", "org_id", "created_by", "client_request_id", "title", "source_url", "topic",
         "source_research_run_id", "params", "status", "result_ref",
         "execution_id", "created_at", "completed_at",
+        # AF-8bk: project membership (migration 115) — now written on submit
+        # and read by list_for_project.
+        "project_id",
     },
     "carousel": {
         "id", "org_id", "created_by", "client_request_id", "status",
         "source_research_run_id", "hq_recreate_count", "execution_id", "created_at",
     },
     "carousel_slide": {"carousel_id", "org_id", "idx", "image_ref", "prompt", "status"},
+    # AF-02f: durable upload records (root migration 114). Org-scoped +
+    # owner-stamped like reel_job; no created_by FK yet (see migration 113).
+    "source_asset": {
+        "id", "org_id", "created_by", "bucket_key", "original_filename",
+        "content_type", "size_bytes", "checksum", "status", "created_at",
+        "deleted_at",
+    },
+    # AF-4pz.3: Projects group media + reels (root migration 115). Schema-only
+    # bead — repos land with the CRUD beads (AF-4pz.4/.5). reel_job.project_id
+    # is intentionally NOT in reel_job's required set until a repo uses it.
+    "project": {
+        "id", "org_id", "created_by", "name", "description",
+        "created_at", "updated_at", "deleted_at",
+    },
+    "project_asset": {
+        "id", "project_id", "org_id", "asset_type", "source_asset_id",
+        "bucket_key", "url", "title", "created_at", "deleted_at",
+    },
     # INT-02 consumer-owned tables (root-applied migration; asserted here, fail-closed 503
     # until applied — consumes, never vendors). ``processed_messages`` PK = CloudEvents id
     # (the idempotency key); ``event_cursor`` PK = consumer (reel-af's durable cursor).
@@ -220,6 +241,287 @@ class PgMembershipReader(_SharedSchema):
         return rows[0][0] if len(rows) == 1 else None
 
 
+class PgSourceAssetRepo(_SharedSchema):
+    """Owns ``deepresearch.source_asset`` writes/reads, always scoped by ``org_id``
+    (AF-02f). Live SQL is integration-tested; fail-closed readiness is unit-tested.
+    """
+
+    def create(
+        self, ctx, *, asset_id, bucket_key, original_filename, content_type,
+        size_bytes, checksum, now,
+    ):  # pragma: no cover - integration
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.source_asset "
+                    "(id, org_id, created_by, bucket_key, original_filename, "
+                    " content_type, size_bytes, checksum, status, created_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,'stored',%s)",
+                    (
+                        asset_id, ctx.org_id, ctx.user_id, bucket_key,
+                        original_filename, content_type, size_bytes, checksum, now,
+                    ),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return SourceAssetRef(
+            asset_id=asset_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            bucket_key=bucket_key, original_filename=original_filename,
+            content_type=content_type, size_bytes=size_bytes, checksum=checksum,
+            status="stored", created_at=now,
+        )
+
+    def list_for_org(self, ctx):  # pragma: no cover - integration
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, bucket_key, original_filename, "
+                    "content_type, size_bytes, checksum, status, created_at "
+                    "from deepresearch.source_asset "
+                    "where org_id = %s and deleted_at is null "
+                    "order by created_at desc",
+                    (ctx.org_id,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            SourceAssetRef(
+                asset_id=row[0], org_id=row[1], created_by=row[2], bucket_key=row[3],
+                original_filename=row[4], content_type=row[5], size_bytes=row[6],
+                checksum=row[7], status=row[8], created_at=row[9],
+            )
+            for row in rows
+        ]
+
+    def get(self, ctx, asset_id):  # pragma: no cover - integration
+        """AF-4pz.2: org-scoped read-by-id for asset-mode submits. Foreign,
+        absent, or soft-deleted assets are concealed as 404."""
+        from source_assets import SourceAssetRef
+
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, bucket_key, original_filename, "
+                    "content_type, size_bytes, checksum, status, created_at "
+                    "from deepresearch.source_asset "
+                    "where id = %s and org_id = %s and deleted_at is null",
+                    (asset_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("source asset not found", code="source_asset_not_found")
+        return SourceAssetRef(
+            asset_id=row[0], org_id=row[1], created_by=row[2], bucket_key=row[3],
+            original_filename=row[4], content_type=row[5], size_bytes=row[6],
+            checksum=row[7], status=row[8], created_at=row[9],
+        )
+
+
+class PgProjectRepo(_SharedSchema):
+    """Owns ``deepresearch.project`` writes/reads, always org-scoped (AF-4pz.4)."""
+
+    _COLUMNS = "id, org_id, created_by, name, description, created_at, updated_at"
+
+    def _ref(self, row):
+        from projects import ProjectRef
+
+        return ProjectRef(
+            project_id=row[0], org_id=row[1], created_by=row[2], name=row[3],
+            description=row[4], created_at=row[5], updated_at=row[6],
+        )
+
+    def create(self, ctx, *, project_id, name, description, now):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.project "
+                    "(id, org_id, created_by, name, description, created_at, updated_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s)",
+                    (project_id, ctx.org_id, ctx.user_id, name, description, now, now),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        from projects import ProjectRef
+
+        return ProjectRef(
+            project_id=project_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            name=name, description=description, created_at=now, updated_at=now,
+        )
+
+    def list_for_org(self, ctx):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"select {self._COLUMNS} from deepresearch.project "
+                    "where org_id = %s and deleted_at is null "
+                    "order by created_at desc",
+                    (ctx.org_id,),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [self._ref(row) for row in rows]
+
+    def get(self, ctx, project_id):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"select {self._COLUMNS} from deepresearch.project "
+                    "where id = %s and org_id = %s and deleted_at is null",
+                    (project_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("project not found", code="project_not_found")
+        return self._ref(row)
+
+    def update(self, ctx, project_id, *, name=None, description=None, now=None):  # pragma: no cover - integration
+        current = self.get(ctx, project_id)
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update deepresearch.project set name = %s, description = %s, "
+                    "updated_at = %s where id = %s and org_id = %s and deleted_at is null",
+                    (
+                        name if name is not None else current.name,
+                        description if description is not None else current.description,
+                        now, project_id, ctx.org_id,
+                    ),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        return self.get(ctx, project_id)
+
+    def soft_delete(self, ctx, project_id, *, now=None):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update deepresearch.project set deleted_at = %s "
+                    "where id = %s and org_id = %s and deleted_at is null returning id",
+                    (now, project_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("project not found", code="project_not_found")
+
+
+class PgProjectAssetRepo(_SharedSchema):
+    """Owns ``deepresearch.project_asset`` writes/reads, org+project scoped
+    (AF-4pz.5). The exactly-one-ref invariant is enforced by migration 115's
+    check constraints; the route validates first for typed 400s."""
+
+    _COLUMNS = (
+        "id, project_id, org_id, asset_type, source_asset_id, bucket_key, url, "
+        "title, created_at"
+    )
+
+    def _ref(self, row):
+        from projects import ProjectAssetRef
+
+        return ProjectAssetRef(
+            asset_id=row[0], project_id=row[1], org_id=row[2], asset_type=row[3],
+            source_asset_id=row[4], bucket_key=row[5], url=row[6], title=row[7],
+            created_at=row[8],
+        )
+
+    def add(self, ctx, *, asset_id, project_id, asset_type, source_asset_id,
+            bucket_key, url, title, now):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "insert into deepresearch.project_asset "
+                    "(id, project_id, org_id, asset_type, source_asset_id, "
+                    " bucket_key, url, title, created_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                    (asset_id, project_id, ctx.org_id, asset_type,
+                     source_asset_id, bucket_key, url, title, now),
+                )
+                conn.commit()
+        finally:
+            conn.close()
+        from projects import ProjectAssetRef
+
+        return ProjectAssetRef(
+            asset_id=asset_id, project_id=project_id, org_id=ctx.org_id,
+            asset_type=asset_type, source_asset_id=source_asset_id,
+            bucket_key=bucket_key, url=url, title=title, created_at=now,
+        )
+
+    def list_for_project(self, ctx, project_id):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"select {self._COLUMNS} from deepresearch.project_asset "
+                    "where project_id = %s and org_id = %s and deleted_at is null "
+                    "order by created_at desc",
+                    (project_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [self._ref(row) for row in rows]
+
+    def get(self, ctx, project_id, asset_id):  # pragma: no cover - integration
+        """AF-4pz.6: org+project-scoped read-by-id for the download route."""
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"select {self._COLUMNS} from deepresearch.project_asset "
+                    "where id = %s and project_id = %s and org_id = %s "
+                    "and deleted_at is null",
+                    (asset_id, project_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("project asset not found", code="project_asset_not_found")
+        return self._ref(row)
+
+    def soft_delete(self, ctx, project_id, asset_id, *, now=None):  # pragma: no cover - integration
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "update deepresearch.project_asset set deleted_at = %s "
+                    "where id = %s and project_id = %s and org_id = %s "
+                    "and deleted_at is null returning id",
+                    (now, asset_id, project_id, ctx.org_id),
+                )
+                row = cur.fetchone()
+                conn.commit()
+        finally:
+            conn.close()
+        if row is None:
+            raise NotFound("project asset not found", code="project_asset_not_found")
+
+
 class PgReelJobRepo(_SharedSchema):
     """Owns ``deepresearch.reel_job`` writes/reads, always scoped by ``org_id``.
 
@@ -240,14 +542,15 @@ class PgReelJobRepo(_SharedSchema):
                 cur.execute(
                     "insert into deepresearch.reel_job "
                     "(id, org_id, created_by, client_request_id, title, source_url, topic, "
-                    " source_research_run_id, params, status, created_at) "
-                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s) "
+                    " source_research_run_id, project_id, params, status, created_at) "
+                    "values (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s) "
                     "on conflict (org_id, created_by, client_request_id) do nothing "
                     "returning id",
                     (
                         job_id, ctx.org_id, ctx.user_id, client_request_id, submission.title,
                         submission.source_url, submission.topic,
                         submission.source_research_run_id,
+                        getattr(submission, "project_id", None),
                         json.dumps(submission.params), now,
                     ),
                 )
@@ -284,6 +587,31 @@ class PgReelJobRepo(_SharedSchema):
             (completed_at, job_id, ctx.org_id),
         )
         return ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id, status="failed")
+
+    def list_for_project(self, ctx, project_id):  # pragma: no cover - integration
+        """AF-8bk: a project's reels, org-scoped, newest first."""
+        conn = _connect(_database_url())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "select id, org_id, created_by, status, execution_id, result_ref, "
+                    "completed_at, source_research_run_id, created_at "
+                    "from deepresearch.reel_job "
+                    "where project_id = %s and org_id = %s "
+                    "order by created_at desc",
+                    (project_id, ctx.org_id),
+                )
+                rows = cur.fetchall()
+        finally:
+            conn.close()
+        return [
+            ReelJobRef(
+                job_id=row[0], org_id=row[1], created_by=row[2], status=row[3],
+                execution_id=row[4], result_ref=row[5], completed_at=row[6],
+                source_research_run_id=row[7], created_at=row[8],
+            )
+            for row in rows
+        ]
 
     def get_by_execution(self, ctx, execution_id):  # pragma: no cover - integration
         conn = _connect(_database_url())

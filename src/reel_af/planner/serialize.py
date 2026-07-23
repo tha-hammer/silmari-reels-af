@@ -46,6 +46,28 @@ class ResolvedBeat:
     fallback_segment_range: tuple[int, int] | None = None
 
 
+@dataclass(frozen=True, kw_only=True)
+class HookClipInput:
+    idx: int
+    span: ResolvedBeat | Sequence[ResolvedBeat]
+    composite_ref: str
+    hook: Any | None = None
+    cut_ins: Sequence[Any] = ()
+    title: str | None = None
+    idea: str | None = None
+
+
+@dataclass(frozen=True)
+class _NormalizedHookClip:
+    idx: int
+    hook: Any
+    span: ResolvedBeat
+    cut_ins: Sequence[Any]
+    composite_ref: str
+    title: str | None
+    idea: str | None
+
+
 @dataclass(frozen=True)
 class PlannedCutIn:
     """A BAML relative cut-in paired with its resolved containing beat."""
@@ -170,39 +192,32 @@ def serialize_composite(blueprint: Any, resolved: Sequence[ResolvedBeat]) -> str
 def build_hook_plan(
     source_url: str,
     hook: Any,
-    span: ResolvedBeat | Sequence[ResolvedBeat],
-    cut_ins: Sequence[Any],
-    composite_ref: str,
+    span: ResolvedBeat | Sequence[ResolvedBeat] | None = None,
+    cut_ins: Sequence[Any] | None = None,
+    composite_ref: str | None = None,
     source_id: str | None = None,
     model: str = DEFAULT_MODEL,
     duration_bounds_s: Mapping[str, float] | None = None,
     idx: int = 1,
     title: str | None = None,
     idea: str | None = None,
+    clips: Sequence[HookClipInput | Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build the hook-plan JSON consumed by `reel_dsl_hooks_to_reels`."""
 
-    span = _first_resolved_span(span)
-    if not composite_ref:
-        raise ValueError("composite_ref is required")
-    if not span.resolved or span.start_s is None or span.end_s is None:
-        raise ValueError(f"hook span is unresolved: {span.reason}")
-
     normalized_bounds = _duration_bounds(duration_bounds_s)
     source_id = source_id or _source_id_from_url(source_url)
-    hook_text = str(_get(hook, "span_quote", span.span_quote)).strip()
-    banner = str(_get(hook, "banner_line", hook_text)).strip()
-    clip_title = title or _slug_title(banner or hook_text)
-    clip_idea = idea or str(_get(hook, "idea", banner or hook_text)).strip()
-    cut_in_payloads = [_cut_in_payload(cut_in, span=span) for cut_in in cut_ins]
-    idempotency_key = _idempotency_key(
-        source_url=source_url,
-        source_id=source_id,
-        idx=idx,
-        start_s=span.start_s,
-        end_s=span.end_s,
+    normalized_clips = _normalize_hook_clips(
+        hook=hook,
+        span=span,
+        cut_ins=cut_ins,
         composite_ref=composite_ref,
+        idx=idx,
+        title=title,
+        idea=idea,
+        clips=clips,
     )
+    _validate_hook_clips(normalized_clips)
 
     return {
         "schema_version": "1",
@@ -212,20 +227,141 @@ def build_hook_plan(
         "model": model,
         "duration_bounds_s": normalized_bounds,
         "clips": [
-            {
-                "idx": idx,
-                "title": clip_title,
-                "idea": clip_idea,
-                "hook": banner or hook_text,
-                "start_s": span.start_s,
-                "end_s": span.end_s,
-                "excerpt": hook_text,
-                "composite_ref": composite_ref,
-                "target": HOOKS_TARGET,
-                "idempotency_key": idempotency_key,
-                "cut_ins": cut_in_payloads,
-            }
+            _clip_payload(
+                source_url=source_url,
+                source_id=source_id,
+                clip=clip,
+            )
+            for clip in normalized_clips
         ],
+    }
+
+
+def _normalize_hook_clips(
+    *,
+    hook: Any,
+    span: ResolvedBeat | Sequence[ResolvedBeat] | None,
+    cut_ins: Sequence[Any] | None,
+    composite_ref: str | None,
+    idx: int,
+    title: str | None,
+    idea: str | None,
+    clips: Sequence[HookClipInput | Mapping[str, Any]] | None,
+) -> list[_NormalizedHookClip]:
+    if clips is None:
+        if span is None:
+            raise ValueError("span is required")
+        return [
+            _NormalizedHookClip(
+                idx=idx,
+                hook=hook,
+                span=_first_resolved_span(span),
+                cut_ins=tuple(cut_ins or ()),
+                composite_ref=_normalize_composite_ref(composite_ref),
+                title=title,
+                idea=idea,
+            )
+        ]
+
+    if not clips:
+        raise ValueError("at least one clip is required")
+
+    normalized: list[_NormalizedHookClip] = []
+    for position, clip in enumerate(clips, start=1):
+        clip_span = _get(clip, "span", None)
+        if clip_span is None:
+            raise ValueError(f"clip {position} span is required")
+        normalized.append(
+            _NormalizedHookClip(
+                idx=_get(clip, "idx", position),
+                hook=_get(clip, "hook", None) or hook,
+                span=_first_resolved_span(clip_span),
+                cut_ins=tuple(_get(clip, "cut_ins", ()) or ()),
+                composite_ref=_normalize_composite_ref(_get(clip, "composite_ref", None)),
+                title=_get(clip, "title", None),
+                idea=_get(clip, "idea", None),
+            )
+        )
+    return normalized
+
+
+def _normalize_composite_ref(composite_ref: Any) -> str:
+    if composite_ref is None:
+        return ""
+    return str(composite_ref).strip()
+
+
+def _validate_hook_clips(clips: Sequence[_NormalizedHookClip]) -> None:
+    if not clips:
+        raise ValueError("at least one clip is required")
+
+    seen: set[int] = set()
+    for clip in clips:
+        if isinstance(clip.idx, bool) or not isinstance(clip.idx, int):
+            raise ValueError("clip idx must be an integer")
+        if clip.idx < 1:
+            raise ValueError("clip idx must be >= 1")
+        if clip.idx in seen:
+            raise ValueError(f"duplicate clip idx: {clip.idx}")
+        seen.add(clip.idx)
+
+        if not clip.composite_ref:
+            raise ValueError(f"clip {clip.idx} composite_ref is required")
+        if not clip.span.resolved or clip.span.start_s is None or clip.span.end_s is None:
+            raise ValueError(f"clip {clip.idx} span is unresolved: {clip.span.reason}")
+        if clip.span.end_s <= clip.span.start_s:
+            raise ValueError(f"clip {clip.idx} span end_s must be greater than start_s")
+
+    expected = set(range(1, len(clips) + 1))
+    if seen != expected:
+        raise ValueError("clip idx values must be sequential starting at 1")
+
+    ordered_by_span = sorted(
+        clips,
+        key=lambda clip: (
+            float(clip.span.start_s),
+            float(clip.span.end_s),
+            clip.idx,
+        ),
+    )
+    for previous, current in zip(ordered_by_span, ordered_by_span[1:], strict=False):
+        if float(previous.span.end_s) > float(current.span.start_s):
+            raise ValueError(
+                f"clip source spans overlap: {previous.idx} and {current.idx}"
+            )
+
+
+def _clip_payload(
+    *,
+    source_url: str,
+    source_id: str,
+    clip: _NormalizedHookClip,
+) -> dict[str, Any]:
+    hook_text = str(_get(clip.hook, "span_quote", clip.span.span_quote)).strip()
+    banner = str(_get(clip.hook, "banner_line", hook_text)).strip()
+    clip_title = clip.title or _slug_title(banner or hook_text)
+    clip_idea = clip.idea or str(_get(clip.hook, "idea", banner or hook_text)).strip()
+    cut_in_payloads = [_cut_in_payload(cut_in, span=clip.span) for cut_in in clip.cut_ins]
+    idempotency_key = _idempotency_key(
+        source_url=source_url,
+        source_id=source_id,
+        idx=clip.idx,
+        start_s=clip.span.start_s,
+        end_s=clip.span.end_s,
+        composite_ref=clip.composite_ref,
+    )
+    return {
+        "idx": clip.idx,
+        "title": clip_title,
+        "idea": clip_idea,
+        "hook": banner or hook_text,
+        "start_s": clip.span.start_s,
+        "end_s": clip.span.end_s,
+        "excerpt": hook_text,
+        "composite_ref": clip.composite_ref,
+        "target": HOOKS_TARGET,
+        "idempotency_key": idempotency_key,
+        "cut_ins": cut_in_payloads,
     }
 
 
@@ -383,6 +519,7 @@ __all__ = [
     "DEFAULT_DURATION_BOUNDS_S",
     "DEFAULT_MODEL",
     "HOOKS_TARGET",
+    "HookClipInput",
     "PlannedCutIn",
     "ResolvedBeat",
     "build_hook_plan",

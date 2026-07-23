@@ -304,6 +304,22 @@ class Transition(BaseModel):
         return self
 
 
+class AudioBed(BaseModel):
+    """AF-3it (B3): an optional background audio layer under the reel.
+
+    Additive DSL surface only — rendering (amix in the stitcher) is B4/AF-w44.
+    ``track_ref`` is an artifact reference (a1:// or hosted URL), never a local
+    path decision made here.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    track_ref: str = Field(min_length=1)
+    gain_db: float = 0.0
+    start_offset_s: float = Field(default=0.0, ge=0)
+    ducking: bool = False
+
+
 def _segment_duration(seg: SourceSegment | BlackSegment) -> float:
     if isinstance(seg, BlackSegment) or (hasattr(seg, "kind") and seg.kind == "black"):
         return seg.duration_s
@@ -319,6 +335,10 @@ class FootageReel(BaseModel):
     segments: list[Segment] = Field(min_length=1, max_length=MAX_SEGMENTS)
     transitions: list[Transition] = Field(default_factory=list)
     duration_s: float = Field(gt=0, le=MAX_REEL_DURATION_S)
+    # AF-3it (B3): optional, additive — every pre-existing reel/artifact dump
+    # stays valid. Renderability postconditions live in validate_renderable.
+    audio_bed: AudioBed | None = None
+    beat_grid: list[float] | None = None
 
     @model_validator(mode="after")
     def _validate_reel(self) -> FootageReel:
@@ -581,6 +601,33 @@ def validate_renderable(reel: FootageReel | Any) -> None:
             f"reel duration {duration_s} exceeds maximum {MAX_REEL_DURATION_S}"
         )
 
+    # AF-3it (B3) — audio-bed postconditions (both fields are optional; absent
+    # means every pre-existing reel passes untouched).
+    audio_bed = getattr(reel, "audio_bed", None)
+    if audio_bed is not None:
+        offset = _require_finite(
+            getattr(audio_bed, "start_offset_s", 0.0), "audio bed start offset"
+        )
+        if not (0 <= offset < duration_s):
+            raise RenderabilityError(
+                f"audio bed start_offset_s {offset} must lie within the reel "
+                f"[0, {duration_s})"
+            )
+
+    beat_grid = getattr(reel, "beat_grid", None)
+    if beat_grid:
+        previous: float | None = None
+        for index, beat in enumerate(beat_grid):
+            value = _require_finite(beat, f"beat_grid[{index}]")
+            if value < 0:
+                raise RenderabilityError(f"beat_grid[{index}] must be >= 0, got {value}")
+            if previous is not None and value <= previous:
+                raise RenderabilityError(
+                    f"beat_grid must be strictly increasing: "
+                    f"beat_grid[{index}]={value} after {previous}"
+                )
+            previous = value
+
 
 def _rebuild_forward_refs() -> None:
     from reel_af.dsl.ast import Marker as _Marker
@@ -595,6 +642,7 @@ def _rebuild_forward_refs() -> None:
 __all__ = [
     "AlignedSpan",
     "AlignResult",
+    "AudioBed",
     "AUDIO_SAMPLE_RATE",
     "BlackSegment",
     "CANVAS_HEIGHT",

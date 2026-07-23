@@ -47,6 +47,16 @@ create table deepresearch.research_run (
     status text not null default 'queued',
     created_at timestamptz not null default now()
 );
+create table deepresearch.project (
+    id uuid primary key,
+    org_id uuid not null references deepresearch.organization(id),
+    created_by uuid not null,
+    name text not null,
+    description text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now(),
+    deleted_at timestamptz
+);
 create table deepresearch.reel_job (
     id uuid primary key,
     org_id uuid not null references deepresearch.organization(id),
@@ -56,6 +66,7 @@ create table deepresearch.reel_job (
     source_url text,
     topic text,
     source_research_run_id uuid references deepresearch.research_run(id) on delete set null,
+    project_id uuid references deepresearch.project(id) on delete set null,
     params jsonb not null default '{}',
     status text not null default 'queued',
     result_ref text,

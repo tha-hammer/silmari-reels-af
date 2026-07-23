@@ -79,6 +79,49 @@ def test_clean_cta_passes_r11():
     assert not any(d.rule == "R11" for d in diags)
 
 
+def test_joined_hook_over_window_is_error():
+    """AF-10e: a hook the planner JOINED past its own candidate span must stay
+    within the R1 window — over it, the join is an error (repairable)."""
+    bp = _blueprint(
+        beats=[
+            {
+                "role": "hook",
+                "span_quote": "alpha beta gamma",
+                "candidate_id": "c001",
+                "occurrence_index": 0,
+            },
+        ]
+    )
+    resolved = [{"duration_s": 4.12, "word_range": (0, 9)}]
+    candidates = [{"candidate_id": "c001", "occurrence_index": 0, "word_range": (0, 5)}]
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg(), resolved=resolved, candidates=candidates)
+
+    assert any(d.rule == "R1" and d.severity == "error" for d in diags)
+
+
+def test_unjoined_hook_over_window_stays_warning():
+    """AF-10e: a natural single-span hook over the window keeps today's warning
+    (the join, not the source material, is the planner's own choice)."""
+    bp = _blueprint(
+        beats=[
+            {
+                "role": "hook",
+                "span_quote": "alpha beta gamma",
+                "candidate_id": "c001",
+                "occurrence_index": 0,
+            },
+        ]
+    )
+    resolved = [{"duration_s": 4.12, "word_range": (0, 5)}]
+    candidates = [{"candidate_id": "c001", "occurrence_index": 0, "word_range": (0, 5)}]
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg(), resolved=resolved, candidates=candidates)
+
+    assert any(d.rule == "R1" and d.severity == "warning" for d in diags)
+    assert not any(d.rule == "R1" and d.severity == "error" for d in diags)
+
+
 def test_hook_window_over_threshold_warns():
     bp = _blueprint(
         beats=[
@@ -163,7 +206,9 @@ def test_internal_dead_air_warns():
     assert any(d.rule == "R4" and d.severity == "warning" for d in diags)
 
 
-def test_final_not_echoing_hook_warns():
+def test_final_not_echoing_hook_is_error():
+    """AF-9zs: the R8 loop tie-back is MANDATORY — a missing echo is an error
+    (repairable in the pipeline), never a shippable warning."""
     bp = _blueprint(
         hook={"banner_line": "clean", "span_quote": "alpha beta"},
         loop={"final_span_quote": "zeta omega"},
@@ -171,7 +216,21 @@ def test_final_not_echoing_hook_warns():
 
     diags = lint_blueprint(bp, words=None, cfg=_cfg())
 
-    assert any(d.rule == "R8" and d.severity == "warning" for d in diags)
+    assert any(d.rule == "R8" and d.severity == "error" for d in diags)
+
+
+def test_final_not_echoing_hook_is_error_for_problem_agitate_solve():
+    """AF-9zs: enforcement is strategy-independent — the eval's failing case was
+    a ProblemAgitateSolve run ending without echoing the hook."""
+    bp = _blueprint(
+        template_="ProblemAgitateSolve",
+        hook={"banner_line": "clean", "span_quote": "alpha beta"},
+        loop={"final_span_quote": "zeta omega"},
+    )
+
+    diags = lint_blueprint(bp, words=None, cfg=_cfg())
+
+    assert any(d.rule == "R8" and d.severity == "error" for d in diags)
 
 
 def test_non_decreasing_back_half_warns():

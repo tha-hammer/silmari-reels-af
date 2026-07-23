@@ -23,6 +23,7 @@ if WEB not in sys.path:
 from deps import (  # noqa: E402
     AppDeps,
     AuthContext,
+    BadRequest,
     LocalRun,
     NotFound,
     RoleAccessGuard,
@@ -91,6 +92,7 @@ class FakeReelJobRepo:
         self._runs_by_exec: dict = {}    # execution_id -> research_run_id
         self._jobs_by_exec: dict = {}    # execution_id -> ReelJobRef
         self._jobs_by_id: dict = {}      # INT-04 lineage: job_id -> ReelJobRef (read-by-id + reverse)
+        self._by_project: dict = {}      # AF-8bk: (org_id, project_id) -> [job_id]
 
     def ensure_ready(self) -> None:
         pass
@@ -108,12 +110,22 @@ class FakeReelJobRepo:
         # Thread provenance from the submission (Plan 4) so read-back surfaces it.
         srr = getattr(submission, "source_research_run_id", None)
         ref = ReelJobRef(job_id=job_id, org_id=ctx.org_id, created_by=ctx.user_id,
-                         status="queued", source_research_run_id=srr)
+                         status="queued", source_research_run_id=srr, created_at=now)
         self._by_key[key] = ref
+        # AF-8bk: project-scoped read-back.
+        project_id = getattr(submission, "project_id", None)
+        if project_id is not None:
+            self._by_project.setdefault((ctx.org_id, project_id), []).append(job_id)
         return ref
 
     def set_existing(self, key, ref: ReelJobRef) -> None:
         self._by_key[key] = ref
+
+    def list_for_project(self, ctx, project_id):
+        """AF-8bk: a project's reels (org-scoped), current refs, newest first."""
+        job_ids = self._by_project.get((ctx.org_id, project_id), [])
+        current = {ref.job_id: ref for ref in self._by_key.values()}
+        return [current[j] for j in reversed(job_ids) if j in current]
 
     def attach_execution_id(self, ctx, job_id, execution_id) -> ReelJobRef:
         if self._attach_error is not None:
@@ -236,6 +248,7 @@ class FakeUploadStore:
         self._presign_error = presign_error
         self.calls = 0
         self.presign_calls: list = []
+        self.stored_bytes: list = []
 
     def ensure_ready(self) -> None:
         pass
@@ -244,6 +257,12 @@ class FakeUploadStore:
         self.calls += 1
         if self._error is not None:
             raise self._error
+        # Contract-faithful to LocalUploadStore/BucketUploadStore: no file → the
+        # canonical 400; the stored bytes are recorded so AF-02f can prove the
+        # checksum pass left the stream intact.
+        if file_storage is None or not getattr(file_storage, "filename", ""):
+            raise BadRequest("no file in multipart field 'file'", code="no_file")
+        self.stored_bytes.append(file_storage.stream.read())
         return self._handle
 
     def presign(self, ctx, handle: str) -> str:
@@ -251,6 +270,168 @@ class FakeUploadStore:
         if self._presign_error is not None:
             raise self._presign_error
         return self._presigned
+
+
+class FakeSourceAssetRepo:
+    """AF-02f: captures created source-asset records; serves a canned list."""
+
+    def __init__(self, assets: list | None = None, create_error: Exception | None = None):
+        self._assets = assets or []
+        self._create_error = create_error
+        self.created: list = []
+        self.list_calls: list = []
+        self.get_calls: list = []
+        self.deleted: set = set()   # asset ids modeled as soft-deleted (AF-4pz.2)
+
+    def create(self, ctx, *, asset_id, bucket_key, original_filename,
+               content_type, size_bytes, checksum, now):
+        if self._create_error is not None:
+            raise self._create_error
+        from source_assets import SourceAssetRef
+
+        self.created.append({
+            "ctx": ctx, "asset_id": asset_id, "bucket_key": bucket_key,
+            "original_filename": original_filename, "content_type": content_type,
+            "size_bytes": size_bytes, "checksum": checksum, "now": now,
+        })
+        return SourceAssetRef(
+            asset_id=asset_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            bucket_key=bucket_key, original_filename=original_filename,
+            content_type=content_type, size_bytes=size_bytes, checksum=checksum,
+            status="stored", created_at=now,
+        )
+
+    def list_for_org(self, ctx):
+        self.list_calls.append(ctx)
+        return list(self._assets)
+
+    def get(self, ctx, asset_id):
+        """Org-scoped read-by-id; foreign/absent/soft-deleted concealed as 404
+        (mirrors PgSourceAssetRepo.get)."""
+        self.get_calls.append((ctx, asset_id))
+        for asset in self._assets:
+            if (
+                str(asset.asset_id) == str(asset_id)
+                and asset.org_id == ctx.org_id
+                and str(asset.asset_id) not in self.deleted
+            ):
+                return asset
+        raise NotFound("source asset not found", code="source_asset_not_found")
+
+
+class FakeProjectRepo:
+    """AF-4pz.4: org-scoped project CRUD fake (mirrors PgProjectRepo)."""
+
+    def __init__(self, projects: list | None = None):
+        self._projects = list(projects or [])
+        self.created: list = []
+        self.list_calls: list = []
+        self.updated: list = []
+        self.soft_deleted: list = []
+
+    def create(self, ctx, *, project_id, name, description, now):
+        from projects import ProjectRef
+
+        self.created.append({
+            "ctx": ctx, "project_id": project_id, "name": name,
+            "description": description, "now": now,
+        })
+        ref = ProjectRef(
+            project_id=project_id, org_id=ctx.org_id, created_by=ctx.user_id,
+            name=name, description=description, created_at=now, updated_at=now,
+        )
+        self._projects.append(ref)
+        return ref
+
+    def list_for_org(self, ctx):
+        self.list_calls.append(ctx)
+        return [
+            p for p in self._projects
+            if p.org_id == ctx.org_id and p.project_id not in self.soft_deleted
+        ]
+
+    def get(self, ctx, project_id):
+        for project in self._projects:
+            if (
+                str(project.project_id) == str(project_id)
+                and project.org_id == ctx.org_id
+                and project.project_id not in self.soft_deleted
+            ):
+                return project
+        raise NotFound("project not found", code="project_not_found")
+
+    def update(self, ctx, project_id, *, name=None, description=None, now=None):
+        project = self.get(ctx, project_id)
+        self.updated.append((ctx, project.project_id, name, description))
+        updated = type(project)(
+            project_id=project.project_id, org_id=project.org_id,
+            created_by=project.created_by,
+            name=name if name is not None else project.name,
+            description=description if description is not None else project.description,
+            created_at=project.created_at, updated_at=now,
+        )
+        self._projects = [
+            updated if p.project_id == project.project_id else p for p in self._projects
+        ]
+        return updated
+
+    def soft_delete(self, ctx, project_id, *, now=None):
+        project = self.get(ctx, project_id)
+        self.soft_deleted.append(project.project_id)
+
+
+class FakeProjectAssetRepo:
+    """AF-4pz.5: project asset fake (mirrors PgProjectAssetRepo)."""
+
+    def __init__(self):
+        self._assets: list = []
+        self.added: list = []
+        self.list_calls: list = []
+        self.soft_deleted: list = []
+
+    def add(self, ctx, *, asset_id, project_id, asset_type, source_asset_id,
+            bucket_key, url, title, now):
+        from projects import ProjectAssetRef
+
+        self.added.append({
+            "ctx": ctx, "asset_id": asset_id, "project_id": project_id,
+            "asset_type": asset_type, "source_asset_id": source_asset_id,
+            "bucket_key": bucket_key, "url": url, "title": title, "now": now,
+        })
+        ref = ProjectAssetRef(
+            asset_id=asset_id, project_id=project_id, org_id=ctx.org_id,
+            asset_type=asset_type, source_asset_id=source_asset_id,
+            bucket_key=bucket_key, url=url, title=title, created_at=now,
+        )
+        self._assets.append(ref)
+        return ref
+
+    def list_for_project(self, ctx, project_id):
+        self.list_calls.append((ctx, project_id))
+        return [
+            a for a in self._assets
+            if str(a.project_id) == str(project_id)
+            and a.org_id == ctx.org_id
+            and a.asset_id not in self.soft_deleted
+        ]
+
+    def get(self, ctx, project_id, asset_id):
+        for asset in self.list_for_project(ctx, project_id):
+            if str(asset.asset_id) == str(asset_id):
+                return asset
+        raise NotFound("project asset not found", code="project_asset_not_found")
+
+    def soft_delete(self, ctx, project_id, asset_id, *, now=None):
+        for asset in self._assets:
+            if (
+                str(asset.asset_id) == str(asset_id)
+                and str(asset.project_id) == str(project_id)
+                and asset.org_id == ctx.org_id
+                and asset.asset_id not in self.soft_deleted
+            ):
+                self.soft_deleted.append(asset.asset_id)
+                return
+        raise NotFound("project asset not found", code="project_asset_not_found")
 
 
 class FakeStorage:
@@ -585,6 +766,9 @@ def make_deps(
     events: FakeEventReader | None = None,
     consumer_state: _ConsumerState | None = None,
     uuid_factory=None,
+    source_assets: FakeSourceAssetRepo | None = None,
+    projects: "FakeProjectRepo | None" = None,
+    project_assets: "FakeProjectAssetRepo | None" = None,
 ) -> AppDeps:
     # INT-02: the three consumer-store fakes share ONE state so the C5 effect is atomic.
     state = consumer_state or _ConsumerState()
@@ -605,6 +789,9 @@ def make_deps(
         clock=FixedClock(),
         uuid_factory=uuid_factory or (lambda: FIXED_JOB_ID),
         logger=logging.getLogger("test.reel_af_ui"),
+        source_assets=source_assets or FakeSourceAssetRepo(),
+        projects=projects or FakeProjectRepo(),
+        project_assets=project_assets or FakeProjectAssetRepo(),
     )
     # INT-04: the lineage read model is self-composed over the same org-scoped repos.
     from lineage import LineageView  # noqa: E402 - lazy: avoids import cycle at module load
